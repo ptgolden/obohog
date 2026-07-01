@@ -7,7 +7,7 @@ import pytest
 
 from mondo_history.extract import build_parallel, extract
 from mondo_history.gitsource import GitSource
-from mondo_history.query import HistoryDB
+from mondo_history.query import ArtifactNotFound, HistoryDB
 
 OBO = "src/onto.obo"
 
@@ -56,6 +56,11 @@ def test_parallel_rebuild_clears_stale_partfiles(obo_repo: Path, tmp_path: Path)
     again = HistoryDB(out)
     assert again.con.execute("SELECT count(*) FROM events").fetchone()[0] == n_events
     again.close()
+
+
+def test_missing_artifact_raises_clear_error(tmp_path: Path):
+    with pytest.raises(ArtifactNotFound, match="Run `mondo-history build`"):
+        HistoryDB(tmp_path / "does-not-exist")
 
 
 def test_term_events_are_clause_deltas(artifact: Path):

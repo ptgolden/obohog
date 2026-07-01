@@ -11,6 +11,10 @@ from pathlib import Path
 import duckdb
 
 
+class ArtifactNotFound(Exception):
+    """Raised when an artifact directory lacks the core history tables."""
+
+
 @dataclass(frozen=True)
 class Change:
     """One clause add/remove, joined to the commit that made it."""
@@ -26,8 +30,16 @@ class Change:
 
 
 class HistoryDB:
+    _CORE = ("commits", "term_snapshots", "events")
+
     def __init__(self, artifact_dir: Path | str):
         self.dir = Path(artifact_dir)
+        absent = [name for name in self._CORE if self._source(name) is None]
+        if absent:
+            raise ArtifactNotFound(
+                f"No history artifact at '{self.dir}' (missing: {', '.join(absent)}). "
+                "Run `mondo-history build` first, or pass --artifact <dir>."
+            )
         self.con = duckdb.connect(":memory:")
         for name in ("commits", "term_snapshots", "events", "releases", "skipped"):
             source = self._source(name)

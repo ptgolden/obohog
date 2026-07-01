@@ -11,7 +11,7 @@ from rich.text import Text
 from .extract import build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
-from .query import Change, HistoryDB
+from .query import ArtifactNotFound, Change, HistoryDB
 
 DEFAULT_PATH = "src/ontology/mondo-edit.obo"
 DEFAULT_ARTIFACT = Path("artifact")
@@ -20,6 +20,15 @@ DEFAULT_CLONE = Path("mondo-clone")
 
 app = typer.Typer(add_completion=False, help="Build and query the Mondo history index.")
 console = Console()
+
+
+def _open(artifact: Path) -> HistoryDB:
+    """Open an artifact, exiting cleanly with guidance if it isn't there."""
+    try:
+        return HistoryDB(artifact)
+    except ArtifactNotFound as err:
+        console.print(f"[red]{err}[/]")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -83,7 +92,7 @@ def term(
     at: Optional[int] = typer.Option(None, help="Reconstruct state as of this commit_seq."),
 ):
     """Show a term's change history, or its reconstructed state at a point."""
-    db = HistoryDB(artifact)
+    db = _open(artifact)
     if at is not None:
         _render_state(mondo_id, at, db.term_at(mondo_id, at))
     else:
@@ -97,7 +106,7 @@ def commit(
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
 ):
     """List the terms changed together in one commit."""
-    db = HistoryDB(artifact)
+    db = _open(artifact)
     terms = db.commit_terms(sha)
     if not terms:
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
@@ -118,7 +127,7 @@ def pr(
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
 ):
     """List the terms changed by a pull request."""
-    db = HistoryDB(artifact)
+    db = _open(artifact)
     terms = db.pr_terms(number)
     if not terms:
         console.print(f"[yellow]No indexed changes for PR[/] #{number}")
@@ -141,7 +150,7 @@ def diff(
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
 ):
     """Show clause changes between two points (e.g. two releases)."""
-    db = HistoryDB(artifact)
+    db = _open(artifact)
     rows = db.changes_between(ref_a, ref_b, mondo_id=term)
     if not rows:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
@@ -166,7 +175,7 @@ def diff(
 @app.command()
 def releases(artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory.")):
     """List release tags indexed in this artifact."""
-    db = HistoryDB(artifact)
+    db = _open(artifact)
     rows = db.releases()
     db.close()
     if not rows:
