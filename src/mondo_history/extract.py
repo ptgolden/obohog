@@ -23,7 +23,7 @@ from datetime import timezone
 from pathlib import Path
 
 from . import model
-from .gitsource import CommitInfo, FileVersion, GitSource, TagRef
+from .gitsource import CommitInfo, FileVersion, GitError, GitSource, TagRef
 from .obo import (
     Clause,
     TermState,
@@ -366,9 +366,19 @@ def _build_chunk(
         if ticks is not None:
             ticks.put(1)  # one tick per commit
         version = windowed[i]
+        try:
+            blob = src.read_blob(version.blob_oid)
+        except GitError:
+            # A blob absent from the (offline) clone can't be processed; skip the
+            # commit and carry state forward rather than aborting the whole build.
+            skipped.append(
+                {"commit_seq": version.commit.seq, "sha": version.commit.sha,
+                 "mondo_id": None, "error": "BlobMissing"}
+            )
+            continue
         # Split the file into stanzas by text (cheap) and hash each; only the
         # stanzas whose bytes changed are handed to fastobo.
-        context, stanzas = split_document(src.read_blob(version.blob_oid))
+        context, stanzas = split_document(blob)
         cur_hash = {mid: stanza_hash(s) for mid, s in stanzas.items()}
 
         if i == 0:  # global baseline: snapshot every term, emit no events
@@ -438,7 +448,11 @@ def _seed_state(
     raw: dict[str, bytes] = {}
     if start == 0:
         return state, raw
-    context, stanzas = split_document(src.read_blob(windowed[start - 1].blob_oid))
+    try:
+        blob = src.read_blob(windowed[start - 1].blob_oid)
+    except GitError:
+        return state, raw  # missing seed blob → empty seed (first diff treats new)
+    context, stanzas = split_document(blob)
     parsed, _failed = parse_stanzas(context, stanzas)
     for mondo_id, term in parsed.items():
         state[mondo_id] = term
