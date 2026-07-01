@@ -58,6 +58,21 @@ def test_parallel_rebuild_clears_stale_partfiles(obo_repo: Path, tmp_path: Path)
     again.close()
 
 
+def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path, tmp_path: Path):
+    out = tmp_path / "art"
+    build_parallel(str(bad_then_removed_repo), "onto.obo", out, jobs=1)  # must not raise
+
+    db = HistoryDB(out)
+    good = db.con.execute(
+        "SELECT count(*) FROM term_snapshots WHERE mondo_id = 'MONDO:0000001'"
+    ).fetchone()[0]
+    skipped_ids = {r[0] for r in db.con.execute("SELECT DISTINCT mondo_id FROM skipped").fetchall()}
+    db.close()
+
+    assert good >= 1  # the good term is indexed
+    assert "MONDO:0000002" in skipped_ids  # the bad term is recorded, not fatal
+
+
 def test_missing_artifact_raises_clear_error(tmp_path: Path):
     with pytest.raises(ArtifactNotFound, match="Run `mondo-history build`"):
         HistoryDB(tmp_path / "does-not-exist")

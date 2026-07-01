@@ -83,3 +83,28 @@ def obo_repo(tmp_path: Path) -> Path:
     _git(repo, "commit", "-qm", "c4 add term", date="2021-01-05T00:00:00+00:00")
 
     return repo
+
+
+@pytest.fixture
+def bad_then_removed_repo(tmp_path: Path) -> Path:
+    """A repo where an unparseable term appears, then is removed the next commit.
+
+    Exercises the state/raw divergence: the bad term lands in ``raw`` (so it is
+    not re-tried) but never in ``state`` (it never parsed), so removing it must
+    not raise.
+    """
+    repo = tmp_path / "repo_bad"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    good = _term("MONDO:0000001", "name: good")
+    bad = _term("MONDO:0000002", "name: bad", 'synonym: "x" WRONGSCOPE []')
+    _write(repo, "onto.obo", HEADER + good + "\n" + bad)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c0 good + bad", date="2021-02-01T00:00:00+00:00")
+
+    _write(repo, "onto.obo", HEADER + good)  # bad term removed
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1 remove bad", date="2021-02-02T00:00:00+00:00")
+
+    return repo

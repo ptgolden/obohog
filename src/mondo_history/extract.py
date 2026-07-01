@@ -270,6 +270,12 @@ def build_parallel(
         if manager is not None:
             manager.shutdown()
 
+    # Guarantee the core tables exist even if this (degenerate) build produced no
+    # part-files, so queries never hit a missing table.
+    for name, schema in (("term_snapshots", model.TERM_SNAPSHOTS), ("events", model.EVENTS)):
+        if not (out / name).is_dir():
+            model.write_table([], schema, out, name)
+
     skipped = [row for r in results for row in r["skipped"]]
     model.write_table(skipped, model.SKIPPED, out, "skipped")
     meta = [
@@ -418,12 +424,14 @@ def _build_chunk(
                 n_evt += len(added) + len(gone)
                 state[mondo_id] = term
             for mondo_id in removed:
-                event_rows.extend(
-                    _event_rows(version, mondo_id, state[mondo_id].clauses, model.Operation.REMOVE)
-                )
-                n_evt += len(state[mondo_id].clauses)
-                del state[mondo_id]
                 del raw[mondo_id]
+                term = state.pop(mondo_id, None)
+                if term is None:
+                    continue  # only ever failed to parse; nothing was emitted to remove
+                event_rows.extend(
+                    _event_rows(version, mondo_id, term.clauses, model.Operation.REMOVE)
+                )
+                n_evt += len(term.clauses)
 
         since_flush += 1
         if since_flush >= _FLUSH_EVERY:
