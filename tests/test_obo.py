@@ -1,6 +1,12 @@
 """Tests for OBO normalization, hashing, and clause diffing."""
 
-from mondo_history.obo import clause_delta, hash_clauses, parse_terms
+from mondo_history.obo import (
+    clause_delta,
+    hash_clauses,
+    parse_stanzas,
+    parse_terms,
+    split_document,
+)
 
 HEADER = b"format-version: 1.2\n\n"
 
@@ -39,6 +45,23 @@ def test_source_clause_order_does_not_affect_hash():
     )["MONDO:0000001"]
     assert ordered.content_hash == reordered.content_hash
     assert hash_clauses(ordered.clauses) == hash_clauses(reordered.clauses)
+
+
+def test_split_document_keys_terms_by_id():
+    header, terms = split_document(_doc(TERM_A, TERM_B))
+    assert set(terms) == {"MONDO:0000001", "MONDO:0000002"}
+    assert b"format-version" in header  # header retained as parse context
+
+
+def test_parse_stanzas_isolates_bad_stanza():
+    # One malformed stanza must not sink the batch: it is bisected out, recorded
+    # as failed, and the good term still parses.
+    good = "[Term]\nid: MONDO:0000001\nname: ok\n"
+    bad = '[Term]\nid: MONDO:0000002\nname: b\nsynonym: "x" WRONGSCOPE []\n'
+    context, stanzas = split_document(_doc(good, bad))
+    parsed, failed = parse_stanzas(context, stanzas)
+    assert set(parsed) == {"MONDO:0000001"}
+    assert failed == ["MONDO:0000002"]
 
 
 def test_clause_delta_reports_addition():

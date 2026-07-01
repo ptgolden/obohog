@@ -333,6 +333,11 @@ def _build_chunk(
     ticks=None,
 ) -> dict:
     """Worker: parse+diff ``windowed[start:end]`` and stream part-files."""
+    # fastobo prints Rust panics to stderr even though we catch them; a worker
+    # has no other use for stderr (results and errors reach the parent via the
+    # future), so silence it to keep the parent's progress bar clean.
+    os.dup2(os.open(os.devnull, os.O_WRONLY), 2)
+
     out = Path(out_dir)
     src = GitSource(clone_path)
     windowed = list(src.iter_file_history(obo_path))[offset:]
@@ -369,6 +374,8 @@ def _build_chunk(
         if i == 0:  # global baseline: snapshot every term, emit no events
             parsed, failed = parse_stanzas(context, stanzas)
             _record_skips(skipped, version, failed)
+            for mondo_id in failed:
+                raw[mondo_id] = cur_hash[mondo_id]  # don't retry identical bad bytes
             for mondo_id, term in parsed.items():
                 snap_rows.append(_snapshot_row(version, term))
                 n_snap += 1
@@ -379,7 +386,12 @@ def _build_chunk(
             removed = raw.keys() - stanzas.keys()
             parsed, failed = parse_stanzas(context, {mid: stanzas[mid] for mid in changed})
             failed_set = set(failed)
-            _record_skips(skipped, version, failed)  # carry forward: keep old state
+            _record_skips(skipped, version, failed)
+            for mondo_id in failed:
+                # Mark the failing bytes as seen: keep the last good state and only
+                # re-attempt if this stanza's content changes again (avoids
+                # re-bisecting the same unparseable term at every later commit).
+                raw[mondo_id] = cur_hash[mondo_id]
             for mondo_id in changed:
                 if mondo_id in failed_set:
                     continue
