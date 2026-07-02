@@ -29,6 +29,20 @@ class Change:
     value: str
 
 
+@dataclass(frozen=True)
+class TermHeader:
+    """Summary stats for a term, used to orient the timeline view."""
+
+    mondo_id: str
+    current_name: str | None
+    event_count: int
+    first_seq: int
+    first_date: object
+    last_seq: int
+    last_date: object
+    last_pr: int | None
+
+
 class HistoryDB:
     _CORE = ("commits", "term_snapshots", "events")
 
@@ -79,6 +93,44 @@ class HistoryDB:
             params,
         ).fetchall()
         return [Change(*row) for row in rows]
+
+    def term_header(self, mondo_id: str) -> TermHeader | None:
+        """Orientation stats for the term, or ``None`` if it has no events."""
+        stats = self.con.execute(
+            """
+            SELECT min(commit_seq), max(commit_seq), count(*)
+            FROM events WHERE mondo_id = ?
+            """,
+            [mondo_id],
+        ).fetchone()
+        if stats is None or stats[0] is None:
+            return None
+        first_seq, last_seq, event_count = stats
+        first_date = self.con.execute(
+            "SELECT committed_date FROM commits WHERE commit_seq = ?", [first_seq]
+        ).fetchone()[0]
+        last_date, last_pr = self.con.execute(
+            "SELECT committed_date, pr_number FROM commits WHERE commit_seq = ?",
+            [last_seq],
+        ).fetchone()
+        name_row = self.con.execute(
+            """
+            SELECT name FROM term_snapshots
+            WHERE mondo_id = ? AND name IS NOT NULL
+            ORDER BY commit_seq DESC LIMIT 1
+            """,
+            [mondo_id],
+        ).fetchone()
+        return TermHeader(
+            mondo_id=mondo_id,
+            current_name=name_row[0] if name_row else None,
+            event_count=event_count,
+            first_seq=first_seq,
+            first_date=first_date,
+            last_seq=last_seq,
+            last_date=last_date,
+            last_pr=last_pr,
+        )
 
     def term_at(self, mondo_id: str, commit_seq: int) -> list[tuple[str, str]]:
         """Reconstruct a term's clauses as of ``commit_seq`` (latest snapshot <=)."""

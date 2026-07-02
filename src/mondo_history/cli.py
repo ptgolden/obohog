@@ -1,5 +1,6 @@
 """Command-line interface for building and querying the history artifact."""
 
+from collections import Counter
 from itertools import groupby
 from pathlib import Path
 from typing import Optional
@@ -8,10 +9,11 @@ import typer
 from rich.console import Console
 from rich.text import Text
 
+from . import render
 from .extract import build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
-from .query import ArtifactNotFound, Change, HistoryDB
+from .query import ArtifactNotFound, Change, HistoryDB, TermHeader
 
 DEFAULT_PATH = "src/ontology/mondo-edit.obo"
 DEFAULT_ARTIFACT = Path("artifact")
@@ -95,13 +97,26 @@ def term(
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
     only: Optional[str] = typer.Option(None, help="Restrict to one clause kind, e.g. synonym."),
     at: Optional[int] = typer.Option(None, help="Reconstruct state as of this commit_seq."),
+    limit: Optional[int] = typer.Option(
+        None, help="Show only the most recent N commits' events."
+    ),
+    since: Optional[str] = typer.Option(
+        None, help="Show only events at/after this ref (tag, commit_seq, sha)."
+    ),
+    full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show a term's change history, or its reconstructed state at a point."""
     db = _open(artifact)
     if at is not None:
         _render_state(mondo_id, at, db.term_at(mondo_id, at))
     else:
-        _render_timeline(mondo_id, db.term_timeline(mondo_id, predicate=only))
+        header = db.term_header(mondo_id)
+        changes = db.term_timeline(mondo_id, predicate=only)
+        since_seq = db.resolve_ref(since) if since is not None else None
+        _render_timeline(
+            mondo_id, header, changes,
+            limit=limit, since_seq=since_seq, full=full,
+        )
     db.close()
 
 
@@ -193,29 +208,98 @@ def releases(artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact dire
         console.print(line)
 
 
-def _render_timeline(mondo_id: str, changes: list[Change]) -> None:
+def _render_timeline(
+    mondo_id: str,
+    header: TermHeader | None,
+    changes: list[Change],
+    limit: int | None = None,
+    since_seq: int | None = None,
+    full: bool = False,
+) -> None:
     if not changes:
         console.print(f"[yellow]No history for[/] {mondo_id}")
         return
-    console.print(f"[bold cyan]{mondo_id}[/] — {len(changes)} changes")
+    total_events = len(changes)
+    if since_seq is not None:
+        changes = [c for c in changes if c.commit_seq >= since_seq]
+    if limit is not None:
+        seqs: list[int] = []
+        for c in changes:
+            if not seqs or seqs[-1] != c.commit_seq:
+                seqs.append(c.commit_seq)
+        keep = set(seqs[-limit:])
+        changes = [c for c in changes if c.commit_seq in keep]
+
+    _render_header(mondo_id, header, changes, total_events, limit, since_seq)
+
+    cap = None if full else render.DEFAULT_TRUNCATE
     for _, group in groupby(changes, key=lambda c: c.commit_seq):
         rows = list(group)
         head = rows[0]
-        header = Text("\n● ")
-        header.append(f"commit {head.commit_seq}", style="bold")
-        header.append(f"  {_date(head.committed_date)}  ")
+        header_line = Text("\n● ")
+        header_line.append(f"commit {head.commit_seq}", style="bold")
+        header_line.append(f"  {_date(head.committed_date)}  ")
         if head.pr_number is not None:
-            header.append(f"PR #{head.pr_number}  ", style="cyan")
-        header.append(head.message.splitlines()[0], style="dim")
-        console.print(header)
-        for change in rows:
-            line = Text("    ")
-            if change.operation == "add":
-                line.append("+ ", style="bold green")
-            else:
-                line.append("- ", style="bold red")
-            line.append(f"{change.predicate}: {change.value}")
-            console.print(line)
+            header_line.append(f"PR #{head.pr_number}  ", style="cyan")
+        header_line.append(head.message.splitlines()[0], style="dim")
+        console.print(header_line)
+        for op in render.pair_events(rows):
+            console.print(render.render_op(op, truncate=cap))
+
+
+def _render_header(
+    mondo_id: str,
+    header: TermHeader | None,
+    changes: list[Change],
+    total_events: int,
+    limit: int | None,
+    since_seq: int | None,
+) -> None:
+    """Print the orientation header: name, span, and predicate counts."""
+    title = Text()
+    title.append(mondo_id, style="bold cyan")
+    if header is not None and header.current_name:
+        title.append(f" — {header.current_name}", style="bold")
+    console.print(title)
+
+    if header is not None:
+        n_commits = len({c.commit_seq for c in changes})
+        shown_events = len(changes)
+        summary = Text()
+        if shown_events != total_events:
+            summary.append(
+                f"showing {shown_events} of {total_events} events "
+                f"across {n_commits} commits",
+                style="dim",
+            )
+        else:
+            summary.append(
+                f"{total_events} events across {n_commits} commits",
+                style="dim",
+            )
+        console.print(summary)
+
+        span = Text()
+        span.append(
+            f"first {_date(header.first_date)} (commit {header.first_seq})",
+            style="dim",
+        )
+        span.append("  ·  ", style="dim")
+        span.append(
+            f"last {_date(header.last_date)} (commit {header.last_seq}",
+            style="dim",
+        )
+        if header.last_pr is not None:
+            span.append(f", PR #{header.last_pr}", style="dim")
+        span.append(")", style="dim")
+        console.print(span)
+
+    counts = Counter(c.predicate for c in changes)
+    if counts:
+        by_pred = Text("by predicate: ", style="dim")
+        parts = [f"{p} {n}" for p, n in counts.most_common()]
+        by_pred.append(", ".join(parts), style="dim")
+        console.print(by_pred)
 
 
 def _render_state(mondo_id: str, at: int, clauses: list[tuple[str, str]]) -> None:
