@@ -96,19 +96,22 @@ def term(
     mondo_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
     only: Optional[str] = typer.Option(None, help="Restrict to one clause kind, e.g. synonym."),
-    at: Optional[int] = typer.Option(None, help="Reconstruct state as of this commit_seq."),
+    at: Optional[str] = typer.Option(
+        None, help="Reconstruct state as of this ref (short sha, tag, or commit_seq)."
+    ),
     limit: Optional[int] = typer.Option(
         None, help="Show only the most recent N commits' events."
     ),
     since: Optional[str] = typer.Option(
-        None, help="Show only events at/after this ref (tag, commit_seq, sha)."
+        None, help="Show only events at/after this ref (short sha, tag, or commit_seq)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show a term's change history, or its reconstructed state at a point."""
     db = _open(artifact)
     if at is not None:
-        _render_state(mondo_id, at, db.term_at(mondo_id, at))
+        at_seq = db.resolve_ref(at)
+        _render_state(mondo_id, at, db.term_at(mondo_id, at_seq))
     else:
         header = db.term_header(mondo_id)
         changes = db.term_timeline(mondo_id, predicate=only)
@@ -237,7 +240,7 @@ def _render_timeline(
         rows = list(group)
         head = rows[0]
         header_line = Text("\n● ")
-        header_line.append(f"commit {head.commit_seq}", style="bold")
+        header_line.append(head.sha[:7], style="bold yellow")
         header_line.append(f"  {_date(head.committed_date)}  ")
         if head.pr_number is not None:
             header_line.append(f"PR #{head.pr_number}  ", style="cyan")
@@ -281,12 +284,12 @@ def _render_header(
 
         span = Text()
         span.append(
-            f"first {_date(header.first_date)} (commit {header.first_seq})",
+            f"first {_date(header.first_date)} ({header.first_sha[:7]})",
             style="dim",
         )
         span.append("  ·  ", style="dim")
         span.append(
-            f"last {_date(header.last_date)} (commit {header.last_seq}",
+            f"last {_date(header.last_date)} ({header.last_sha[:7]}",
             style="dim",
         )
         if header.last_pr is not None:
@@ -302,11 +305,11 @@ def _render_header(
         console.print(by_pred)
 
 
-def _render_state(mondo_id: str, at: int, clauses: list[tuple[str, str]]) -> None:
+def _render_state(mondo_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
     if not clauses:
-        console.print(f"[yellow]{mondo_id} has no snapshot at or before commit {at}[/]")
+        console.print(f"[yellow]{mondo_id} has no snapshot at or before {at}[/]")
         return
-    console.print(f"[bold cyan]{mondo_id}[/] as of commit {at}:")
+    console.print(f"[bold cyan]{mondo_id}[/] as of {at}:")
     console.print(Text(f"  id: {mondo_id}"))
     for predicate, value in clauses:
         console.print(Text(f"  {predicate}: {value}"))

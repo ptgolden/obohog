@@ -36,9 +36,9 @@ class TermHeader:
     mondo_id: str
     current_name: str | None
     event_count: int
-    first_seq: int
+    first_sha: str
     first_date: object
-    last_seq: int
+    last_sha: str
     last_date: object
     last_pr: int | None
 
@@ -106,11 +106,12 @@ class HistoryDB:
         if stats is None or stats[0] is None:
             return None
         first_seq, last_seq, event_count = stats
-        first_date = self.con.execute(
-            "SELECT committed_date FROM commits WHERE commit_seq = ?", [first_seq]
-        ).fetchone()[0]
-        last_date, last_pr = self.con.execute(
-            "SELECT committed_date, pr_number FROM commits WHERE commit_seq = ?",
+        first_sha, first_date = self.con.execute(
+            "SELECT sha, committed_date FROM commits WHERE commit_seq = ?",
+            [first_seq],
+        ).fetchone()
+        last_sha, last_date, last_pr = self.con.execute(
+            "SELECT sha, committed_date, pr_number FROM commits WHERE commit_seq = ?",
             [last_seq],
         ).fetchone()
         name_row = self.con.execute(
@@ -125,9 +126,9 @@ class HistoryDB:
             mondo_id=mondo_id,
             current_name=name_row[0] if name_row else None,
             event_count=event_count,
-            first_seq=first_seq,
+            first_sha=first_sha,
             first_date=first_date,
-            last_seq=last_seq,
+            last_sha=last_sha,
             last_date=last_date,
             last_pr=last_pr,
         )
