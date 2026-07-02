@@ -89,6 +89,32 @@ def test_pair_events_scoped_to_predicate():
     assert kinds == ["Add", "Remove"]
 
 
+def test_pair_events_prefers_matching_body_over_lexical_similarity():
+    # Regression: at commit 1476, two Orphanet xrefs (different IDs) had their
+    # qualifier orderings rewritten. Naive greedy pairing scored the *cross*
+    # pairs higher because their qualifier text happened to align across the
+    # different-ID clauses, so the pairing invented a non-existent
+    # "one xref became another" edit. The pairing must prefer identity-body
+    # pairs even when the cross pair scores higher lexically.
+    changes = [
+        _change("remove", "xref",
+                'Orphanet:54370 {source="OMIM:609814", source="MONDO:subClassOf"}'),
+        _change("add", "xref",
+                'Orphanet:54370 {source="MONDO:subClassOf", source="OMIM:609814"}'),
+        _change("remove", "xref",
+                'Orphanet:93571 {source="MONDO:directSiblingOf", source="OMIM:609814"}'),
+        _change("add", "xref",
+                'Orphanet:93571 {source="OMIM:609814", source="MONDO:directSiblingOf"}'),
+    ]
+    ops = pair_events(changes)
+    # All four events must pair into two Edits, one per Orphanet ID.
+    edits = [o for o in ops if isinstance(o, Edit)]
+    assert len(edits) == 2
+    for e in edits:
+        # Same target CURIE on both sides — no cross-body pairing.
+        assert e.before.value.split(" ")[0] == e.after.value.split(" ")[0]
+
+
 def test_pair_events_add_only_and_remove_only():
     changes = [
         _change("add", "synonym", '"new"'),

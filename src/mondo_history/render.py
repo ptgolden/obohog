@@ -74,14 +74,23 @@ Op = Add | Remove | Edit
 def pair_events(
     changes: Iterable[Change], threshold: float = PAIR_THRESHOLD
 ) -> list[Op]:
-    """Pair adds/removes within one predicate by highest similarity.
+    """Pair adds/removes within one predicate.
 
-    Greedy: score every (remove, add) pair with ``SequenceMatcher.ratio``,
-    take the highest scoring pair whose ratio meets ``threshold``, mark both
-    used, repeat. Leftover unmatched events fall through as ``Add``/``Remove``.
+    Two-pass:
 
-    The input is expected to be one commit's worth of events, but the function
-    only relies on grouping by predicate — it is fine to pass more.
+    * **Pass 1** — pair by matching parsed **body**. If a remove and an add
+      have the same fastobo-parsed body (e.g. both are ``xref: Orphanet:54370
+      ...``), they describe edits to the same clause even if their qualifier
+      orderings happen to align better with a *different* body's clause.
+      This blocks the classic bug where two paired xrefs cross-match by
+      lexical similarity because their qualifier text lines up across
+      different targets. Ties within a body group go to highest lexical
+      similarity.
+    * **Pass 2** — greedy lexical similarity for the leftovers, meeting
+      ``threshold``. This is where renamed / retyped clauses pair (their
+      bodies differ but the text is close).
+
+    Leftover unpaired events fall through as ``Add`` / ``Remove``.
     """
     buckets: dict[str, list[Change]] = defaultdict(list)
     for c in changes:
@@ -92,16 +101,47 @@ def pair_events(
         adds = [c for c in group if c.operation == "add"]
         removes = [c for c in group if c.operation == "remove"]
 
+        # Parse each event's body once so both passes can reuse it. ``None``
+        # means fastobo couldn't parse — those events skip pass 1 and are
+        # matched only in pass 2.
+        r_bodies = [_parsed_body(predicate, r.value) for r in removes]
+        a_bodies = [_parsed_body(predicate, a.value) for a in adds]
+
+        used_r: set[int] = set()
+        used_a: set[int] = set()
+
+        # Pass 1: pair by matching parsed body.
+        for i, rb in enumerate(r_bodies):
+            if rb is None or i in used_r:
+                continue
+            candidates = [
+                j for j, ab in enumerate(a_bodies)
+                if ab == rb and j not in used_a
+            ]
+            if not candidates:
+                continue
+            best_j = max(
+                candidates,
+                key=lambda j: SequenceMatcher(
+                    None, removes[i].value, adds[j].value, autojunk=False
+                ).ratio(),
+            )
+            used_r.add(i)
+            used_a.add(best_j)
+            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[best_j]))
+
+        # Pass 2: greedy lexical similarity for the leftovers.
         scored: list[tuple[float, int, int]] = []
         for i, r in enumerate(removes):
+            if i in used_r:
+                continue
             for j, a in enumerate(adds):
+                if j in used_a:
+                    continue
                 ratio = SequenceMatcher(None, r.value, a.value, autojunk=False).ratio()
                 if ratio >= threshold:
                     scored.append((ratio, i, j))
         scored.sort(reverse=True)
-
-        used_r: set[int] = set()
-        used_a: set[int] = set()
         for _, i, j in scored:
             if i in used_r or j in used_a:
                 continue
@@ -118,6 +158,12 @@ def pair_events(
 
     ops.sort(key=_sort_key)
     return ops
+
+
+def _parsed_body(predicate: str, value: str) -> str | None:
+    """The fastobo-parsed body of a clause value, or ``None`` if unparseable."""
+    pv = parse_clause_value(predicate, value)
+    return pv.body if pv is not None else None
 
 
 def _sort_key(op: Op) -> tuple[str, int, str]:
