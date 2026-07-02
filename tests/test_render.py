@@ -7,6 +7,7 @@ from mondo_history.render import (
     Edit,
     Remove,
     pair_events,
+    parse_clause_value,
     render_op,
 )
 
@@ -175,28 +176,6 @@ def test_render_op_edit_url_swap_is_whole_token_swap():
     assert "{+http+}" not in line.plain
 
 
-def test_render_op_edit_qualifier_reorder_shows_whole_token_swap():
-    changes = [
-        _change(
-            "remove", "xref",
-            'MESH:C562875 {source="MONDO:ontobio", source="MONDO:equivalentTo"}',
-        ),
-        _change(
-            "add", "xref",
-            'MESH:C562875 {source="MONDO:equivalentTo", source="MONDO:ontobio"}',
-        ),
-    ]
-    ops = pair_events(changes)
-    assert isinstance(ops[0], Edit)
-    line = render_op(ops[0])
-    # The reordered token is a whole CURIE, not a shuffled char stream.
-    assert "[-MONDO:ontobio-]" in line.plain
-    assert "{+MONDO:equivalentTo+}" in line.plain
-    # Neither identifier appears mangled character-by-character.
-    assert "oequivalentobiTo" not in line.plain
-    assert "equivaleontTobio" not in line.plain
-
-
 def test_truncate_long_value_by_default():
     long = "x" * (DEFAULT_TRUNCATE + 50)
     add = Add(_change("add", "def", long))
@@ -211,3 +190,97 @@ def test_full_disables_truncate():
     line = render_op(add, truncate=None)
     assert "…" not in line.plain
     assert long in line.plain
+
+
+def test_parse_clause_value_splits_body_qualifiers_comment():
+    pv = parse_clause_value(
+        "is_a",
+        'MONDO:0018013 {source="Orphanet:329918/btnt"} ! non-immunoglobulin-mediated',
+    )
+    assert pv is not None
+    assert pv.body == "MONDO:0018013"
+    assert pv.qualifiers == ('source="Orphanet:329918/btnt"',)
+    assert pv.comment == "non-immunoglobulin-mediated"
+
+
+def test_parse_clause_value_def_keeps_xref_list_in_body():
+    # For def:, the trailing [xref, xref] list is part of the body, not the
+    # qualifier block. It must survive parsing intact.
+    pv = parse_clause_value("def", '"Long definition." [OMIM:1, Orphanet:2]')
+    assert pv is not None
+    assert pv.body == '"Long definition." [OMIM:1, Orphanet:2]'
+    assert pv.qualifiers == ()
+    assert pv.comment is None
+
+
+def test_render_op_edit_target_label_only():
+    # Same is_a target and qualifiers; only the ! label differs (referenced
+    # term was renamed elsewhere). This is textually a change but the clause
+    # itself is semantically unchanged.
+    changes = [
+        _change(
+            "remove", "is_a",
+            'MONDO:0018013 {source="Orphanet:329918/btnt"} ! '
+            "non-immunoglobulin-mediated membranoproliferative glomerulonephritis",
+        ),
+        _change(
+            "add", "is_a",
+            'MONDO:0018013 {source="Orphanet:329918/btnt"} ! '
+            "complement 3 glomerulopathy",
+        ),
+    ]
+    ops = pair_events(changes)
+    assert isinstance(ops[0], Edit)
+    line = render_op(ops[0])
+    # The shared form ("body {qualifiers}") stays plain — no token-diff noise.
+    assert 'MONDO:0018013 {source="Orphanet:329918/btnt"}' in line.plain
+    # The comment change is bracketed as a whole, not word-diffed piece by piece.
+    assert (
+        "[-non-immunoglobulin-mediated membranoproliferative glomerulonephritis-]"
+        in line.plain
+    )
+    assert "{+complement 3 glomerulopathy+}" in line.plain
+    # And a labeled tag makes the semantics clear.
+    assert "(target label)" in line.plain
+
+
+def test_render_op_edit_qualifier_reorder_is_a_labeled_no_op():
+    # Same body, same qualifier multiset, different order → a pure
+    # serialization reshuffle. Render as unchanged form with a tag.
+    changes = [
+        _change(
+            "remove", "xref",
+            'MESH:C562875 {source="MONDO:ontobio", source="MONDO:equivalentTo"}',
+        ),
+        _change(
+            "add", "xref",
+            'MESH:C562875 {source="MONDO:equivalentTo", source="MONDO:ontobio"}',
+        ),
+    ]
+    ops = pair_events(changes)
+    assert isinstance(ops[0], Edit)
+    line = render_op(ops[0])
+    # No [-...-] / {+...+} markers — the semantics are unchanged.
+    assert "[-" not in line.plain
+    assert "{+" not in line.plain
+    assert "(qualifier order rewritten)" in line.plain
+    # The current (post-edit) form is displayed.
+    assert 'MESH:C562875' in line.plain
+    assert 'MONDO:ontobio' in line.plain
+    assert 'MONDO:equivalentTo' in line.plain
+
+
+def test_render_op_edit_falls_through_when_body_changes():
+    # Body differs → structural detectors don't fire; the token word-diff
+    # renders normally.
+    changes = [
+        _change("remove", "xref", "OMIM:1 {source=\"A\"}"),
+        _change("add", "xref", "OMIM:2 {source=\"A\"}"),
+    ]
+    ops = pair_events(changes)
+    assert isinstance(ops[0], Edit)
+    line = render_op(ops[0])
+    # No structural tag; a real word-diff appears.
+    assert "(target label)" not in line.plain
+    assert "(qualifier order rewritten)" not in line.plain
+    assert "[-OMIM:1-]{+OMIM:2+}" in line.plain

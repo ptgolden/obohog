@@ -7,12 +7,14 @@ rendering the pair as an inline ``~`` line with intra-value diff highlighting
 (git ``--word-diff`` style). Unpaired events render as ``+`` / ``-`` as before.
 """
 
+import io
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Iterable
 
+import fastobo
 from rich.text import Text
 
 from .query import Change
@@ -133,6 +135,71 @@ def _truncate(s: str, cap: int | None) -> str:
     return s[: cap - 1] + ELLIPSIS
 
 
+@dataclass(frozen=True)
+class ParsedValue:
+    """A clause value split into its OBO-structural parts.
+
+    ``body`` is everything except the ``{qualifiers}`` block and the ``!`` name
+    comment — the parts that carry the clause's semantic identity. ``qualifiers``
+    preserves the original order (use ``Counter`` for order-independent
+    comparison). ``comment`` is the trailing ``!`` text, ``None`` if absent.
+    """
+
+    body: str
+    qualifiers: tuple[str, ...]
+    comment: str | None
+
+
+_STANZA_TEMPLATE = "format-version: 1.2\n\n[Term]\nid: TMP:0000001\n{tag}: {value}\n"
+
+
+def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
+    """Parse one OBO clause value using fastobo, returning its structural parts.
+
+    Returns ``None`` when fastobo can't parse the line — some historical
+    clauses in the artifact are malformed enough that fastobo rejects (or
+    even panics on) them; when that happens we fall back to lexical
+    rendering. fastobo already handles the tricky parts (quoted values with
+    escapes, ``!`` inside strings, nested brackets), so we don't hand-parse.
+    """
+    stanza = _STANZA_TEMPLATE.format(tag=predicate, value=value)
+    try:
+        doc = fastobo.load(io.BytesIO(stanza.encode()))
+    except BaseException:  # fastobo can panic, not just raise
+        return None
+    frames = list(doc)
+    if not frames:
+        return None
+    for clause in frames[0]:
+        if clause.raw_tag() == "id":
+            continue
+        return _clause_to_parsed(clause)
+    return None
+
+
+def _clause_to_parsed(clause) -> ParsedValue:
+    """Split ``str(clause)`` into body / qualifiers / comment.
+
+    fastobo gives us the qualifier list and comment as parsed structures.
+    Peeling them off ``str(clause)`` (which fastobo serializes deterministically)
+    leaves the "body" — the value-carrying prefix — intact for every clause
+    kind, including ``def:`` whose trailing ``[xref, xref]`` list belongs to
+    the body, not the qualifier block.
+    """
+    _, _, body = str(clause).partition(": ")
+    comment = clause.comment
+    qualifiers = tuple(str(q) for q in (clause.qualifiers or []))
+    if comment is not None:
+        marker = f" ! {comment}"
+        if body.endswith(marker):
+            body = body[: -len(marker)]
+    if qualifiers:
+        marker = " {" + ", ".join(qualifiers) + "}"
+        if body.endswith(marker):
+            body = body[: -len(marker)]
+    return ParsedValue(body=body, qualifiers=qualifiers, comment=comment)
+
+
 def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:
     """Render one paired-or-unpaired event as a rich ``Text`` line."""
     if isinstance(op, Add):
@@ -152,16 +219,91 @@ def _render_plain(predicate: str, value: str, marker: str, style: str, cap: int 
 
 
 def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Text:
-    """Render a paired remove/add as one ``~`` line with intra-value diff.
+    """Render a paired remove/add as one ``~`` line.
 
-    The diff runs at the **token** level (see ``_TOKEN_RE``), which produces
-    readable output on OBO clause values: identifier swaps, snake_case edits,
-    and qualifier reorderings show as whole-token deletions and insertions
-    rather than character-level shuffles.
+    First tries to parse both sides via fastobo and pick a **structure-aware**
+    rendering for cases where lexical word-diff misleads:
 
-    Uses git's ``--word-diff=plain`` bracket markers (``[-old-]``, ``{+new+}``)
-    so the diff stays readable when piped to a file or a non-color terminal.
-    The markers are additionally styled red/green when the console supports it.
+    * ``body`` + qualifier set identical, only the ``!`` comment differs →
+      the referenced target term was renamed elsewhere; this clause is
+      semantically unchanged. The shared form renders plain and only the
+      comment change gets marked.
+    * ``body`` + comment identical, qualifier multiset identical but ordered
+      differently → a pure serialization reshuffle. Render the current form
+      and tag it "(qualifier order rewritten)".
+
+    Everything else — including any case where fastobo can't parse either
+    side — falls through to the token-level word-diff.
+    """
+    b = parse_clause_value(predicate, before)
+    a = parse_clause_value(predicate, after)
+
+    if b is not None and a is not None:
+        body_same = b.body == a.body
+        quals_multiset_same = Counter(b.qualifiers) == Counter(a.qualifiers)
+        quals_order_same = b.qualifiers == a.qualifiers
+        comment_same = b.comment == a.comment
+
+        if body_same and quals_multiset_same:
+            if not comment_same:
+                return _render_comment_only(predicate, b, a, cap)
+            if not quals_order_same:
+                return _render_reorder_only(predicate, a, cap)
+
+    return _render_token_diff(predicate, before, after, cap)
+
+
+def _render_comment_only(
+    predicate: str, before: ParsedValue, after: ParsedValue, cap: int | None
+) -> Text:
+    """Only the trailing ``!`` name comment differs (target term was renamed)."""
+    line = Text("    ")
+    line.append("~ ", style="bold yellow")
+    line.append(f"{predicate}: ")
+    line.append(_truncate(_head(before), cap))
+    line.append(" ! ")
+    old = _truncate(before.comment or "", cap)
+    new = _truncate(after.comment or "", cap)
+    if old:
+        line.append(f"[-{old}-]", style="red")
+    if new:
+        line.append(f"{{+{new}+}}", style="green")
+    line.append("  (target label)", style="dim")
+    return line
+
+
+def _render_reorder_only(
+    predicate: str, current: ParsedValue, cap: int | None
+) -> Text:
+    """Qualifier multiset unchanged; only the order was rewritten."""
+    line = Text("    ")
+    line.append("~ ", style="bold yellow")
+    line.append(f"{predicate}: ")
+    line.append(_truncate(_head(current), cap))
+    if current.comment:
+        line.append(f" ! {_truncate(current.comment, cap)}")
+    line.append("  (qualifier order rewritten)", style="dim")
+    return line
+
+
+def _head(pv: ParsedValue) -> str:
+    """``body [{qualifiers}]`` — everything shown before the ``!`` comment."""
+    if not pv.qualifiers:
+        return pv.body
+    return f"{pv.body} {{{', '.join(pv.qualifiers)}}}"
+
+
+def _render_token_diff(
+    predicate: str, before: str, after: str, cap: int | None
+) -> Text:
+    """Fallback: token-level word-diff over the raw value strings.
+
+    Runs at the **token** level (see ``_TOKEN_RE``) so identifier swaps,
+    snake_case edits, and qualifier-membership changes show as whole-token
+    edits rather than character shuffles. Uses git's ``--word-diff=plain``
+    bracket markers (``[-old-]``, ``{+new+}``) so the diff stays readable
+    when piped to a file or a non-color terminal; the markers are
+    additionally styled red/green when the console supports it.
     """
     b_tokens = _tokenize(_truncate(before, cap))
     a_tokens = _tokenize(_truncate(after, cap))
