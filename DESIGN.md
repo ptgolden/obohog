@@ -178,7 +178,7 @@ tests/
 
 ---
 
-## Implementation status (2026-07-01)
+## Implementation status (2026-07-02)
 
 **Working:**
 - `gitsource` — blob-filtered clone; rename-following single-file walk; scoped,
@@ -206,27 +206,51 @@ tests/
     never the whole commit.
 - `model` — Parquet schemas incl. `releases` and `skipped_commits`.
 - `query`/`cli` — DuckDB over part-file globs or single files; `build` (with
-  `--jobs`), `term`, `commit`, `pr`, `diff`, `releases`; rich rendering.
-- **23 tests**, incl. parallel-build == single-threaded equivalence and
-  stale-part-file clearing.
+  `--jobs`), `term` (with `--limit`, `--since`, `--full`, `--only`, `--at`
+  accepting sha/tag/seq), `commit`, `pr`, `diff`, `releases`; rich rendering.
+- `render` — **structure-aware term timeline**: paired remove/add events on the
+  same predicate render as `~` word-diff edits rather than two adjacent lines.
+  Pairing is two-pass — parsed-body identity first (fastobo-parsed), then greedy
+  lexical similarity — so a same-target clause whose qualifiers were reordered
+  can't cross-pair with a different-target clause whose qualifier text happens
+  to align (the classic commit-1476 pathology). Rendering is layered:
+  - **Target-label rename** (body + qualifier set identical, only `!` comment
+    differs) → shared form plain, comment change bracketed, tagged `(target label)`.
+  - **Qualifier reorder** (body + comment identical, qualifier multiset identical,
+    order differs) → current form displayed, tagged `(qualifier order rewritten)`.
+  - **Qualifier-block edit** (qualifier multiset changed) → body + comment on the
+    top `~` line, per-qualifier `+`/`-`/`~` sub-lines indented underneath with
+    inline word-diff on `~` sub-lines. Reads like an axiom-annotation diff.
+  - **Fallback** (body changed, no qualifiers, or fastobo can't parse) → single-
+    line token word-diff using a compound-identifier-aware tokenizer that keeps
+    CURIEs, URLs, and snake_case names whole while splitting on structural
+    punctuation. Git `--word-diff=plain` markers stay readable when piped.
+- **50 tests**, incl. parallel-build == single-threaded equivalence, stale
+  part-file clearing, structure-aware rendering, and the commit-1476 pairing
+  regression.
 
 **Local state:**
 - `./mondo-clone` — full history of `mondo-edit.obo`, 2017-09→2026-06 (7,487
   versions), ~912 MB single pack, gitignored. The full build runs **offline**
   against it (`GIT_NO_LAZY_FETCH=1`).
+- `./artifact/` — the built history artifact from that clone. The
+  `mondo-history term MONDO:0012350` example in `README.md` reads from it.
 
 **Validated:** parallel build produces byte-identical events/snapshots to the
 single-threaded build (checksum match on a 12-commit slice).
 
 **Next steps:**
-1. **Run the full build** over `./mondo-clone`
-   (`mondo-history build --repo mondo-clone --out artifact`, ~15-25 min parallel
-   with diff-scoped parsing) → the real artifact. Check the `skipped` table is
-   small and sane (the isolated mid-era fastobo panics).
-2. **Incremental updates** — a `build --update` path: self-seed from the latest
+1. **Incremental updates** — a `build --update` path: self-seed from the latest
    snapshot per term, `git fetch` + `git backfill --sparse` the new commits,
    append new part-files, extend `commit_seq`; ancestry check as a rewrite guard.
-3. **Distribution** — publish part-files to GitHub Releases; document HTTP
+2. **Distribution** — publish part-files to GitHub Releases; document HTTP
    range-query use.
-4. **If size matters** — evaluate the keyframe + event-replay variant to shrink
+3. **N-to-M pairing** — detect commits like `1ac4db2^` (two same-target xrefs
+   collapsed into one with a merged qualifier list). Now tractable given the
+   fastobo-parsed body + qualifier sets; the missing piece is grouping events
+   by body within a predicate bucket before pairing.
+4. **Structure-aware `diff` and `commit` renderers** — reuse `pair_events` and
+   `render_op` in `mondo-history diff` and `mondo-history commit` for the same
+   quality of output.
+5. **If size matters** — evaluate the keyframe + event-replay variant to shrink
    `term_snapshots`.
