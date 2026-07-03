@@ -458,6 +458,24 @@ def test_edit_delta_matches_body_change_returns_true():
     assert edit_delta_matches(_edit("MONDO:0000001", "MONDO:0000002"), "0002") is True
 
 
+def test_edit_delta_matches_kept_token_inside_edited_body_returns_false():
+    # Real case from `mondo-history search C317`: a synonym's evidence list
+    # had CSP2005:2004-1700 removed. NCIT:C3174 stayed put but happens to
+    # contain the substring "C317". The commit didn't actually change
+    # anything involving C317 — that xref reference was unchanged context
+    # inside an edited body.
+    before = (
+        '"CML" EXACT ABBREVIATION [CSP2005:2004-1700, DOID:8552, '
+        'NCIT:C3174, OMIM:608232]'
+    )
+    after = '"CML" EXACT ABBREVIATION [DOID:8552, NCIT:C3174, OMIM:608232]'
+    # Body differs (CSP evidence removed). NCIT:C3174 is present on both
+    # sides — a kept token. C317 doesn't appear in the changed tokens.
+    assert edit_delta_matches(_edit(before, after, "synonym"), "C317") is False
+    # But a query that matches the changed token (or any part of it) hits.
+    assert edit_delta_matches(_edit(before, after, "synonym"), "CSP2005") is True
+
+
 def test_edit_delta_matches_comment_change_returns_true():
     # Body + qualifiers identical; only the ! comment differs and it contains
     # the query.

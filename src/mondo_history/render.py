@@ -268,15 +268,22 @@ def edit_delta_matches(
     only some portion of the clause actually changed. This is what "changed"
     means, precisely:
 
-    * The **body**, if ``before.body != after.body`` (either side counts).
-    * The trailing **``!`` comment**, if it differs (either side counts).
+    * The **body**: token-level symmetric difference of ``before.body`` and
+      ``after.body`` (via ``_tokenize`` — the same tokenizer used for the
+      word-diff renderer). If the query only appears in tokens that are on
+      both sides (kept context inside an otherwise-edited body — e.g. an
+      unchanged ``NCIT:C3174`` xref in a synonym evidence list where a
+      *different* evidence code was removed), the body doesn't count as a
+      match. If the query appears in an added or removed token, it does.
+    * The trailing **``!`` comment**: string-level compare (comments are
+      short human-readable labels, rarely edited in place).
     * Any **qualifier** in the symmetric difference of the two qualifier
       multisets (i.e. a qualifier that was added or removed, but not one
       present on both sides).
 
-    Kept-unchanged body, kept-unchanged comment, and kept-unchanged
-    qualifiers do **not** count — if the query only appears there, the
-    edit's delta doesn't actually involve the query.
+    Kept-unchanged tokens, comment, and qualifiers do **not** count — if
+    the query only appears there, the edit's delta doesn't actually
+    involve the query.
 
     Fallback: if either side can't be parsed via fastobo, return ``True``
     (safe default; preserves current behavior on the historical malformed
@@ -287,14 +294,17 @@ def edit_delta_matches(
     if before is None or after is None:
         return True
 
-    def check(text: str | None) -> bool:
+    def check_text(text: str | None) -> bool:
         return text is not None and _matches(text, query, regex, ignore_case)
 
     if before.body != after.body:
-        if check(before.body) or check(after.body):
-            return True
+        b_tokens = Counter(_tokenize(before.body))
+        a_tokens = Counter(_tokenize(after.body))
+        for token in list((b_tokens - a_tokens)) + list((a_tokens - b_tokens)):
+            if _matches(token, query, regex, ignore_case):
+                return True
     if before.comment != after.comment:
-        if check(before.comment) or check(after.comment):
+        if check_text(before.comment) or check_text(after.comment):
             return True
     # Qualifier symmetric difference via Counter multiset diff.
     b_counts = Counter(before.qualifiers)
