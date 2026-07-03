@@ -58,6 +58,7 @@ uv run mondo-history search "OMIM:609814"
 uv run mondo-history search "GARD:18551" --predicate xref
 uv run mondo-history search "https://orcid.org/0000-0002-7638-4659" --since v2026-01-01
 uv run mondo-history search "MONDO:MalaCards" --term MONDO:0012350
+uv run mondo-history search "CML" --namespace MONDO   # scope to MONDO: term IDs
 ```
 
 ## Development

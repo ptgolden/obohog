@@ -139,11 +139,14 @@ def term(
 def commit(
     sha: str = typer.Argument(..., help="Commit sha or unique prefix."),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
+    namespace: Optional[str] = typer.Option(
+        None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
+    ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show what changed at one commit, structurally rendered per term."""
     db = _open(artifact)
-    head, events = db.commit_events(sha)
+    head, events = db.commit_events(sha, namespace=namespace)
     if head is None:
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
         db.close()
@@ -179,11 +182,14 @@ def diff(
     ref_b: str = typer.Argument(..., help="Release tag, short sha, HEAD, or commit_seq."),
     artifact: Path = typer.Option(DEFAULT_ARTIFACT, help="Artifact directory."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
+    namespace: Optional[str] = typer.Option(
+        None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
+    ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
 ):
     """Show clause changes between two points, grouped by term and commit."""
     db = _open(artifact)
-    events = db.range_events(ref_a, ref_b, term_id=term)
+    events = db.range_events(ref_a, ref_b, term_id=term, namespace=namespace)
     if not events:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
@@ -200,6 +206,9 @@ def search(
     predicate: Optional[str] = typer.Option(
         None, help="Restrict to one clause kind, e.g. xref."
     ),
+    namespace: Optional[str] = typer.Option(
+        None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
+    ),
     since: Optional[str] = typer.Option(
         None, help="Show events at/after this ref (short sha, tag, or commit_seq)."
     ),
@@ -214,7 +223,7 @@ def search(
     since_seq = db.resolve_ref(since) if since is not None else None
     events = db.search_events(
         query, term_id=term, predicate=predicate, since_seq=since_seq,
-        regex=regex, ignore_case=ignore_case,
+        regex=regex, ignore_case=ignore_case, namespace=namespace,
     )
     if not events:
         console.print(f'[yellow]No events matching[/] "{query}"')

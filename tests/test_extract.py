@@ -289,3 +289,45 @@ def test_search_events_regex_ignore_case_combined(artifact: Path):
     assert sensitive == []
     assert len(insensitive) == 1
     assert insensitive[0].change.value == "DOID:4"
+
+
+def test_search_events_namespace_filter_keeps_matching_prefix(artifact: Path):
+    # The fixture has only MONDO: term_ids, so namespace="MONDO" is a no-op
+    # from a "which rows" perspective — but the SQL wire-up must be right.
+    db = HistoryDB(artifact)
+    unfiltered = db.search_events("cancer")
+    with_ns = db.search_events("cancer", namespace="MONDO")
+    db.close()
+    assert with_ns == unfiltered
+    assert len(with_ns) >= 1
+
+
+def test_search_events_namespace_filter_excludes_other_prefixes(artifact: Path):
+    db = HistoryDB(artifact)
+    hits = db.search_events("cancer", namespace="FOO")
+    db.close()
+    assert hits == []
+
+
+def test_range_events_namespace_filter(artifact: Path):
+    db = HistoryDB(artifact)
+    unfiltered = db.range_events("v1.0", "HEAD")
+    with_ns = db.range_events("v1.0", "HEAD", namespace="MONDO")
+    empty = db.range_events("v1.0", "HEAD", namespace="FOO")
+    db.close()
+    assert with_ns == unfiltered
+    assert empty == []
+
+
+def test_commit_events_namespace_filter(artifact: Path):
+    db = HistoryDB(artifact)
+    sha = duckdb.connect().execute(
+        f"SELECT sha FROM read_parquet('{artifact}/commits.parquet') WHERE commit_seq = 4"
+    ).fetchone()[0]
+    head_a, events_a = db.commit_events(sha)
+    head_b, events_b = db.commit_events(sha, namespace="MONDO")
+    _, events_empty = db.commit_events(sha, namespace="FOO")
+    db.close()
+    assert head_a is not None and head_b is not None
+    assert events_a == events_b
+    assert events_empty == []

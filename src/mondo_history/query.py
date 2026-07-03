@@ -166,7 +166,7 @@ class HistoryDB:
         return [(c["predicate"], c["value"]) for c in row[0]]
 
     def commit_events(
-        self, sha_prefix: str
+        self, sha_prefix: str, namespace: str | None = None
     ) -> tuple[Change | None, list[TermChange]]:
         """Full events for one commit, plus a Change-shaped commit header row.
 
@@ -175,7 +175,8 @@ class HistoryDB:
         empty placeholders — the CLI uses it purely for the ``sha/date/PR/message``
         header). ``events`` is ordered by ``(term_id, operation, predicate, value)``
         so ``groupby(events, key=term_id)`` gives per-term event lists directly
-        consumable by :func:`mondo_history.render.pair_events`.
+        consumable by :func:`mondo_history.render.pair_events`. Optionally
+        restricted to term IDs with a given CURIE prefix via ``namespace``.
 
         Returns ``(None, [])`` when no commit matches the sha prefix.
         """
@@ -189,16 +190,21 @@ class HistoryDB:
         commit_seq, sha, author, date, pr, message = row
         head = Change(commit_seq, date, sha, author, pr, message, "", "", "")
 
+        where = "e.commit_seq = ?"
+        params: list[object] = [commit_seq]
+        if namespace is not None:
+            where += " AND starts_with(e.term_id, ? || ':')"
+            params.append(namespace)
         rows = self.con.execute(
-            """
+            f"""
             SELECT e.term_id, s.name, e.operation, e.predicate, e.value
             FROM events e
             LEFT JOIN term_snapshots s
               ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
-            WHERE e.commit_seq = ?
+            WHERE {where}
             ORDER BY e.term_id, e.operation, e.predicate, e.value
             """,
-            [commit_seq],
+            params,
         ).fetchall()
         events = [
             TermChange(
@@ -247,13 +253,18 @@ class HistoryDB:
         return row[0]
 
     def range_events(
-        self, ref_a: str, ref_b: str, term_id: str | None = None
+        self,
+        ref_a: str,
+        ref_b: str,
+        term_id: str | None = None,
+        namespace: str | None = None,
     ) -> list[TermChange]:
         """Events in ``(lo, hi]``, one row per clause change.
 
         ``lo``/``hi`` are the two refs (any of tag, short sha, HEAD, or
         commit_seq — via :meth:`resolve_ref`), sorted so order doesn't matter.
-        Optionally restricted to one term. Rows are ordered by
+        Optionally restricted to one term (``term_id``) or one CURIE
+        prefix (``namespace``, e.g. ``"MONDO"``). Rows are ordered by
         ``(term_id, commit_seq, operation, predicate, value)`` so grouping
         by term (then by commit within term) feeds directly into the render
         pipeline.
@@ -264,6 +275,9 @@ class HistoryDB:
         if term_id is not None:
             where += " AND e.term_id = ?"
             params.append(term_id)
+        if namespace is not None:
+            where += " AND starts_with(e.term_id, ? || ':')"
+            params.append(namespace)
         rows = self.con.execute(
             f"""
             SELECT e.term_id, s.name,
@@ -298,6 +312,7 @@ class HistoryDB:
         since_seq: int | None = None,
         regex: bool = False,
         ignore_case: bool = False,
+        namespace: str | None = None,
     ) -> list[TermChange]:
         """Events whose clause ``value`` matches ``query``.
 
@@ -318,7 +333,8 @@ class HistoryDB:
         one term, ``predicate`` restricts to one clause kind (``xref``,
         ``is_a``, ...), ``since_seq`` cuts off commits older than the
         supplied ``commit_seq`` (resolve external refs via
-        :meth:`resolve_ref` in the caller).
+        :meth:`resolve_ref` in the caller), ``namespace`` restricts to
+        term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
 
         Rows come back ordered ``(term_id, commit_seq, operation,
         predicate, value)`` so grouping-by-term-then-commit feeds the
@@ -344,6 +360,9 @@ class HistoryDB:
         if since_seq is not None:
             where += " AND e.commit_seq >= ?"
             params.append(since_seq)
+        if namespace is not None:
+            where += " AND starts_with(e.term_id, ? || ':')"
+            params.append(namespace)
         rows = self.con.execute(
             f"""
             SELECT e.term_id, s.name,
