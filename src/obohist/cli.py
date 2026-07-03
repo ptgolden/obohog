@@ -16,13 +16,10 @@ from .extract import extract as run_extract
 from .gitsource import GitSource
 from .query import ArtifactNotFound, Change, HistoryDB, TermChange, TermHeader
 
-DEFAULT_PATH = "src/ontology/mondo-edit.obo"
-DEFAULT_ARTIFACT = Path("artifact")
-DEFAULT_URL = "https://github.com/monarch-initiative/mondo.git"
-DEFAULT_CLONE = Path("mondo-clone")
-# TODO: derive the PR-link base URL from the source's repo config once the
-# source subcommand group lands. For now, hardcoded to Mondo — this URL only
-# gets used for PR # → link decoration and Mondo is the only real artifact.
+# TODO: derive the PR-link base URL from the source's repo config, threaded
+# through the render pipeline. For now, hardcoded to Mondo — this URL only
+# gets used for PR # → link decoration and Mondo is the only source we
+# actually work with here.
 PR_URL_BASE = "https://github.com/monarch-initiative/mondo/pull/"
 
 
@@ -61,40 +58,114 @@ def _open_source(source: str, config: Optional[Path]) -> HistoryDB:
     return _open(_resolve_source(source, config).db_dir)
 
 
-@app.command()
-def build(
-    out: Path = typer.Option(DEFAULT_ARTIFACT, help="Output artifact directory."),
-    url: str = typer.Option(DEFAULT_URL, help="Mondo repo to clone (blob-filtered)."),
+source_app = typer.Typer(add_completion=False, help="Manage configured ontology sources.")
+app.add_typer(source_app, name="source")
+
+
+@source_app.command("list")
+def source_list(
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
+):
+    """Show configured sources with build status and disk usage."""
+    try:
+        cfg = load_config(config)
+    except ConfigError as err:
+        console.print(f"[red]{err}[/]")
+        raise typer.Exit(1)
+    console.print(f"[dim]Config:[/]  {cfg.path}")
+    console.print(f"[dim]Storage:[/] {cfg.storage}")
+    console.print()
+    if not cfg.sources:
+        console.print("[yellow]No sources configured.[/]")
+        return
+    for name, source in cfg.sources.items():
+        _print_source_row(name, source)
+
+
+def _print_source_row(name: str, source: SourceConfig) -> None:
+    """One line: source name, repo, status, commit count, clone / db sizes."""
+    line = Text()
+    line.append(f"{name:<10}", style="bold cyan")
+    line.append(f"  {source.repo:<48}", style="dim")
+    status, commits = _source_status(source)
+    line.append(f"  {status:<12}", style="dim")
+    line.append(f"  {commits:>10}", style="dim")
+    clone_size = _dir_size(source.clone_dir)
+    db_size = _dir_size(source.db_dir)
+    line.append(f"  clone {_fmt_size(clone_size):>7}", style="dim")
+    line.append(f"  db {_fmt_size(db_size):>7}", style="dim")
+    console.print(line)
+
+
+def _source_status(source: SourceConfig) -> tuple[str, str]:
+    """Best-effort status label + commit count for a configured source."""
+    if not source.db_dir.exists():
+        return "not built", "—"
+    try:
+        db = HistoryDB(source.db_dir)
+    except ArtifactNotFound:
+        return "not built", "—"
+    row = db.con.execute("SELECT COUNT(*) FROM commits").fetchone()
+    db.close()
+    return "built", f"{row[0]:,}" if row else "—"
+
+
+def _dir_size(path: Path) -> int:
+    """Total bytes on disk for everything under path, or 0 if it doesn't exist."""
+    if not path.exists():
+        return 0
+    total = 0
+    for entry in path.rglob("*"):
+        if entry.is_file():
+            try:
+                total += entry.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _fmt_size(nbytes: int) -> str:
+    """Human-readable size, one decimal place."""
+    if nbytes == 0:
+        return "—"
+    units = ["B", "K", "M", "G", "T"]
+    size = float(nbytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024
+    return f"{size:.1f}{units[-1]}"
+
+
+@source_app.command("sync")
+def source_sync(
+    name: str = typer.Argument(..., help="Source name (as declared in obohist.toml)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohist.toml."),
     since: Optional[str] = typer.Option(
         None, help="Only index history at/after this git date, e.g. 2026-06-01."
     ),
-    clone_dir: Path = typer.Option(DEFAULT_CLONE, help="Where the blob-filtered clone lives."),
-    repo: Optional[str] = typer.Option(
-        None, help="Use an existing local clone instead of cloning --url."
-    ),
-    path: str = typer.Option(DEFAULT_PATH, help="File whose history to index."),
     limit: Optional[int] = typer.Option(None, help="Index only the most recent N versions."),
     jobs: int = typer.Option(
         0, help="Parser processes: 0 = auto (cores-2), 1 = single-threaded, N = that many."
     ),
     chunk_size: int = typer.Option(
-        0, help="Commits per chunk (0 = auto, ~4 chunks/worker). Smaller = better "
-        "load balancing but more per-chunk seed-parse overhead."
+        0, help="Commits per chunk (0 = auto, ~4 chunks/worker)."
     ),
     progress: bool = typer.Option(True, help="Show a per-commit progress bar (parallel builds)."),
 ):
-    """Extract history into a Parquet artifact, cloning Mondo if needed."""
-    clone_path = _ensure_clone(url, since, clone_dir, repo)
+    """Clone (or update) a source's git history and rebuild its database."""
+    source = _resolve_source(name, config)
+    clone_path = _ensure_source_clone(source, since)
     if jobs == 1:
         with GitSource(clone_path) as src:
-            counts = run_extract(src, path, out, limit=limit)
+            counts = run_extract(src, source.file, source.db_dir, limit=limit)
     else:
         counts = build_parallel(
-            clone_path, path, out, jobs=(jobs or None),
+            clone_path, source.file, source.db_dir, jobs=(jobs or None),
             chunk_size=(chunk_size or None), limit=limit, progress=progress,
         )
     msg = (
-        f"[green]Built[/] {out} — {counts['commits']} commits, "
+        f"[green]Built[/] {source.db_dir} — {counts['commits']} commits, "
         f"{counts['snapshots']} snapshots, {counts['events']} events"
     )
     if counts.get("skipped"):
@@ -102,21 +173,22 @@ def build(
     console.print(msg + ".")
 
 
-def _ensure_clone(url: str, since: Optional[str], clone_dir: Path, repo: Optional[str]) -> str:
-    """Return a path to a local clone, cloning if necessary."""
-    if repo is not None:
-        console.print(f"Reading history from existing clone [cyan]{repo}[/].")
-        return repo
-    if clone_dir.exists():
+def _ensure_source_clone(source: SourceConfig, since: Optional[str]) -> str:
+    """Return the path to source's clone, cloning it (blob-filtered) if missing."""
+    if source.clone_dir.exists():
         console.print(
-            f"Reusing clone at [cyan]{clone_dir}[/] "
+            f"Reusing clone at [cyan]{source.clone_dir}[/] "
             "(delete it to re-clone with different bounds)."
         )
-        return str(clone_dir)
+        return str(source.clone_dir)
     bound = f", since {since}" if since else ""
-    console.print(f"Cloning [cyan]{url}[/] (blob-filtered{bound}) → {clone_dir} …")
-    GitSource.clone(url, clone_dir, since=since).close()
-    return str(clone_dir)
+    console.print(
+        f"Cloning [cyan]{source.repo}[/] (blob-filtered{bound}) → "
+        f"{source.clone_dir} …"
+    )
+    source.clone_dir.parent.mkdir(parents=True, exist_ok=True)
+    GitSource.clone(source.repo, source.clone_dir, since=since).close()
+    return str(source.clone_dir)
 
 
 @app.command()
