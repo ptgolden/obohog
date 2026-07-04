@@ -237,7 +237,6 @@ def build_parallel(
 
     Runs strictly offline: blobs must already be present in ``clone_path``.
     """
-    os.environ.setdefault("GIT_NO_LAZY_FETCH", "1")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     # Clear any prior part-files: workers append numbered files that a glob would
@@ -246,10 +245,18 @@ def build_parallel(
         shutil.rmtree(out / name, ignore_errors=True)
         (out / f"{name}.parquet").unlink(missing_ok=True)
 
+    # The parent's `iter_file_history` uses `git log --follow`, which fires
+    # rename detection and can need blobs for *former* paths of the tracked
+    # file — outside the sparse cone the backfill was scoped to. Let the
+    # parent lazy-fetch those (small: a handful of blobs at most), then
+    # disable lazy fetching before spawning workers so they can't race on
+    # parallel fetches.
     src = GitSource(clone_path)
     full = list(src.iter_file_history(obo_path))
     tags = src.read_tags()
     src.close()
+
+    os.environ["GIT_NO_LAZY_FETCH"] = "1"
 
     offset = 0 if limit is None else max(0, len(full) - limit)
     windowed = full[offset:]
