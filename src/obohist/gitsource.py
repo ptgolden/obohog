@@ -137,10 +137,15 @@ class GitSource:
         ``git backfill --sparse``, which asks the promisor remote for every
         blob that is currently missing under the sparse pattern in one batched
         delta-packed transfer. Idempotent — subsequent runs are near-free.
+
+        The backfill can take minutes on a large repo; stderr is left connected
+        to the caller so git's own transfer progress ("Receiving objects: 42%
+        (1234/2938)") streams to the terminal live. Sparse-checkout setup is
+        instantaneous and stays captured.
         """
         _run(["git", "sparse-checkout", "init"], cwd=self.repo_dir)
         _run(["git", "sparse-checkout", "set", path], cwd=self.repo_dir)
-        _run(["git", "backfill", "--sparse"], cwd=self.repo_dir)
+        _run_streaming(["git", "backfill", "--sparse"], cwd=self.repo_dir)
 
     def iter_file_history(self, path: str) -> Iterator[FileVersion]:
         """Yield every version of ``path``, oldest first, following renames.
@@ -427,3 +432,19 @@ def _run(cmd: list[str], cwd: Path | None) -> str:
     if result.returncode != 0:
         raise GitError(f"{' '.join(cmd)} failed:\n{result.stderr}")
     return result.stdout
+
+
+def _run_streaming(cmd: list[str], cwd: Path | None) -> None:
+    """Run a git command with stderr inherited so the user sees its progress.
+
+    Used for long-running operations like ``git backfill --sparse`` where
+    git's own transfer-progress output (`Receiving objects: 42% (…)`) is
+    much more informative than a "please wait" spinner from us. Stdout
+    stays captured so it doesn't interleave with the rest of the CLI's
+    rich rendering (backfill's stdout is empty on success anyway).
+    """
+    result = subprocess.run(
+        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=None, text=True,
+    )
+    if result.returncode != 0:
+        raise GitError(f"{' '.join(cmd)} failed with exit code {result.returncode}")
