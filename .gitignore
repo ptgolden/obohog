@@ -13,6 +13,9 @@ __pycache__/
 NOTES.md
 /2026-*-note.*.md
 
+# User-local config (only the .example is committed)
+/obohog.toml
+
 # Editor / OS
 .DS_Store
 *.swp

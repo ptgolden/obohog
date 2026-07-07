@@ -11,7 +11,15 @@ from rich.console import Console
 from rich.text import Text
 
 from . import render
-from .config import Config, ConfigError, SourceConfig, load_config
+from .config import (
+    Config,
+    ConfigError,
+    GitFileSource,
+    GitHubReleaseSource,
+    SourceConfig,
+    load_config,
+)
+from .providers import get_provider
 from .extract import build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
@@ -40,6 +48,16 @@ def _print_pr_link(pr_number: int) -> None:
         console.print(Text(f"    → PR #{pr_number}", style="dim"))
         return
     url = f"{_PR_URL_BASE}{pr_number}"
+    line = Text("    → ", style="dim")
+    line.append(url, style=f"link {url} dim cyan")
+    console.print(line)
+
+
+def _print_snapshot_link(url: str) -> None:
+    """Print the ``→ <url>`` line for a release-based commit. Same visual
+    slot as the PR link (release commits don't have a PR to link to; this
+    is the page where curators can dig into the release's PRs, notes, etc.).
+    """
     line = Text("    → ", style="dim")
     line.append(url, style=f"link {url} dim cyan")
     console.print(line)
@@ -92,12 +110,15 @@ def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> Non
     """
     pr_title = _pr_title_from_merge(head.message)
     subject = head.message.splitlines()[0] if head.message else ""
+    snapshot_url = getattr(head, "snapshot_url", None)
     if pr_title is not None:
         prefix.append(pr_title, style="dim")
         console.print(prefix)
         console.print(Text("      " + subject, style="dim italic"))
         if head.pr_number is not None:
             _print_pr_link(head.pr_number)
+        if snapshot_url:
+            _print_snapshot_link(snapshot_url)
         if show_commits and head.branch_commits:
             _print_branch_commits(head.branch_commits)
     else:
@@ -105,6 +126,8 @@ def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> Non
         console.print(prefix)
         if head.pr_number is not None:
             _print_pr_link(head.pr_number)
+        if snapshot_url:
+            _print_snapshot_link(snapshot_url)
         if head.branch_commits:
             _print_branch_commits(head.branch_commits)
 
@@ -194,7 +217,7 @@ def source_list(
         clone = _fmt_size(_dir_size(source.clone_dir))
         db = _fmt_size(_dir_size(source.db_dir))
         table.add_row(
-            name, _short_repo(source.repo), source.file,
+            name, _short_repo(source.repo), source.tracked_path,
             status, commits, clone, db,
         )
     console.print()
@@ -268,15 +291,15 @@ def source_sync(
     ),
     progress: bool = typer.Option(True, help="Show a per-commit progress bar (parallel builds)."),
 ):
-    """Clone (or update) a source's git history and rebuild its database."""
+    """Clone (or update) a source's history and rebuild its database."""
     source = _resolve_source(name, config)
-    clone_path = _ensure_source_clone(source, since)
+    clone_path = get_provider(source, console).ensure_synced(source, since=since)
     if jobs == 1:
         with GitSource(clone_path) as src:
-            counts = run_extract(src, source.file, source.db_dir, limit=limit)
+            counts = run_extract(src, source.tracked_path, source.db_dir, limit=limit)
     else:
         counts = build_parallel(
-            clone_path, source.file, source.db_dir, jobs=(jobs or None),
+            clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
             chunk_size=(chunk_size or None), limit=limit, progress=progress,
         )
     msg = (
@@ -286,43 +309,6 @@ def source_sync(
     if counts.get("skipped"):
         msg += f", [yellow]{counts['skipped']} skipped[/]"
     console.print(msg + ".")
-
-
-def _ensure_source_clone(source: SourceConfig, since: Optional[str]) -> str:
-    """Return the path to source's clone, cloning it (blob-filtered) if missing.
-
-    After the initial clone, we run ``git backfill --sparse`` scoped to the
-    source's OBO file. That pulls every historical blob of just that one file
-    in a single delta-packed transfer — much cheaper than the surprise
-    lazy-fetches ``git log --follow`` would otherwise trigger for rename
-    detection during the build. Backfill is idempotent, so it's cheap to call
-    again on a reused clone in case the source's file path changed.
-    """
-    if not source.clone_dir.exists():
-        bound = f", since {since}" if since else ""
-        console.print(
-            f"Cloning [cyan]{source.repo}[/] (blob-filtered{bound}) → "
-            f"{source.clone_dir} …"
-        )
-        source.clone_dir.parent.mkdir(parents=True, exist_ok=True)
-        GitSource.clone(source.repo, source.clone_dir, since=since).close()
-    else:
-        console.print(
-            f"Reusing clone at [cyan]{source.clone_dir}[/] "
-            "(delete it to re-clone with different bounds)."
-        )
-    console.print(
-        f"Backfilling blobs for [cyan]{source.file}[/] "
-        "(one delta-packed fetch of all historical versions) …"
-    )
-    GitSource(source.clone_dir).backfill_file(source.file)
-    # Server-side backfill packs are transfer-optimized, not size-optimized —
-    # a client-side repack often shrinks them ~5×. Nudge, don't force.
-    console.print(
-        f"[dim]Tip: [cyan]obohog source repack {source.name}[/] to reclaim "
-        "disk space on the clone.[/]"
-    )
-    return str(source.clone_dir)
 
 
 @source_app.command("repack")

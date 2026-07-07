@@ -1,9 +1,0 @@
-storage = "./data"
-
-[source.mondo]
-repo = "https://github.com/monarch-initiative/mondo"
-file = "src/ontology/mondo-edit.obo"
-
-[source.pato]
-repo = "https://github.com/pato-ontology/pato"
-file = "src/ontology/pato-edit.obo"
