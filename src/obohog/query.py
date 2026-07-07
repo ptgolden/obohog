@@ -96,7 +96,7 @@ class HistoryDB:
         if absent:
             raise ArtifactNotFound(
                 f"No history artifact at '{self.dir}' (missing: {', '.join(absent)}). "
-                "Run `obohog build` first, or pass --artifact <dir>."
+                "Run `obohog source sync <name>` first."
             )
         self.con = duckdb.connect(":memory:")
         for name in ("commits", "term_snapshots", "events", "releases", "skipped"):

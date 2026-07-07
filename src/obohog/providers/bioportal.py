@@ -193,9 +193,23 @@ class BioPortalProvider:
             author_name=author_name,
             author_email=author_email,
             committed_date=sub["_picked_date"],
-            message=tag,
+            message=_commit_subject(sub, tag),
             console=self.console,
         )
+
+
+def _commit_subject(sub: dict, tag: str) -> str:
+    """Human-facing commit subject for a BioPortal submission.
+
+    If the submission had a real version (any value other than a
+    placeholder / null / empty), use it verbatim so the subject reads
+    like the version-labeled tag. Otherwise say ``Submission #<id>``
+    rather than exposing the synthetic ``sub-<id>`` git tag we picked
+    for the ref.
+    """
+    if tag.startswith("sub-"):
+        return f"Submission #{sub['submissionId']}"
+    return tag
 
 
 def _require_api_key() -> str:

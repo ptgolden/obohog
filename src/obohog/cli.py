@@ -31,6 +31,17 @@ from .query import ArtifactNotFound, Change, HistoryDB, TermChange, TermHeader
 # per CLI invocation, so a module-level slot is safe here.
 _PR_URL_BASE: str | None = None
 
+# For synthetic-git source types (github-release, bioportal), commit shas
+# reference nothing outside the local materialized repo — noise, not
+# signal. Skip them in the commit-header line for those source types.
+_HIDE_COMMIT_SHA: bool = False
+
+# Prepended to the commit subject in the header line. Used to tag BioPortal
+# commits with ``"BioPortal: "`` since their subjects (e.g. ``2025-08-29``,
+# ``Submission #4``) don't otherwise carry the source's identity, and can
+# collide visually with the date column.
+_SUBJECT_PREFIX: str = ""
+
 # GitHub HTTPS URL, with or without a trailing ``.git``. Anything else
 # (SSH URLs, local paths, non-GitHub hosts) → no PR link.
 _GITHUB_HTTPS = re.compile(r"^https?://github\.com/([^/]+/[^/]+?)(?:\.git)?/?$")
@@ -92,6 +103,25 @@ def _pr_title_from_merge(message: str) -> str | None:
     return None
 
 
+def _commit_header_prefix(head, lead: str) -> Text:
+    """Build the ``<lead><sha> <date> <author>  `` prefix that leads a
+    commit-header line. ``lead`` is the caller-specific leading text
+    (e.g. ``"\\n● "``, ``"  ● "``) that differs by view.
+
+    Skips the sha for synthetic-git source types where it references
+    only the local materialized repo — noise, not signal.
+    """
+    line = Text(lead)
+    if not _HIDE_COMMIT_SHA:
+        line.append(head.sha[:7], style="bold yellow")
+        line.append(f"  {_date(head.committed_date)}  ")
+    else:
+        line.append(f"{_date(head.committed_date)}  ")
+    if head.author_name:
+        line.append(f"{head.author_name}  ", style="cyan")
+    return line
+
+
 def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> None:
     """Given an already-built ``sha  date  author  `` prefix Text, append the
     editorial subject line and print, followed by any demoted boilerplate,
@@ -108,12 +138,17 @@ def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> Non
       * primary line: the raw subject
       * branch commits: shown when present (only editorial signal for
         old-style merges with empty bodies)
+
+    ``_SUBJECT_PREFIX`` (set per-source via :func:`_open_source`) is
+    prepended to the editorial line — e.g. ``BioPortal: `` for
+    BioPortal sources so their bare-date subjects don't visually collide
+    with the date column.
     """
     pr_title = _pr_title_from_merge(head.message)
     subject = head.message.splitlines()[0] if head.message else ""
     snapshot_url = getattr(head, "snapshot_url", None)
     if pr_title is not None:
-        prefix.append(pr_title, style="dim")
+        prefix.append(_SUBJECT_PREFIX + pr_title, style="dim")
         console.print(prefix)
         console.print(Text("      " + subject, style="dim italic"))
         if head.pr_number is not None:
@@ -123,7 +158,7 @@ def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> Non
         if show_commits and head.branch_commits:
             _print_branch_commits(head.branch_commits)
     else:
-        prefix.append(subject, style="dim")
+        prefix.append(_SUBJECT_PREFIX + subject, style="dim")
         console.print(prefix)
         if head.pr_number is not None:
             _print_pr_link(head.pr_number)
@@ -175,14 +210,23 @@ def _resolve_source(source: str, config: Optional[Path]) -> SourceConfig:
 def _open_source(source: str, config: Optional[Path]) -> HistoryDB:
     """Combine config lookup and DB open into one call for query commands.
 
-    Also stashes the source's derived PR URL base globally so ``_print_pr_link``
-    can produce clickable URLs matching this specific source.
+    Also configures per-source render knobs (PR URL base, sha visibility,
+    subject prefix) as module-level state — query commands are
+    single-threaded, one-source-per-invocation, so a global slot is
+    the pragmatic choice.
     """
     src = _resolve_source(source, config)
-    global _PR_URL_BASE
+    global _PR_URL_BASE, _HIDE_COMMIT_SHA, _SUBJECT_PREFIX
     # Only git-file / github-release sources have a `repo` URL that could
     # yield a GitHub PR link base. BioPortal sources render without one.
     _PR_URL_BASE = _pr_url_base(src.repo) if hasattr(src, "repo") else None
+    # Commit shas are meaningful (they identify a real upstream commit)
+    # only for git-file sources. The other providers materialize a
+    # synthetic repo, and their shas are build-time artifacts.
+    _HIDE_COMMIT_SHA = not isinstance(src, GitFileSource)
+    # BioPortal commit subjects (a bare date, or "Submission #N") don't
+    # otherwise identify their source, so tag them.
+    _SUBJECT_PREFIX = "BioPortal: " if isinstance(src, BioPortalSource) else ""
     return _open(src.db_dir)
 
 
@@ -540,11 +584,7 @@ def _render_timeline(
     for _, group in groupby(changes, key=lambda c: c.commit_seq):
         rows = list(group)
         head = rows[0]
-        header_line = Text("\n● ")
-        header_line.append(head.sha[:7], style="bold yellow")
-        header_line.append(f"  {_date(head.committed_date)}  ")
-        if head.author_name:
-            header_line.append(f"{head.author_name}  ", style="cyan")
+        header_line = _commit_header_prefix(head, "\n● ")
         _render_commit_header(head, header_line, show_commits=show_commits)
         for op in render.pair_events(rows):
             console.print(render.render_op(op, truncate=cap))
@@ -583,18 +623,25 @@ def _render_header(
         console.print(summary)
 
         span = Text()
-        span.append(
-            f"first {_date(header.first_date)} ({header.first_sha[:7]})",
-            style="dim",
-        )
-        span.append("  ·  ", style="dim")
-        span.append(
-            f"last {_date(header.last_date)} ({header.last_sha[:7]}",
-            style="dim",
-        )
-        if header.last_pr is not None:
-            span.append(f", PR #{header.last_pr}", style="dim")
-        span.append(")", style="dim")
+        if _HIDE_COMMIT_SHA:
+            span.append(f"first {_date(header.first_date)}", style="dim")
+            span.append("  ·  ", style="dim")
+            span.append(f"last {_date(header.last_date)}", style="dim")
+            if header.last_pr is not None:
+                span.append(f" (PR #{header.last_pr})", style="dim")
+        else:
+            span.append(
+                f"first {_date(header.first_date)} ({header.first_sha[:7]})",
+                style="dim",
+            )
+            span.append("  ·  ", style="dim")
+            span.append(
+                f"last {_date(header.last_date)} ({header.last_sha[:7]}",
+                style="dim",
+            )
+            if header.last_pr is not None:
+                span.append(f", PR #{header.last_pr}", style="dim")
+            span.append(")", style="dim")
         console.print(span)
 
     counts = Counter(c.predicate for c in changes)
@@ -610,11 +657,7 @@ def _render_commit_view(
     show_commits: bool = False,
 ) -> None:
     """Structural view of one commit: header + per-term event groups."""
-    header_line = Text("● ")
-    header_line.append(head.sha[:7], style="bold yellow")
-    header_line.append(f"  {_date(head.committed_date)}  ")
-    if head.author_name:
-        header_line.append(f"{head.author_name}  ", style="cyan")
+    header_line = _commit_header_prefix(head, "● ")
     _render_commit_header(head, header_line, show_commits=show_commits)
     n_terms = len({tc.term_id for tc in events})
     console.print(Text(f"{n_terms} terms changed", style="dim"))
@@ -743,11 +786,7 @@ def _render_events_by_term_and_commit(
         for _, commit_group in groupby(term_rows, key=lambda tc: tc.change.commit_seq):
             commit_rows = list(commit_group)
             head = commit_rows[0].change
-            commit_header = Text("  ● ")
-            commit_header.append(head.sha[:7], style="bold yellow")
-            commit_header.append(f"  {_date(head.committed_date)}  ")
-            if head.author_name:
-                commit_header.append(f"{head.author_name}  ", style="cyan")
+            commit_header = _commit_header_prefix(head, "  ● ")
             _render_commit_header(head, commit_header, show_commits=show_commits)
             changes = [tc.change for tc in commit_rows]
             for op in render.pair_events(changes):

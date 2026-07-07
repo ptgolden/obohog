@@ -89,7 +89,7 @@ def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path
 
 
 def test_missing_artifact_raises_clear_error(tmp_path: Path):
-    with pytest.raises(ArtifactNotFound, match="Run `obohog build`"):
+    with pytest.raises(ArtifactNotFound, match="Run `obohog source sync"):
         HistoryDB(tmp_path / "does-not-exist")
 
 
