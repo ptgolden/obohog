@@ -6,7 +6,7 @@ identically regardless of provider — see :mod:`obohog.extract`. This
 keeps a clean seam at *acquisition* while letting all downstream code
 stay git-shaped and single-code-path.
 
-Two providers today:
+Three providers today:
 
 * :class:`~obohog.providers.git_file.GitFileProvider` clones the source
   repo (blob-filtered) and backfills the tracked file's history. Nothing
@@ -17,13 +17,17 @@ Two providers today:
   per release, tagged with the release name. Author, date, and message
   come from release metadata; the release page URL is recorded so
   renderers can link back.
+
+* :class:`~obohog.providers.bioportal.BioPortalProvider` materializes
+  BioPortal submissions into a synthetic git repo — one commit per
+  OBO-format submission, tagged with the submission's version.
 """
 
 from typing import Protocol
 
 from rich.console import Console
 
-from ..config import GitFileSource, GitHubReleaseSource
+from ..config import AnySource, BioPortalSource, GitFileSource, GitHubReleaseSource
 
 
 class Provider(Protocol):
@@ -31,7 +35,7 @@ class Provider(Protocol):
 
     def ensure_synced(
         self,
-        source: GitFileSource | GitHubReleaseSource,
+        source: AnySource,
         *,
         since: str | None = None,
     ) -> str:
@@ -42,9 +46,7 @@ class Provider(Protocol):
         """
 
 
-def get_provider(
-    source: GitFileSource | GitHubReleaseSource, console: Console
-) -> Provider:
+def get_provider(source: AnySource, console: Console) -> Provider:
     """Return the provider that knows how to sync ``source``."""
     if isinstance(source, GitFileSource):
         from .git_file import GitFileProvider
@@ -54,4 +56,8 @@ def get_provider(
         from .github_release import GitHubReleaseProvider
 
         return GitHubReleaseProvider(console)
+    if isinstance(source, BioPortalSource):
+        from .bioportal import BioPortalProvider
+
+        return BioPortalProvider(console)
     raise TypeError(f"No provider registered for source type: {type(source).__name__}")
