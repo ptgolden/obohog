@@ -37,6 +37,18 @@ type = "github-release"
 repo = "https://github.com/obophenotype/zebrafish-phenotype-ontology"
 asset = "zp-base.obo"
 
+# ---- type = "bioportal" ----
+# The ontology is published on BioPortal as a series of submissions.
+# obohog fetches every submission with hasOntologyLanguage == "OBO",
+# materializes each into a synthetic git commit (author = submission
+# contact, date = released, tag = submission version). No OWL→OBO
+# conversion: submissions that weren't uploaded as OBO are skipped.
+# Requires BIOPORTAL_API_KEY in .env (get one at
+# https://bioportal.bioontology.org/account).
+[source.exo]
+type = "bioportal"
+acronym = "EXO"
+
 # Optional per-source overrides (any type):
 #   clone_dir = "/some/other/place"   # default: {storage}/{name}/clone
 #   db_dir    = "/some/other/place"   # default: {storage}/{name}/db

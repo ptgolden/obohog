@@ -60,12 +60,11 @@ Chosen stack:
 - Optionally emit a convenience single-file `.duckdb` later; Parquet stays primitive.
 
 ### 3. History acquisition: providers materialize a git repo, extract walks it
-- Every configured source declares a `type` in `obohog.toml`. Two types today:
-  `git-file` (the source's own git history is the history we index) and
-  `github-release` (published releases are the history we index). Both
-  produce a git repo at `{storage}/{name}/clone`; the extract pipeline
-  walks that repo identically regardless of type. Adding a source type
-  means writing one provider module, not touching extract/query/render.
+- Every configured source declares a `type` in `obohog.toml`. Three types
+  today: `git-file`, `github-release`, and `bioportal`. All produce a
+  git repo at `{storage}/{name}/clone`; the extract pipeline walks that
+  repo identically regardless of type. Adding a source type means
+  writing one provider module, not touching extract/query/render.
 - **`git-file`** — do a `git clone --filter=blob:none --no-checkout` of the
   source repo: full commit graph + trees, **no blob contents** until
   requested. Then walk `git log --follow --reverse -- <config-declared-file>`
@@ -82,6 +81,18 @@ Chosen stack:
   `snapshot_url`. Non-goal: reconstructing which PR touched which term —
   release notes often link PRs but there's no reliable machinery to
   attribute term changes to specific PRs.
+- **`bioportal`** — enumerate submissions from BioPortal's REST API
+  (`data.bioontology.org`), filter to `hasOntologyLanguage == "OBO"`,
+  and download each via `?download_format=obo`. Non-OBO submissions
+  are skipped — **no OWL→OBO conversion** — and if the ontology
+  publishes zero OBO submissions the sync errors out cleanly. Requires
+  `BIOPORTAL_API_KEY` in a project-root `.env` (loaded via
+  `pydantic-settings`). Provenance: `author` = first contact name/email
+  on the submission (fallback `BioPortal`), `date` = `released` or
+  `creationDate`, tag = the submission's `version` string when it's a
+  valid git ref name (fallback `sub-<submissionId>`). BioPortal doesn't
+  publish per-submission web pages, so these commits carry no
+  `snapshot_url`.
 - The source URL and configured fields come from `obohog.toml` and are
   recorded in the built `build_meta`.
 
@@ -230,8 +241,11 @@ src/obohog/
   cli.py                      # command-line entry point (source subcommand + query commands)
   providers/
     __init__.py               # get_provider(source, console) → Provider dispatcher
+    _synthetic_git.py         # shared helpers: git init/tag/commit-or-tag-head for materializer providers
     git_file.py               # GitFileProvider: blob-filtered clone + backfill
     github_release.py         # GitHubReleaseProvider: materialize releases via `gh` into a synthetic git repo
+    bioportal.py              # BioPortalProvider: materialize BioPortal submissions (OBO only) via REST API
+  settings.py                 # pydantic-settings loader for .env (BIOPORTAL_API_KEY, ...)
 tests/
   fixtures/                   # tiny multi-commit OBO git repo for deterministic tests
 
