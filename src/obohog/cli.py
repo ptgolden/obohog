@@ -12,6 +12,7 @@ from rich.text import Text
 
 from . import render
 from .config import (
+    BioPortalSource,
     Config,
     ConfigError,
     GitFileSource,
@@ -179,7 +180,9 @@ def _open_source(source: str, config: Optional[Path]) -> HistoryDB:
     """
     src = _resolve_source(source, config)
     global _PR_URL_BASE
-    _PR_URL_BASE = _pr_url_base(src.repo)
+    # Only git-file / github-release sources have a `repo` URL that could
+    # yield a GitHub PR link base. BioPortal sources render without one.
+    _PR_URL_BASE = _pr_url_base(src.repo) if hasattr(src, "repo") else None
     return _open(src.db_dir)
 
 
@@ -217,22 +220,11 @@ def source_list(
         clone = _fmt_size(_dir_size(source.clone_dir))
         db = _fmt_size(_dir_size(source.db_dir))
         table.add_row(
-            name, _short_repo(source.repo), source.tracked_path,
+            name, source.source_display, source.tracked_path,
             status, commits, clone, db,
         )
     console.print()
     console.print(table)
-
-
-def _short_repo(repo: str) -> str:
-    """`https://github.com/owner/name(.git)?` → `owner/name`; other URLs pass through."""
-    trimmed = repo.rstrip("/")
-    if trimmed.endswith(".git"):
-        trimmed = trimmed[: -len(".git")]
-    parts = trimmed.split("/")
-    if len(parts) >= 2:
-        return "/".join(parts[-2:])
-    return repo
 
 
 def _source_status(source: SourceConfig) -> tuple[str, str]:

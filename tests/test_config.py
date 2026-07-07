@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from obohog.config import (
+    BioPortalSource,
     Config,
     ConfigError,
     GitFileSource,
@@ -42,6 +43,38 @@ def test_load_git_file_source(tmp_path: Path):
     # Default per-source path convention: {storage}/{name}/{clone,db}.
     assert source.clone_dir == Path("data/mondo/clone")
     assert source.db_dir == Path("data/mondo/db")
+
+
+def test_load_bioportal_source(tmp_path: Path):
+    cfg_path = _write(
+        tmp_path / "obohog.toml",
+        """
+        [source.exo]
+        type = "bioportal"
+        acronym = "EXO"
+        """,
+    )
+    cfg = load_config(cfg_path)
+    source = cfg.sources["exo"]
+    assert isinstance(source, BioPortalSource)
+    assert source.acronym == "EXO"
+    # Materializer writes to <acronym>.obo in the synthetic clone.
+    assert source.tracked_path == "EXO.obo"
+    # No `repo` field on bioportal sources; display uses the acronym.
+    assert source.source_display == "bioportal:EXO"
+    assert not hasattr(source, "repo")
+
+
+def test_bioportal_source_requires_acronym(tmp_path: Path):
+    cfg_path = _write(
+        tmp_path / "obohog.toml",
+        """
+        [source.exo]
+        type = "bioportal"
+        """,
+    )
+    with pytest.raises(ConfigError, match=r"source\.exo .* acronym"):
+        load_config(cfg_path)
 
 
 def test_load_github_release_source(tmp_path: Path):

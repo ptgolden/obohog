@@ -6,7 +6,7 @@ strategy — plus type-specific fields. The `--config <path>` CLI flag
 overrides the default lookup; otherwise we read ``./obohog.toml`` from
 the current working directory. There is no global / XDG search yet.
 
-Two source types today:
+Three source types today:
 
 ``type = "git-file"`` — the ontology's edit file lives in a git repo and
 its commit history *is* the history we index. Requires ``repo`` and
@@ -17,6 +17,12 @@ Releases; each release is one snapshot. The provider materializes each
 release into a synthetic git commit so the extract pipeline runs
 unchanged. Requires ``repo`` and ``asset`` (release asset filename to
 fetch, e.g. ``zp-base.obo``).
+
+``type = "bioportal"`` — the ontology is published on BioPortal as a
+series of *submissions*. Each submission with
+``hasOntologyLanguage == "OBO"`` becomes one snapshot. Requires
+``acronym`` (BioPortal's short identifier for the ontology, e.g.
+``EXO``). Needs ``BIOPORTAL_API_KEY`` in ``.env``.
 
 Example (also shipped as ``obohog.toml.example``)::
 
@@ -31,6 +37,10 @@ Example (also shipped as ``obohog.toml.example``)::
     type = "github-release"
     repo = "https://github.com/obophenotype/zebrafish-phenotype-ontology"
     asset = "zp-base.obo"
+
+    [source.exo]
+    type = "bioportal"
+    acronym = "EXO"
 
 Per-source paths (``clone_dir``, ``db_dir``) default to
 ``{storage}/{name}/clone`` and ``{storage}/{name}/db`` respectively, and
@@ -59,15 +69,15 @@ class _BaseSource(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str
-    repo: str
     clone_dir: Path
     db_dir: Path
 
 
 class GitFileSource(_BaseSource):
-    """A single file's history within a git repo — the original OBOHOG shape."""
+    """A single file's history within a git repo."""
 
     type: Literal["git-file"] = "git-file"
+    repo: str
     file: str  # path to the OBO file within the repo
 
     @property
@@ -75,11 +85,17 @@ class GitFileSource(_BaseSource):
         """The OBO file's location inside the source clone."""
         return self.file
 
+    @property
+    def source_display(self) -> str:
+        """Short human-facing origin label for `obohog source list`."""
+        return _short_github(self.repo)
+
 
 class GitHubReleaseSource(_BaseSource):
     """Published GitHub Releases materialized as a synthetic git history."""
 
     type: Literal["github-release"] = "github-release"
+    repo: str
     asset: str  # asset filename fetched from each release, e.g. "zp-base.obo"
 
     @property
@@ -89,16 +105,61 @@ class GitHubReleaseSource(_BaseSource):
         path is just the asset filename."""
         return self.asset
 
+    @property
+    def source_display(self) -> str:
+        return _short_github(self.repo)
+
+
+class BioPortalSource(_BaseSource):
+    """BioPortal submissions materialized as a synthetic git history.
+
+    BioPortal identifies ontologies by an ``acronym`` (e.g. ``EXO``); no
+    ``repo`` URL is involved. The provider skips non-OBO submissions and
+    errors out if the ontology publishes none at all — we don't do OWL→OBO
+    conversion.
+    """
+
+    type: Literal["bioportal"] = "bioportal"
+    acronym: str  # BioPortal ontology identifier, e.g. "EXO"
+
+    @property
+    def tracked_path(self) -> str:
+        """The OBO file's location inside the synthetic clone. Filename
+        convention is ``<acronym>.obo`` — the materializer writes each
+        submission's OBO download to this same-named path so ``git log
+        --follow`` walks the history cleanly."""
+        return f"{self.acronym}.obo"
+
+    @property
+    def source_display(self) -> str:
+        return f"bioportal:{self.acronym}"
+
+
+def _short_github(repo: str) -> str:
+    """``https://github.com/owner/name(.git)?`` → ``owner/name``; other URLs
+    pass through unchanged."""
+    trimmed = repo.rstrip("/")
+    if trimmed.endswith(".git"):
+        trimmed = trimmed[: -len(".git")]
+    parts = trimmed.split("/")
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return repo
+
 
 # Discriminated union: pydantic dispatches on the `type` tag to the right
-# subclass. Consumer code that needs `source.file` (git-file only) or
-# `source.asset` (github-release only) must narrow with `isinstance` first.
-# Callers wanting the OBO file's location in the clone regardless of source
-# type should use `source.tracked_path`.
+# subclass. Consumer code that needs `source.file` (git-file only),
+# `source.asset` (github-release only), or `source.acronym` (bioportal only)
+# must narrow with `isinstance` first. Callers wanting the OBO file's
+# location in the clone regardless of source type should use
+# ``source.tracked_path``.
 SourceConfig = Annotated[
-    Union[GitFileSource, GitHubReleaseSource],
+    Union[GitFileSource, GitHubReleaseSource, BioPortalSource],
     Field(discriminator="type"),
 ]
+
+
+AnySource = GitFileSource | GitHubReleaseSource | BioPortalSource
 
 
 @dataclass(frozen=True)
@@ -107,9 +168,9 @@ class Config:
 
     path: Path  # the config file this was loaded from
     storage: Path
-    sources: dict[str, GitFileSource | GitHubReleaseSource] = field(default_factory=dict)
+    sources: dict[str, AnySource] = field(default_factory=dict)
 
-    def get_source(self, name: str) -> GitFileSource | GitHubReleaseSource:
+    def get_source(self, name: str) -> AnySource:
         """Look up a source by name; raise a helpful error if it doesn't exist."""
         source = self.sources.get(name)
         if source is not None:
@@ -152,7 +213,7 @@ def _parse_config(path: Path, data: dict) -> Config:
     raw_sources = data.get("source", {})
     if not isinstance(raw_sources, dict):
         raise ConfigError(f"'source' must be a table in {path}, got {type(raw_sources).__name__}")
-    sources: dict[str, GitFileSource | GitHubReleaseSource] = {}
+    sources: dict[str, AnySource] = {}
     for name, section in raw_sources.items():
         if not isinstance(section, dict):
             raise ConfigError(
@@ -165,13 +226,13 @@ def _parse_config(path: Path, data: dict) -> Config:
 
 def _parse_source(
     name: str, section: dict, storage: Path, path: Path
-) -> GitFileSource | GitHubReleaseSource:
+) -> AnySource:
     # Give a clearer error than pydantic's raw "Unable to extract tag using
     # discriminator 'type'" when the field is simply missing.
     if "type" not in section:
         raise ConfigError(
             f"source.{name} in {path} is missing required field 'type' "
-            f"(expected one of: git-file, github-release)"
+            f"(expected one of: git-file, github-release, bioportal)"
         )
     default_root = storage / name
     payload = {
@@ -193,12 +254,13 @@ def _format(err: ValidationError) -> str:
     """Turn a pydantic ValidationError into a compact one-line summary.
 
     Pydantic surfaces the discriminator value (``"git-file"``,
-    ``"github-release"``) as a prefix in ``loc``; strip that so the caller
-    just sees the offending field name plus the error message.
+    ``"github-release"``, ``"bioportal"``) as a prefix in ``loc``; strip
+    that so the caller just sees the offending field name plus the error
+    message.
     """
     parts = []
     for issue in err.errors():
-        loc = [x for x in issue["loc"] if x not in ("git-file", "github-release")]
+        loc = [x for x in issue["loc"] if x not in ("git-file", "github-release", "bioportal")]
         loc_str = ".".join(str(x) for x in loc)
         msg = issue["msg"]
         parts.append(f"{loc_str}: {msg}" if loc_str else msg)
