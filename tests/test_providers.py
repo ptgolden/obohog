@@ -419,6 +419,31 @@ def test_bioportal_rolling_submission_shares_a_commit(tmp_path: Path):
     assert v1_sha == rerun_sha
 
 
+def test_bioportal_skips_mislabeled_non_obo_download(tmp_path: Path):
+    """BioPortal's per-submission metadata sometimes claims OBO for content
+    that was actually uploaded in a different format (ODT, docx). The
+    provider should log a skip rather than commit garbage."""
+    clone_dir = tmp_path / "clone"
+    src = _bioportal_source(clone_dir, "FAKE")
+    submissions = [
+        _submission(1, "sub-1", "2015-01-01T00:00:00Z"),
+        _submission(2, "v1.0", "2016-01-01T00:00:00Z"),
+    ]
+    obo_bytes = {
+        # Submission 1: metadata claims OBO but bytes are actually an ODT
+        # zip container. Should be skipped.
+        1: b"PK\x03\x04garbage",
+        # Submission 2: real OBO. Should commit.
+        2: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: uno\n",
+    }
+    provider = BioPortalProvider(Console(quiet=True))
+    with _fake_bioportal(submissions, obo_bytes):
+        provider.ensure_synced(src)
+
+    log = _run_git("log", "--reverse", "--format=%s", cwd=clone_dir).splitlines()
+    assert log == ["v1.0"]
+
+
 def test_bioportal_incremental_sync(tmp_path: Path):
     clone_dir = tmp_path / "clone"
     src = _bioportal_source(clone_dir, "FAKE")

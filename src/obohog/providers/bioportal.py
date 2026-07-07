@@ -137,7 +137,18 @@ class BioPortalProvider:
             f"[dim](submission #{sub_id})[/]"
         )
         with tempfile.TemporaryDirectory() as tmp:
-            downloaded = _download_obo(source.acronym, sub_id, api_key, Path(tmp))
+            try:
+                downloaded = _download_obo(source.acronym, sub_id, api_key, Path(tmp))
+            except _NotOBO:
+                # BioPortal's per-submission metadata sometimes claims OBO
+                # for content that was actually uploaded in another format
+                # (ODT, docx, older OWL exports). Skip and move on.
+                self.console.print(
+                    f"  [yellow]· skipping[/] [cyan]{tag}[/] "
+                    f"[dim](submission #{sub_id}: metadata says OBO but "
+                    "download isn't)[/]"
+                )
+                return
             dest = clone_dir / source.tracked_path
             shutil.copy(downloaded, dest)
 
@@ -224,19 +235,49 @@ def _get_json(session: requests.Session, url: str) -> object:
 def _download_obo(
     acronym: str, submission_id: int, api_key: str, dest_dir: Path
 ) -> Path:
-    """Download the OBO representation of submission ``submission_id`` into
-    ``dest_dir``. Returns the local file path."""
-    url = (
-        f"{_API_BASE}/ontologies/{acronym}/submissions/{submission_id}/download"
-        "?download_format=obo"
-    )
+    """Download submission ``submission_id`` as OBO bytes into ``dest_dir``.
+
+    BioPortal's ``download`` endpoint returns the file *as uploaded* — no
+    server-side format conversion despite what the metadata claims (some
+    submissions self-report as OBO but were uploaded as ODT / OWL / OFN).
+    Verify the downloaded content looks like OBO before returning; on
+    failure, raise :class:`_NotOBO` so the caller can log a skip.
+    """
+    url = f"{_API_BASE}/ontologies/{acronym}/submissions/{submission_id}/download"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{acronym}.obo"
     with _session(api_key).get(url, stream=True) as resp:
         resp.raise_for_status()
         with open(dest, "wb") as f:
             shutil.copyfileobj(resp.raw, f)
+    if not _looks_like_obo(dest):
+        raise _NotOBO(submission_id, acronym)
     return dest
+
+
+class _NotOBO(RuntimeError):
+    """Downloaded submission bytes don't look like OBO — the ``hasOntologyLanguage``
+    metadata claimed OBO but the actual upload wasn't."""
+
+    def __init__(self, submission_id: int, acronym: str):
+        self.submission_id = submission_id
+        self.acronym = acronym
+        super().__init__(
+            f"BioPortal submission {acronym}/{submission_id} claims OBO in "
+            "metadata but the download bytes aren't OBO."
+        )
+
+
+# Canonical OBO 1.x header. Any submission whose file starts with this line
+# is (structurally) OBO; anything else is a mislabeled upload we shouldn't
+# try to index.
+_OBO_HEADER = re.compile(rb"^\s*format-version:\s*\d")
+
+
+def _looks_like_obo(path: Path) -> bool:
+    with open(path, "rb") as f:
+        head = f.read(2048)
+    return bool(_OBO_HEADER.search(head))
 
 
 def _pick_date(sub: dict) -> str:
