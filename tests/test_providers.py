@@ -383,18 +383,26 @@ def test_bioportal_empty_version_falls_back_to_sub_id(tmp_path: Path):
         _submission(7, None, "2024-01-01T00:00:00Z"),
         _submission(8, "", "2024-02-01T00:00:00Z"),
         _submission(9, "bad:tag", "2024-03-01T00:00:00Z"),  # colons aren't valid ref names
+        # BioPortal literally uses the string "unknown" as a placeholder
+        # for missing version metadata (see ZFA submissions #19-30). It
+        # should behave the same as null / empty: each submission gets
+        # its own sub-<id> tag rather than collapsing them all.
+        _submission(10, "unknown", "2024-04-01T00:00:00Z"),
+        _submission(11, "UNKNOWN", "2024-05-01T00:00:00Z"),  # case-insensitive
     ]
     obo_bytes = {
         7: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: a\n",
         8: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: b\n",
         9: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: c\n",
+        10: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: d\n",
+        11: b"format-version: 1.2\n[Term]\nid: FAKE:1\nname: e\n",
     }
     provider = BioPortalProvider(Console(quiet=True))
     with _fake_bioportal(submissions, obo_bytes):
         provider.ensure_synced(src)
 
     tags = set(_run_git("tag", "--list", cwd=clone_dir).splitlines())
-    assert tags == {"sub-7", "sub-8", "sub-9"}
+    assert tags == {"sub-7", "sub-8", "sub-9", "sub-10", "sub-11"}
 
 
 def test_bioportal_rolling_submission_shares_a_commit(tmp_path: Path):

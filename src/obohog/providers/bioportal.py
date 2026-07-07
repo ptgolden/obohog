@@ -46,6 +46,13 @@ from ._synthetic_git import (
 _API_BASE = "https://data.bioontology.org"
 _TAG_SAFE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
+# Version strings BioPortal (or its uploaders) use as placeholders for
+# "we don't have a real version to report." Treated the same as ``null`` /
+# empty: fall back to the synthetic ``sub-<id>`` tag so each submission
+# with such a placeholder gets its own commit rather than colliding with
+# every other unversioned one.
+_PLACEHOLDER_VERSIONS = frozenset({"unknown"})
+
 
 class BioPortalProvider:
     """Fetch OBO submissions from BioPortal and materialize them into a git repo."""
@@ -315,12 +322,18 @@ def _pick_date(sub: dict) -> str:
 def _tag_for(sub: dict) -> str:
     """The tag we give this submission's commit.
 
-    Prefer the submission's ``version`` string, but only if it's non-empty
-    and syntactically valid as a git ref name; otherwise fall back to a
-    stable synthetic ``sub-<submissionId>``.
+    Prefer the submission's ``version`` string, but only if it's non-empty,
+    isn't a known placeholder (``"unknown"``), and is syntactically valid
+    as a git ref name. Otherwise fall back to a stable synthetic
+    ``sub-<submissionId>`` — this keeps each unversioned submission on
+    its own commit rather than collapsing them by mistake.
     """
     version = sub.get("version")
-    if version and _TAG_SAFE.match(version):
+    if (
+        version
+        and version.strip().lower() not in _PLACEHOLDER_VERSIONS
+        and _TAG_SAFE.match(version)
+    ):
         return version
     return f"sub-{sub['submissionId']}"
 
