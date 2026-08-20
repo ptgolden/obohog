@@ -4,7 +4,7 @@ import re
 from collections import Counter
 from itertools import groupby
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import typer
 from rich.console import Console
@@ -690,7 +690,9 @@ def _render_diff_view(
     summary.append(f"{n_commits}", style="bold")
     summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
     console.print(summary)
-    _render_events_by_term_and_commit(events, full=full, show_commits=show_commits)
+    _render_paired_groups(
+        _pair_by_term_and_commit(events), full=full, show_commits=show_commits
+    )
 
 
 def _render_search_view(
@@ -705,21 +707,29 @@ def _render_search_view(
 
     Before rendering, apply a clause-aware post-filter: for any paired
     ``Edit`` whose delta (body-diff, comment-diff, or qualifier symmetric
-    difference) doesn't actually contain the query, drop both constituent
-    events. Unpaired adds/removes are always kept — their whole clause is
-    "the change" by definition, so the SQL match already tells us the query
+    difference) doesn't actually contain the query, drop the edit.
+    Unpaired adds/removes are always kept — their whole clause is "the
+    change" by definition, so the SQL match already tells us the query
     is in the changed portion.
 
     See :func:`obohog.render.edit_delta_matches` for the exact rule.
     """
-    events = _filter_events_by_delta_match(events, query, regex, ignore_case)
-    if not events:
+    groups = [
+        g for g in
+        (g._replace(ops=_filter_ops_by_delta_match(g.ops, query, regex, ignore_case))
+         for g in _pair_by_term_and_commit(events))
+        if g.ops
+    ]
+    if not groups:
         console.print(f'[yellow]No events matching[/] "{query}"')
         return
-    n_terms = len({tc.term_id for tc in events})
-    n_commits = len({tc.change.commit_seq for tc in events})
+    n_events = sum(
+        2 if isinstance(op, render.Edit) else 1 for g in groups for op in g.ops
+    )
+    n_terms = len({g.term_id for g in groups})
+    n_commits = len({g.head.commit_seq for g in groups})
     summary = Text()
-    summary.append(f"Found {len(events)}", style="bold")
+    summary.append(f"Found {n_events}", style="bold")
     summary.append(" events matching ", style="dim")
     summary.append(f'"{query}"', style="bold")
     summary.append(" across ", style="dim")
@@ -728,68 +738,75 @@ def _render_search_view(
     summary.append(f"{n_commits}", style="bold")
     summary.append(" commits", style="dim")
     console.print(summary)
-    _render_events_by_term_and_commit(events, full=full, show_commits=show_commits)
+    _render_paired_groups(groups, full=full, show_commits=show_commits)
 
 
-def _filter_events_by_delta_match(
-    events: list[TermChange], query: str, regex: bool, ignore_case: bool
-) -> list[TermChange]:
-    """Drop paired-edit event pairs whose delta doesn't contain the query.
+class _PairedCommit(NamedTuple):
+    """One (term, commit) group's events, paired into render ops."""
 
-    Pairs events per commit, drops both halves of any ``Edit`` whose
-    :func:`~obohog.render.edit_delta_matches` returns False, and
-    keeps every unpaired ``Add`` / ``Remove`` as-is. Preserves the input
-    order at the (term_id, commit_seq) granularity so the downstream
-    ``groupby`` in :func:`_render_events_by_term_and_commit` still sees
-    contiguous groupings.
+    term_id: str
+    name: str | None  # the term's name at this commit, if snapshotted
+    head: Change
+    ops: list[render.Op]
+
+
+def _pair_by_term_and_commit(events: list[TermChange]) -> list[_PairedCommit]:
+    """Group ``events`` by (term, commit) and pair each group into ops.
+
+    Pairing runs once here; both the search filter and the renderer
+    consume the resulting ops, so an ``Edit`` is guaranteed to render
+    exactly as it was filtered. Expects ``events`` already ordered by
+    ``(term_id, commit_seq, ...)`` so the groupings are contiguous.
     """
-    surviving: list[TermChange] = []
-    for _, group in groupby(
-        events, key=lambda tc: (tc.term_id, tc.change.commit_seq)
-    ):
-        group_events = list(group)
-        by_change_id = {id(tc.change): tc for tc in group_events}
-        changes = [tc.change for tc in group_events]
-        for op in render.pair_events(changes):
-            if isinstance(op, render.Edit):
-                if render.edit_delta_matches(op, query, regex, ignore_case):
-                    surviving.append(by_change_id[id(op.before)])
-                    surviving.append(by_change_id[id(op.after)])
-            elif isinstance(op, render.Add):
-                surviving.append(by_change_id[id(op.change)])
-            else:  # Remove
-                surviving.append(by_change_id[id(op.change)])
-    return surviving
+    return [
+        _PairedCommit(
+            term_id,
+            rows[0].name,
+            rows[0].change,
+            render.pair_events([tc.change for tc in rows]),
+        )
+        for (term_id, _), group in groupby(
+            events, key=lambda tc: (tc.term_id, tc.change.commit_seq)
+        )
+        if (rows := list(group))
+    ]
 
 
-def _render_events_by_term_and_commit(
-    events: list[TermChange], full: bool = False, show_commits: bool = False
+def _filter_ops_by_delta_match(
+    ops: list[render.Op], query: str, regex: bool, ignore_case: bool
+) -> list[render.Op]:
+    """Keep adds/removes; keep edits only if their delta contains the query."""
+    return [
+        op for op in ops
+        if not isinstance(op, render.Edit)
+        or render.edit_delta_matches(op, query, regex, ignore_case)
+    ]
+
+
+def _render_paired_groups(
+    groups: list[_PairedCommit], full: bool = False, show_commits: bool = False
 ) -> None:
-    """Group ``events`` by term, then by commit within each term, and render.
+    """Render (term, commit) op groups as per-term sections.
 
-    Shared between ``diff`` and ``search``. Expects ``events`` already
-    ordered by ``(term_id, commit_seq, ...)`` so the groupings are
-    contiguous.
+    Shared between ``diff`` and ``search``. Expects ``groups`` ordered by
+    term so per-term runs are contiguous.
     """
     cap = None if full else render.DEFAULT_TRUNCATE
-    for term_id, term_group in groupby(events, key=lambda tc: tc.term_id):
-        term_rows = list(term_group)
+    for term_id, term_group in groupby(groups, key=lambda g: g.term_id):
+        term_entries = list(term_group)
         title = Text("\n")
         title.append(term_id, style="bold cyan")
         # Take the most recent name we saw in the range as the section header.
         latest_name = next(
-            (tc.name for tc in reversed(term_rows) if tc.name is not None), None
+            (e.name for e in reversed(term_entries) if e.name is not None), None
         )
         if latest_name:
             title.append(f" — {latest_name}", style="bold")
         console.print(title)
-        for _, commit_group in groupby(term_rows, key=lambda tc: tc.change.commit_seq):
-            commit_rows = list(commit_group)
-            head = commit_rows[0].change
-            commit_header = _commit_header_prefix(head, "  ● ")
-            _render_commit_header(head, commit_header, show_commits=show_commits)
-            changes = [tc.change for tc in commit_rows]
-            for op in render.pair_events(changes):
+        for entry in term_entries:
+            commit_header = _commit_header_prefix(entry.head, "  ● ")
+            _render_commit_header(entry.head, commit_header, show_commits=show_commits)
+            for op in entry.ops:
                 console.print(render.render_op(op, truncate=cap))
 
 
