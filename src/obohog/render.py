@@ -211,6 +211,12 @@ def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
     stanza = _STANZA_TEMPLATE.format(tag=predicate, value=value)
     try:
         doc = fastobo.load(io.BytesIO(stanza.encode()))
+    except (KeyboardInterrupt, SystemExit):
+        # The bare ``except`` below is here to absorb fastobo's Rust panics
+        # (``BaseException``, not ``Exception``). Interpreter control flow
+        # must not get absorbed with them — swallowing KeyboardInterrupt in
+        # a function this hot makes the CLI unkillable by ^C.
+        raise
     except BaseException:  # fastobo can panic, not just raise
         return None
     frames = list(doc)
