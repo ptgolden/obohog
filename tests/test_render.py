@@ -422,6 +422,8 @@ def _edit(before_val: str, after_val: str, predicate: str = "is_a") -> Edit:
         predicate=predicate,
         before=_change("remove", predicate, before_val),
         after=_change("add", predicate, after_val),
+        before_parsed=parse_clause_value(predicate, before_val),
+        after_parsed=parse_clause_value(predicate, after_val),
     )
 
 

@@ -65,6 +65,11 @@ class Edit:
     predicate: str
     before: Change  # the removed value
     after: Change   # the added value
+    # fastobo parses of the two values, computed once at pairing time and
+    # carried here so the delta filter and the renderer don't re-parse.
+    # ``None`` means fastobo couldn't parse that side.
+    before_parsed: "ParsedValue | None"
+    after_parsed: "ParsedValue | None"
 
 
 Op = Add | Remove | Edit
@@ -100,22 +105,23 @@ def pair_events(
         adds = [c for c in group if c.operation == "add"]
         removes = [c for c in group if c.operation == "remove"]
 
-        # Parse each event's body once so both passes can reuse it. ``None``
-        # means fastobo couldn't parse — those events skip pass 1 and are
-        # matched only in pass 2.
-        r_bodies = [_parsed_body(predicate, r.value) for r in removes]
-        a_bodies = [_parsed_body(predicate, a.value) for a in adds]
+        # Parse each event once; the parses drive both passes here and ride
+        # along on the resulting Edits for the delta filter and renderer.
+        # ``None`` means fastobo couldn't parse — those events skip pass 1
+        # and are matched only in pass 2.
+        r_parsed = [parse_clause_value(predicate, r.value) for r in removes]
+        a_parsed = [parse_clause_value(predicate, a.value) for a in adds]
 
         used_r: set[int] = set()
         used_a: set[int] = set()
 
         # Pass 1: pair by matching parsed body.
-        for i, rb in enumerate(r_bodies):
-            if rb is None or i in used_r:
+        for i, rp in enumerate(r_parsed):
+            if rp is None or i in used_r:
                 continue
             candidates = [
-                j for j, ab in enumerate(a_bodies)
-                if ab == rb and j not in used_a
+                j for j, ap in enumerate(a_parsed)
+                if ap is not None and ap.body == rp.body and j not in used_a
             ]
             if not candidates:
                 continue
@@ -133,7 +139,10 @@ def pair_events(
                 )
             used_r.add(i)
             used_a.add(best_j)
-            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[best_j]))
+            ops.append(Edit(
+                predicate=predicate, before=removes[i], after=adds[best_j],
+                before_parsed=rp, after_parsed=a_parsed[best_j],
+            ))
 
         # Pass 2: greedy lexical similarity for the leftovers.
         scored: list[tuple[float, int, int]] = []
@@ -152,7 +161,10 @@ def pair_events(
                 continue
             used_r.add(i)
             used_a.add(j)
-            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[j]))
+            ops.append(Edit(
+                predicate=predicate, before=removes[i], after=adds[j],
+                before_parsed=r_parsed[i], after_parsed=a_parsed[j],
+            ))
 
         for i, r in enumerate(removes):
             if i not in used_r:
@@ -163,12 +175,6 @@ def pair_events(
 
     ops.sort(key=_sort_key)
     return ops
-
-
-def _parsed_body(predicate: str, value: str) -> str | None:
-    """The fastobo-parsed body of a clause value, or ``None`` if unparseable."""
-    pv = parse_clause_value(predicate, value)
-    return pv.body if pv is not None else None
 
 
 def _sort_key(op: Op) -> tuple[str, int, str]:
@@ -301,12 +307,12 @@ def edit_delta_matches(
     the query only appears there, the edit's delta doesn't actually
     involve the query.
 
-    Fallback: if either side can't be parsed via fastobo, return ``True``
+    Fallback: if either side couldn't be parsed via fastobo, return ``True``
     (safe default; preserves current behavior on the historical malformed
     clauses fastobo rejects).
     """
-    before = parse_clause_value(edit.predicate, edit.before.value)
-    after = parse_clause_value(edit.predicate, edit.after.value)
+    before = edit.before_parsed
+    after = edit.after_parsed
     if before is None or after is None:
         return True
 
@@ -340,7 +346,7 @@ def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:
     if isinstance(op, Remove):
         return _render_plain(op.predicate, op.change.value, "-", "bold red", truncate)
     if isinstance(op, Edit):
-        return _render_edit(op.predicate, op.before.value, op.after.value, truncate)
+        return _render_edit(op, truncate)
     raise TypeError(f"unknown op: {op!r}")
 
 
@@ -351,11 +357,12 @@ def _render_plain(predicate: str, value: str, marker: str, style: str, cap: int 
     return line
 
 
-def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Text:
+def _render_edit(edit: Edit, cap: int | None) -> Text:
     """Render a paired remove/add as one ``~`` line, structure-aware.
 
-    Parses both sides via fastobo into ``(body, qualifiers, ! comment)`` and
-    picks a rendering that matches the shape of the change:
+    Reads the pairing-time fastobo parses off the ``Edit`` —
+    ``(body, qualifiers, ! comment)`` per side — and picks a rendering
+    that matches the shape of the change:
 
     * ``body`` + qualifier set identical, only ``!`` comment differs →
       render shared form plain and the comment change as one bracketed
@@ -369,11 +376,12 @@ def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Te
       then each qualifier on its own indented sub-line with a ``-``/``+``/``~``
       marker or dim if kept. Reads like an axiom-annotation diff, not a
       run-together sentence.
-    * Everything else (including any case where fastobo can't parse either
-      side) → the token-level word-diff fallback.
+    * Everything else (including any case where fastobo couldn't parse
+      either side) → the token-level word-diff fallback.
     """
-    b = parse_clause_value(predicate, before)
-    a = parse_clause_value(predicate, after)
+    predicate = edit.predicate
+    b = edit.before_parsed
+    a = edit.after_parsed
 
     if b is not None and a is not None:
         body_same = b.body == a.body
@@ -389,7 +397,7 @@ def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Te
         if not quals_multiset_same:
             return _render_qualifier_block(predicate, b, a, cap)
 
-    return _render_token_diff(predicate, before, after, cap)
+    return _render_token_diff(predicate, edit.before.value, edit.after.value, cap)
 
 
 def _render_comment_only(
