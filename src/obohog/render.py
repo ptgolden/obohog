@@ -119,12 +119,18 @@ def pair_events(
             ]
             if not candidates:
                 continue
-            best_j = max(
-                candidates,
-                key=lambda j: SequenceMatcher(
-                    None, removes[i].value, adds[j].value, autojunk=False
-                ).ratio(),
-            )
+            if len(candidates) == 1:
+                # The overwhelmingly common case — and max() would still
+                # compute the (expensive) similarity score just to select
+                # the only element.
+                best_j = candidates[0]
+            else:
+                best_j = max(
+                    candidates,
+                    key=lambda j: SequenceMatcher(
+                        None, removes[i].value, adds[j].value, autojunk=False
+                    ).ratio(),
+                )
             used_r.add(i)
             used_a.add(best_j)
             ops.append(Edit(predicate=predicate, before=removes[i], after=adds[best_j]))
