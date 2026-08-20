@@ -10,7 +10,7 @@ rendering the pair as an inline ``~`` line with intra-value diff highlighting
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from difflib import SequenceMatcher
+from cydifflib import SequenceMatcher
 from typing import Iterable
 
 import fastobo

@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "requests>=2.34.2",
+    "cydifflib>=1.2.0",
 ]
 
 [project.scripts]
