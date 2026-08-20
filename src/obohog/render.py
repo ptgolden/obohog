@@ -7,7 +7,6 @@ rendering the pair as an inline ``~`` line with intra-value diff highlighting
 (git ``--word-diff`` style). Unpaired events render as ``+`` / ``-`` as before.
 """
 
-import io
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -207,10 +206,15 @@ def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
     even panics on) them; when that happens we fall back to lexical
     rendering. fastobo already handles the tricky parts (quoted values with
     escapes, ``!`` inside strings, nested brackets), so we don't hand-parse.
+
+    Keep ``threads=1``. fastobo's default (``threads=0``) starts one thread
+    per logical core on every call, and setting up that pool costs ~19x more
+    than parsing does when the "document" is a single synthetic one-clause
+    stanza. Same reasoning as :mod:`obohog.obo`.
     """
     stanza = _STANZA_TEMPLATE.format(tag=predicate, value=value)
     try:
-        doc = fastobo.load(io.BytesIO(stanza.encode()))
+        doc = fastobo.loads(stanza, threads=1)
     except (KeyboardInterrupt, SystemExit):
         # The bare ``except`` below is here to absorb fastobo's Rust panics
         # (``BaseException``, not ``Exception``). Interpreter control flow
