@@ -12,7 +12,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-SCHEMA_VERSION = "1"
+# Bump whenever the artifact schema changes shape, so build_meta records
+# which schema an artifact was built with.
+#   1 — initial schema
+#   2 — events gained body/qualifiers/comment decomposition columns
+SCHEMA_VERSION = "2"
 
 
 class Operation(enum.StrEnum):
