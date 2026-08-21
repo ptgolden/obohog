@@ -114,7 +114,12 @@ Chosen stack:
   `content_hash`, `clauses` (list<struct{predicate, value}> — canonical normalized
   frame), `frame_text` (canonical OBO serialization for exact reconstruction).
 - **`events`** — derived: `term_id`, `commit_seq`, `sha`, `predicate`, `value`,
-  `operation` (add|remove). Semantic events (term_created / term_obsoleted /
+  `operation` (add|remove), plus `value`'s structural decomposition — `body`,
+  `qualifiers` (list), `comment` — captured from the live fastobo clause
+  object at build time. `value` stays the primitive record; the decomposition
+  satisfies a build-checked invariant (body + qualifier block + comment
+  recomposes to `value` byte-for-byte) and lets query/render work without
+  running fastobo at all. Semantic events (term_created / term_obsoleted /
   term_merged) are just filtered views over this table.
 - **`build_meta`** — schema version, generator version, source repo URL, source
   sha range (first/last `commit_seq`), obo path. Makes results deterministic and
