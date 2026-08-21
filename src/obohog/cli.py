@@ -5,7 +5,7 @@ import signal
 from collections import Counter
 from itertools import groupby
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import Iterable, Iterator, NamedTuple, Optional
 
 import typer
 from rich.console import Console
@@ -25,7 +25,14 @@ from .providers import get_provider
 from .extract import build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
-from .query import ArtifactNotFound, Change, HistoryDB, TermChange, TermHeader
+from .query import (
+    ArtifactNotFound,
+    Change,
+    EventCounts,
+    HistoryDB,
+    TermChange,
+    TermHeader,
+)
 
 # Set at each query command's entry by ``_open_source`` from the resolved
 # source config. Query commands are single-threaded and run one at a time
@@ -526,12 +533,22 @@ def diff(
 ):
     """Show clause changes between two points, grouped by term and commit."""
     db = _open_source(source, config)
-    events = db.range_events(ref_a, ref_b, term_id=term, namespace=namespace)
-    if not events:
+    filters = dict(term_id=term, namespace=namespace)
+    counts = db.range_counts(ref_a, ref_b, **filters)
+    if counts.events == 0:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
         return
-    _render_diff_view(ref_a, ref_b, events, full=full, show_commits=commits)
+    summary = Text()
+    summary.append(f"{counts.events}", style="bold")
+    summary.append(" events across ", style="dim")
+    summary.append(f"{counts.terms}", style="bold")
+    summary.append(" terms and ", style="dim")
+    summary.append(f"{counts.commits}", style="bold")
+    summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
+    console.print(summary)
+    groups = _pair_by_term_and_commit(db.iter_range_events(ref_a, ref_b, **filters))
+    _render_paired_groups(groups, full=full, show_commits=commits)
     db.close()
 
 
@@ -563,18 +580,48 @@ def search(
     """Find commits that added or removed a clause matching QUERY."""
     db = _open_source(source, config)
     since_seq = db.resolve_ref(since) if since is not None else None
-    events = db.search_events(
-        query, term_id=term, predicate=predicate, since_seq=since_seq,
+    filters = dict(
+        term_id=term, predicate=predicate, since_seq=since_seq,
         regex=regex, ignore_case=ignore_case, namespace=namespace,
     )
-    if not events:
+    counts = db.search_counts(query, **filters)
+    if counts.events == 0:
         console.print(f'[yellow]No events matching[/] "{query}"')
         db.close()
         return
-    _render_search_view(
-        query, events, regex=regex, ignore_case=ignore_case, full=full,
-        show_commits=commits,
+    # Provisional scope, printed before results start streaming. These are
+    # SQL-level candidate counts — an upper bound on what survives the
+    # clause-aware delta filter; the exact totals land in the footer.
+    scope = Text()
+    scope.append("Scanning ", style="dim")
+    scope.append(f"{counts.events}", style="bold")
+    scope.append(" candidate events across ", style="dim")
+    scope.append(f"{counts.terms}", style="bold")
+    scope.append(" terms and ", style="dim")
+    scope.append(f"{counts.commits}", style="bold")
+    scope.append(" commits …", style="dim")
+    console.print(scope)
+    groups = _pair_by_term_and_commit(db.iter_search_events(query, **filters))
+    filtered = (
+        g for g in
+        (g._replace(ops=_filter_ops_by_delta_match(g.ops, query, regex, ignore_case))
+         for g in groups)
+        if g.ops
     )
+    stats = _render_paired_groups(filtered, full=full, show_commits=commits)
+    if stats.events == 0:
+        console.print(f'\n[yellow]No events matching[/] "{query}"')
+    else:
+        footer = Text("\n")
+        footer.append(f"Found {stats.events}", style="bold")
+        footer.append(" events matching ", style="dim")
+        footer.append(f'"{query}"', style="bold")
+        footer.append(" across ", style="dim")
+        footer.append(f"{stats.terms}", style="bold")
+        footer.append(" terms and ", style="dim")
+        footer.append(f"{stats.commits}", style="bold")
+        footer.append(" commits", style="dim")
+        console.print(footer)
     db.close()
 
 
@@ -717,72 +764,6 @@ def _render_commit_view(
             console.print(render.render_op(op, truncate=cap))
 
 
-def _render_diff_view(
-    ref_a: str, ref_b: str, events: list[TermChange], full: bool = False,
-    show_commits: bool = False,
-) -> None:
-    """Structural view of a range diff: per-term sections, per-commit sub-groups."""
-    n_terms = len({tc.term_id for tc in events})
-    n_commits = len({tc.change.commit_seq for tc in events})
-    summary = Text()
-    summary.append(f"{len(events)}", style="bold")
-    summary.append(f" events across ", style="dim")
-    summary.append(f"{n_terms}", style="bold")
-    summary.append(f" terms and ", style="dim")
-    summary.append(f"{n_commits}", style="bold")
-    summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
-    console.print(summary)
-    _render_paired_groups(
-        _pair_by_term_and_commit(events), full=full, show_commits=show_commits
-    )
-
-
-def _render_search_view(
-    query: str,
-    events: list[TermChange],
-    regex: bool = False,
-    ignore_case: bool = False,
-    full: bool = False,
-    show_commits: bool = False,
-) -> None:
-    """Structural view of search hits: same layout as the diff view.
-
-    Before rendering, apply a clause-aware post-filter: for any paired
-    ``Edit`` whose delta (body-diff, comment-diff, or qualifier symmetric
-    difference) doesn't actually contain the query, drop the edit.
-    Unpaired adds/removes are always kept — their whole clause is "the
-    change" by definition, so the SQL match already tells us the query
-    is in the changed portion.
-
-    See :func:`obohog.render.edit_delta_matches` for the exact rule.
-    """
-    groups = [
-        g for g in
-        (g._replace(ops=_filter_ops_by_delta_match(g.ops, query, regex, ignore_case))
-         for g in _pair_by_term_and_commit(events))
-        if g.ops
-    ]
-    if not groups:
-        console.print(f'[yellow]No events matching[/] "{query}"')
-        return
-    n_events = sum(
-        2 if isinstance(op, render.Edit) else 1 for g in groups for op in g.ops
-    )
-    n_terms = len({g.term_id for g in groups})
-    n_commits = len({g.head.commit_seq for g in groups})
-    summary = Text()
-    summary.append(f"Found {n_events}", style="bold")
-    summary.append(" events matching ", style="dim")
-    summary.append(f'"{query}"', style="bold")
-    summary.append(" across ", style="dim")
-    summary.append(f"{n_terms}", style="bold")
-    summary.append(" terms and ", style="dim")
-    summary.append(f"{n_commits}", style="bold")
-    summary.append(" commits", style="dim")
-    console.print(summary)
-    _render_paired_groups(groups, full=full, show_commits=show_commits)
-
-
 class _PairedCommit(NamedTuple):
     """One (term, commit) group's events, paired into render ops."""
 
@@ -792,26 +773,30 @@ class _PairedCommit(NamedTuple):
     ops: list[render.Op]
 
 
-def _pair_by_term_and_commit(events: list[TermChange]) -> list[_PairedCommit]:
+def _pair_by_term_and_commit(
+    events: Iterable[TermChange],
+) -> Iterator[_PairedCommit]:
     """Group ``events`` by (term, commit) and pair each group into ops.
 
     Pairing runs once here; both the search filter and the renderer
     consume the resulting ops, so an ``Edit`` is guaranteed to render
     exactly as it was filtered. Expects ``events`` already ordered by
     ``(term_id, commit_seq, ...)`` so the groupings are contiguous.
+
+    Lazy: each group is paired as the underlying stream reaches it, so a
+    streaming source (:meth:`HistoryDB.iter_search_events`) renders its
+    first results long before the full result set has been fetched.
     """
-    return [
-        _PairedCommit(
+    for (term_id, _), group in groupby(
+        events, key=lambda tc: (tc.term_id, tc.change.commit_seq)
+    ):
+        rows = list(group)
+        yield _PairedCommit(
             term_id,
             rows[0].name,
             rows[0].change,
             render.pair_events([tc.change for tc in rows]),
         )
-        for (term_id, _), group in groupby(
-            events, key=lambda tc: (tc.term_id, tc.change.commit_seq)
-        )
-        if (rows := list(group))
-    ]
 
 
 def _filter_ops_by_delta_match(
@@ -826,16 +811,24 @@ def _filter_ops_by_delta_match(
 
 
 def _render_paired_groups(
-    groups: list[_PairedCommit], full: bool = False, show_commits: bool = False
-) -> None:
+    groups: Iterable[_PairedCommit], full: bool = False, show_commits: bool = False
+) -> EventCounts:
     """Render (term, commit) op groups as per-term sections.
 
     Shared between ``diff`` and ``search``. Expects ``groups`` ordered by
-    term so per-term runs are contiguous.
+    term so per-term runs are contiguous. Streams: only one term's groups
+    are buffered at a time (the section title shows the most recent name
+    in the term's range, which needs the term's full run — never more).
+
+    Returns the exact rendered totals, for footers — with a post-render
+    filter in the pipeline (search), these can be below any pre-count.
     """
     cap = None if full else render.DEFAULT_TRUNCATE
+    n_events = n_terms = 0
+    commit_seqs: set[int] = set()
     for term_id, term_group in groupby(groups, key=lambda g: g.term_id):
         term_entries = list(term_group)
+        n_terms += 1
         title = Text("\n")
         title.append(term_id, style="bold cyan")
         # Take the most recent name we saw in the range as the section header.
@@ -846,10 +839,13 @@ def _render_paired_groups(
             title.append(f" — {latest_name}", style="bold")
         console.print(title)
         for entry in term_entries:
+            commit_seqs.add(entry.head.commit_seq)
             commit_header = _commit_header_prefix(entry.head, "  ● ")
             _render_commit_header(entry.head, commit_header, show_commits=show_commits)
             for op in entry.ops:
+                n_events += 2 if isinstance(op, render.Edit) else 1
                 console.print(render.render_op(op, truncate=cap))
+    return EventCounts(events=n_events, terms=n_terms, commits=len(commit_seqs))
 
 
 def _render_state(term_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
