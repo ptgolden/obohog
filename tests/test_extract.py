@@ -418,3 +418,26 @@ def test_events_carry_recomposable_decomposition(artifact: Path):
         if comment is not None:
             recomposed += " ! " + comment
         assert recomposed == value
+
+
+def test_iter_search_events_matches_materialized(artifact: Path):
+    db = HistoryDB(artifact)
+    assert list(db.iter_search_events("illness")) == db.search_events("illness")
+
+
+def test_search_counts_match_candidate_rows(artifact: Path):
+    db = HistoryDB(artifact)
+    hits = db.search_events("illness")
+    counts = db.search_counts("illness")
+    assert counts.events == len(hits)
+    assert counts.terms == len({tc.term_id for tc in hits})
+    assert counts.commits == len({tc.change.commit_seq for tc in hits})
+
+
+def test_range_counts_match_rows(artifact: Path):
+    db = HistoryDB(artifact)
+    hits = db.range_events("v1.0", "HEAD")
+    counts = db.range_counts("v1.0", "HEAD")
+    assert counts.events == len(hits)
+    assert counts.terms == len({tc.term_id for tc in hits})
+    assert counts.commits == len({tc.change.commit_seq for tc in hits})
