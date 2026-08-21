@@ -16,6 +16,7 @@ from typing import Iterable
 import fastobo
 from rich.text import Text
 
+from .obo import ParsedValue, decompose_clause
 from .query import Change
 
 PAIR_THRESHOLD = 0.5
@@ -192,21 +193,6 @@ def _truncate(s: str, cap: int | None) -> str:
     return s[: cap - 1] + ELLIPSIS
 
 
-@dataclass(frozen=True)
-class ParsedValue:
-    """A clause value split into its OBO-structural parts.
-
-    ``body`` is everything except the ``{qualifiers}`` block and the ``!`` name
-    comment — the parts that carry the clause's semantic identity. ``qualifiers``
-    preserves the original order (use ``Counter`` for order-independent
-    comparison). ``comment`` is the trailing ``!`` text, ``None`` if absent.
-    """
-
-    body: str
-    qualifiers: tuple[str, ...]
-    comment: str | None
-
-
 _STANZA_TEMPLATE = "format-version: 1.2\n\n[Term]\nid: TMP:0000001\n{tag}: {value}\n"
 
 
@@ -241,43 +227,9 @@ def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
     for clause in frames[0]:
         if clause.raw_tag() == "id":
             continue
-        return _clause_to_parsed(clause)
+        _, _, serialized = str(clause).partition(": ")
+        return decompose_clause(clause, serialized)
     return None
-
-
-def _clause_to_parsed(clause) -> ParsedValue:
-    """Split ``str(clause)`` into body / qualifiers / comment.
-
-    fastobo gives us the qualifier list and comment as parsed structures.
-    Peeling them off ``str(clause)`` (which fastobo serializes deterministically)
-    leaves the "body" — the value-carrying prefix — intact for every clause
-    kind, including ``def:`` whose trailing ``[xref, xref]`` list belongs to
-    the body, not the qualifier block.
-
-    A field is recorded only if its marker was actually peeled off the
-    tail. fastobo sometimes reports a comment or qualifiers that don't
-    sit at the end of the serialization — notably ``comment:`` clauses,
-    where ``clause.comment`` is the clause's *value*, not a trailing
-    ``!`` comment. Dropping unpeeled fields keeps the invariant that
-    ``body`` + qualifier block + comment recomposes to the original
-    value, byte for byte.
-    """
-    _, _, body = str(clause).partition(": ")
-    comment = clause.comment
-    qualifiers = tuple(str(q) for q in (clause.qualifiers or []))
-    if comment is not None:
-        marker = f" ! {comment}"
-        if body.endswith(marker):
-            body = body[: -len(marker)]
-        else:
-            comment = None
-    if qualifiers:
-        marker = " {" + ", ".join(qualifiers) + "}"
-        if body.endswith(marker):
-            body = body[: -len(marker)]
-        else:
-            qualifiers = ()
-    return ParsedValue(body=body, qualifiers=qualifiers, comment=comment)
 
 
 def _matches(text: str, query: str, regex: bool, ignore_case: bool) -> bool:

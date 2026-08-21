@@ -91,3 +91,38 @@ def test_clause_delta_reports_edit_as_remove_plus_add():
     added, removed = clause_delta(before, renamed)
     assert [(c.predicate, c.value) for c in added] == [("name", "illness")]
     assert [(c.predicate, c.value) for c in removed] == [("name", "disease")]
+
+
+def test_clause_decomposition_recomposes_to_value():
+    # The stored decomposition must recompose to the serialized value byte
+    # for byte — the invariant that lets `value` be cross-checked against
+    # (or derived from) the parsed columns.
+    doc = _doc(
+        "[Term]\n"
+        "id: MONDO:0000001\n"
+        "name: disease\n"
+        "comment: Editor note: see NCIT classification\n"
+        'synonym: "illness" EXACT [DOID:4]\n'
+        'xref: NCIT:C2991 {source="MONDO:equivalentTo"} ! disease or disorder\n'
+        "is_a: MONDO:0000000 ! root\n"
+    )
+    clauses = parse_terms(doc)["MONDO:0000001"].clauses
+    assert len(clauses) == 5
+    for c in clauses:
+        recomposed = c.parsed.body
+        if c.parsed.qualifiers:
+            recomposed += " {" + ", ".join(c.parsed.qualifiers) + "}"
+        if c.parsed.comment is not None:
+            recomposed += " ! " + c.parsed.comment
+        assert recomposed == c.value, c.predicate
+
+
+def test_comment_clause_decomposition_has_no_phantom_comment():
+    # fastobo's CommentClause exposes its *value* via `.comment`; the peel
+    # must not record it as a trailing `!` comment (nothing was peeled).
+    doc = _doc("[Term]\nid: MONDO:0000001\ncomment: check NCIT; see notes\n")
+    clauses = parse_terms(doc)["MONDO:0000001"].clauses
+    (comment_clause,) = [c for c in clauses if c.predicate == "comment"]
+    assert comment_clause.parsed.body == "check NCIT; see notes"
+    assert comment_clause.parsed.comment is None
+    assert comment_clause.parsed.qualifiers == ()

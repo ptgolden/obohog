@@ -19,17 +19,40 @@ import fastobo
 _STANZA_RE = re.compile(rb"(?m)^\[[^\]\n]+\]\n")
 
 
+@dataclass(frozen=True)
+class ParsedValue:
+    """A clause value split into its OBO-structural parts.
+
+    ``body`` is everything except the ``{qualifiers}`` block and the ``!`` name
+    comment — the parts that carry the clause's semantic identity. ``qualifiers``
+    preserves the original order (use ``Counter`` for order-independent
+    comparison). ``comment`` is the trailing ``!`` text, ``None`` if absent.
+
+    Invariant: ``body`` + qualifier block + comment recomposes to the
+    serialized clause value byte-for-byte (see :func:`decompose_clause`).
+    """
+
+    body: str
+    qualifiers: tuple[str, ...]
+    comment: str | None
+
+
 @dataclass(frozen=True, order=True)
 class Clause:
     """One canonical OBO clause of a term, split into tag and remainder.
 
     ``predicate`` is the OBO tag (``name``, ``synonym``, ``xref``, ``is_a``,
     ``relationship``, ``subset``, ``def``, ``is_obsolete``, ``replaced_by``, ...);
-    ``value`` is the rest of the serialized line.
+    ``value`` is the rest of the serialized line. ``parsed`` is ``value``'s
+    structural decomposition, captured from the live fastobo clause object at
+    parse time. It is a pure function of ``(predicate, value)``, so ordering
+    and equality are still decided by those two fields alone — comparisons
+    never reach ``parsed`` with unequal values.
     """
 
     predicate: str
     value: str
+    parsed: ParsedValue
 
 
 @dataclass(frozen=True)
@@ -43,13 +66,46 @@ class TermState:
 
 def clauses_of(frame: fastobo.term.TermFrame) -> tuple[Clause, ...]:
     """Canonical, order-independent clause set for a term frame."""
-    out = [_split(str(clause)) for clause in frame]
+    out = []
+    for clause in frame:
+        predicate, _, value = str(clause).partition(": ")
+        out.append(Clause(predicate, value, decompose_clause(clause, value)))
     return tuple(sorted(out))
 
 
-def _split(line: str) -> Clause:
-    predicate, _, value = line.partition(": ")
-    return Clause(predicate, value)
+def decompose_clause(clause, value: str) -> ParsedValue:
+    """Split a clause's serialized ``value`` into body / qualifiers / comment.
+
+    fastobo gives us the qualifier list and comment as parsed structures.
+    Peeling them off ``value`` (which fastobo serializes deterministically)
+    leaves the "body" — the value-carrying prefix — intact for every clause
+    kind, including ``def:`` whose trailing ``[xref, xref]`` list belongs to
+    the body, not the qualifier block.
+
+    A field is recorded only if its marker was actually peeled off the
+    tail. fastobo sometimes reports a comment or qualifiers that don't
+    sit at the end of the serialization — notably ``comment:`` clauses,
+    where ``clause.comment`` is the clause's *value*, not a trailing
+    ``!`` comment. Dropping unpeeled fields keeps the invariant that
+    ``body`` + qualifier block + comment recomposes to ``value``, byte
+    for byte.
+    """
+    body = value
+    comment = clause.comment
+    qualifiers = tuple(str(q) for q in (clause.qualifiers or []))
+    if comment is not None:
+        marker = f" ! {comment}"
+        if body.endswith(marker):
+            body = body[: -len(marker)]
+        else:
+            comment = None
+    if qualifiers:
+        marker = " {" + ", ".join(qualifiers) + "}"
+        if body.endswith(marker):
+            body = body[: -len(marker)]
+        else:
+            qualifiers = ()
+    return ParsedValue(body=body, qualifiers=qualifiers, comment=comment)
 
 
 def hash_clauses(clauses: tuple[Clause, ...]) -> str:
