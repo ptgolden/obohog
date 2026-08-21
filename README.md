@@ -102,6 +102,10 @@ uv run obohog search   --source mondo "GARD:18551" --predicate xref
 uv run obohog search   --source mondo "\bCML\b" --regex
 uv run obohog search   --source mondo "CML" --namespace MONDO
 uv run obohog search   --source mondo "MONDO:MalaCards" --term MONDO:0012350
+
+# git-log style: the 10 most recent commits that touched an NCIT xref,
+# newest first (--reverse for oldest first).
+uv run obohog search   --source mondo "NCIT" --order date --limit 10
 ```
 
 ## Development
