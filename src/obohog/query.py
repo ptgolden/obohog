@@ -413,7 +413,12 @@ class HistoryDB:
         return where, params
 
     def _iter_term_changes(
-        self, where: str, params: list[object], batch_size: int = 10_000
+        self,
+        where: str,
+        params: list[object],
+        batch_size: int = 10_000,
+        order: str = "term",
+        reverse: bool = False,
     ) -> Iterator[TermChange]:
         """Stream ``TermChange`` rows for a WHERE over events, in render order.
 
@@ -424,7 +429,29 @@ class HistoryDB:
         incrementally, so the first batch is available almost immediately
         regardless of total result size; Change construction is amortized
         across consumption instead of paid up front.
+
+        ``order`` picks the stream's grouping spine:
+
+        * ``"term"`` — ``(term_id, commit_seq, ...)``: per-term sections,
+          each term's history chronological. The default everywhere.
+        * ``"date"`` — ``(commit_seq DESC, term_id, ...)``: newest commit
+          first, terms grouped within each commit — the ``git log`` shape.
+          A consumer that stops after N commit groups (``--limit``) makes
+          DuckDB produce only a prefix of the sort.
+
+        ``reverse`` flips the commit-time direction within the chosen
+        spine (``git log --reverse`` analog): date order becomes oldest
+        first; term order keeps its A→Z sections but lists each term's
+        history newest first.
         """
+        direction = {
+            ("term", False): "ASC", ("term", True): "DESC",
+            ("date", False): "DESC", ("date", True): "ASC",
+        }[(order, reverse)]
+        order_by = {
+            "term": f"e.term_id, c.commit_seq {direction}, e.operation, e.predicate, e.value",
+            "date": f"c.commit_seq {direction}, e.term_id, e.operation, e.predicate, e.value",
+        }[order]
         cur = self.con.execute(
             f"""
             SELECT e.term_id, s.name,
@@ -438,7 +465,7 @@ class HistoryDB:
             LEFT JOIN term_snapshots s
               ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
             WHERE {where}
-            ORDER BY e.term_id, c.commit_seq, e.operation, e.predicate, e.value
+            ORDER BY {order_by}
             """,
             params,
         )
@@ -487,20 +514,25 @@ class HistoryDB:
         """Event/term/commit counts for a range — exact (no post-filter)."""
         return self._count_events(*self._range_where(ref_a, ref_b, **filters))
 
-    def iter_search_events(self, query: str, **filters) -> Iterator[TermChange]:
+    def iter_search_events(
+        self, query: str, order: str = "term", reverse: bool = False, **filters
+    ) -> Iterator[TermChange]:
         """Stream events whose clause ``value`` matches ``query``.
 
         "Which commits added or removed a clause matching this?" —
         analogous to ``git log -S<string>`` (default substring mode) or
         ``git log -G<pattern>`` (``regex=True``) at the file-line level,
         but on our clause-event granularity. Match semantics and filters
-        as in :meth:`_search_where`.
+        as in :meth:`_search_where`; ``order``/``reverse`` as in
+        :meth:`_iter_term_changes`.
 
         Note these are *candidate* rows: the CLI's clause-aware delta
         filter (see ``obohog.render.edit_delta_matches``) further drops
         paired edits whose changed portion doesn't contain the query.
         """
-        return self._iter_term_changes(*self._search_where(query, **filters))
+        return self._iter_term_changes(
+            *self._search_where(query, **filters), order=order, reverse=reverse
+        )
 
     def search_events(self, query: str, **filters) -> list[TermChange]:
         """Materialized :meth:`iter_search_events`."""
