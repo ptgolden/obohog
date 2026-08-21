@@ -253,6 +253,14 @@ def _clause_to_parsed(clause) -> ParsedValue:
     leaves the "body" — the value-carrying prefix — intact for every clause
     kind, including ``def:`` whose trailing ``[xref, xref]`` list belongs to
     the body, not the qualifier block.
+
+    A field is recorded only if its marker was actually peeled off the
+    tail. fastobo sometimes reports a comment or qualifiers that don't
+    sit at the end of the serialization — notably ``comment:`` clauses,
+    where ``clause.comment`` is the clause's *value*, not a trailing
+    ``!`` comment. Dropping unpeeled fields keeps the invariant that
+    ``body`` + qualifier block + comment recomposes to the original
+    value, byte for byte.
     """
     _, _, body = str(clause).partition(": ")
     comment = clause.comment
@@ -261,10 +269,14 @@ def _clause_to_parsed(clause) -> ParsedValue:
         marker = f" ! {comment}"
         if body.endswith(marker):
             body = body[: -len(marker)]
+        else:
+            comment = None
     if qualifiers:
         marker = " {" + ", ".join(qualifiers) + "}"
         if body.endswith(marker):
             body = body[: -len(marker)]
+        else:
+            qualifiers = ()
     return ParsedValue(body=body, qualifiers=qualifiers, comment=comment)
 
 
