@@ -66,11 +66,6 @@ class Edit:
     predicate: str
     before: Change  # the removed value
     after: Change   # the added value
-    # fastobo parses of the two values, computed once at pairing time and
-    # carried here so the delta filter and the renderer don't re-parse.
-    # ``None`` means fastobo couldn't parse that side.
-    before_parsed: "ParsedValue | None"
-    after_parsed: "ParsedValue | None"
 
 
 Op = Add | Remove | Edit
@@ -106,23 +101,21 @@ def pair_events(
         adds = [c for c in group if c.operation == "add"]
         removes = [c for c in group if c.operation == "remove"]
 
-        # Parse each event once; the parses drive both passes here and ride
-        # along on the resulting Edits for the delta filter and renderer.
-        # ``None`` means fastobo couldn't parse — those events skip pass 1
-        # and are matched only in pass 2.
-        r_parsed = [parse_clause_value(predicate, r.value) for r in removes]
-        a_parsed = [parse_clause_value(predicate, a.value) for a in adds]
-
         used_r: set[int] = set()
         used_a: set[int] = set()
 
-        # Pass 1: pair by matching parsed body.
-        for i, rp in enumerate(r_parsed):
+        # Pass 1: pair by matching parsed body. Each Change carries its
+        # value's decomposition from the artifact; ``None`` (possible only
+        # on hand-built Changes, e.g. in tests) skips pass 1 and is matched
+        # only in pass 2.
+        for i, r in enumerate(removes):
+            rp = r.parsed
             if rp is None or i in used_r:
                 continue
             candidates = [
-                j for j, ap in enumerate(a_parsed)
-                if ap is not None and ap.body == rp.body and j not in used_a
+                j for j, a in enumerate(adds)
+                if a.parsed is not None and a.parsed.body == rp.body
+                and j not in used_a
             ]
             if not candidates:
                 continue
@@ -140,10 +133,7 @@ def pair_events(
                 )
             used_r.add(i)
             used_a.add(best_j)
-            ops.append(Edit(
-                predicate=predicate, before=removes[i], after=adds[best_j],
-                before_parsed=rp, after_parsed=a_parsed[best_j],
-            ))
+            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[best_j]))
 
         # Pass 2: greedy lexical similarity for the leftovers.
         scored: list[tuple[float, int, int]] = []
@@ -162,10 +152,7 @@ def pair_events(
                 continue
             used_r.add(i)
             used_a.add(j)
-            ops.append(Edit(
-                predicate=predicate, before=removes[i], after=adds[j],
-                before_parsed=r_parsed[i], after_parsed=a_parsed[j],
-            ))
+            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[j]))
 
         for i, r in enumerate(removes):
             if i not in used_r:
@@ -275,8 +262,8 @@ def edit_delta_matches(
     (safe default; preserves current behavior on the historical malformed
     clauses fastobo rejects).
     """
-    before = edit.before_parsed
-    after = edit.after_parsed
+    before = edit.before.parsed
+    after = edit.after.parsed
     if before is None or after is None:
         return True
 
@@ -344,8 +331,8 @@ def _render_edit(edit: Edit, cap: int | None) -> Text:
       either side) → the token-level word-diff fallback.
     """
     predicate = edit.predicate
-    b = edit.before_parsed
-    a = edit.after_parsed
+    b = edit.before.parsed
+    a = edit.after.parsed
 
     if b is not None and a is not None:
         body_same = b.body == a.body

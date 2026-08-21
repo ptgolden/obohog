@@ -10,9 +10,18 @@ from pathlib import Path
 
 import duckdb
 
+from .obo import ParsedValue
+
 
 class ArtifactNotFound(Exception):
     """Raised when an artifact directory lacks the core history tables."""
+
+
+def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
+    """Convert the artifact's decomposition columns into a ParsedValue."""
+    return ParsedValue(
+        body=body, qualifiers=tuple(qualifiers or ()), comment=comment
+    )
 
 
 def _wrap_branch_commits(raw) -> tuple["BranchCommit", ...]:
@@ -42,7 +51,13 @@ class BranchCommit:
 
 @dataclass(frozen=True)
 class Change:
-    """One clause add/remove, joined to the commit that made it."""
+    """One clause add/remove, joined to the commit that made it.
+
+    ``parsed`` is the value's structural decomposition, read from the
+    artifact's body/qualifiers/comment columns. It is always present on
+    event rows; ``None`` only on synthetic commit-header rows (see
+    :meth:`HistoryDB.commit_events`) whose value is a placeholder.
+    """
 
     commit_seq: int
     committed_date: object
@@ -55,6 +70,7 @@ class Change:
     value: str
     branch_commits: tuple[BranchCommit, ...] = ()
     snapshot_url: str | None = None
+    parsed: ParsedValue | None = None
 
 
 @dataclass(frozen=True)
@@ -147,7 +163,8 @@ class HistoryDB:
             SELECT c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url
+                   c.branch_commits, c.snapshot_url,
+                   e.body, e.qualifiers, e.comment
             FROM events e
             JOIN commits c USING (commit_seq)
             WHERE {where}
@@ -160,6 +177,7 @@ class HistoryDB:
                 *row[:9],
                 branch_commits=_wrap_branch_commits(row[9]),
                 snapshot_url=row[10],
+                parsed=_wrap_parsed(*row[11:14]),
             )
             for row in rows
         ]
@@ -255,7 +273,8 @@ class HistoryDB:
             params.append(namespace)
         rows = self.con.execute(
             f"""
-            SELECT e.term_id, s.name, e.operation, e.predicate, e.value
+            SELECT e.term_id, s.name, e.operation, e.predicate, e.value,
+                   e.body, e.qualifiers, e.comment
             FROM events e
             LEFT JOIN term_snapshots s
               ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
@@ -272,9 +291,10 @@ class HistoryDB:
                     commit_seq, date, sha, author, pr, message, op, pred, val,
                     branch_commits=branch_commits,
                     snapshot_url=snapshot_url,
+                    parsed=_wrap_parsed(body, qualifiers, comment),
                 ),
             )
-            for term_id, name, op, pred, val in rows
+            for term_id, name, op, pred, val, body, qualifiers, comment in rows
         ]
         return head, events
 
@@ -344,7 +364,8 @@ class HistoryDB:
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url
+                   c.branch_commits, c.snapshot_url,
+                   e.body, e.qualifiers, e.comment
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
@@ -362,9 +383,11 @@ class HistoryDB:
                     seq, date, sha, author, pr, message, op, pred, val,
                     branch_commits=_wrap_branch_commits(bc),
                     snapshot_url=snapshot_url,
+                    parsed=_wrap_parsed(body, qualifiers, comment),
                 ),
             )
-            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc, snapshot_url in rows
+            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc, snapshot_url,
+                body, qualifiers, comment in rows
         ]
 
     def search_events(
@@ -432,7 +455,8 @@ class HistoryDB:
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url
+                   c.branch_commits, c.snapshot_url,
+                   e.body, e.qualifiers, e.comment
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
@@ -450,9 +474,11 @@ class HistoryDB:
                     seq, date, sha, author, pr, message, op, pred, val,
                     branch_commits=_wrap_branch_commits(bc),
                     snapshot_url=snapshot_url,
+                    parsed=_wrap_parsed(body, qualifiers, comment),
                 ),
             )
-            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc, snapshot_url in rows
+            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc, snapshot_url,
+                body, qualifiers, comment in rows
         ]
 
     def releases(self) -> list[tuple[str, int, object]]:

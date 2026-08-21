@@ -24,6 +24,9 @@ from obohog.render import (
 
 
 def _change(op: str, predicate: str, value: str, seq: int = 1) -> Change:
+    # Decompose via the same peel the extractor uses, so hand-built Changes
+    # look like artifact rows. parse_clause_value returns None for values
+    # fastobo can't parse, matching the (test-only) unparseable case.
     return Change(
         commit_seq=seq,
         committed_date="2026-01-01",
@@ -34,6 +37,7 @@ def _change(op: str, predicate: str, value: str, seq: int = 1) -> Change:
         operation=op,
         predicate=predicate,
         value=value,
+        parsed=parse_clause_value(predicate, value),
     )
 
 
@@ -422,8 +426,6 @@ def _edit(before_val: str, after_val: str, predicate: str = "is_a") -> Edit:
         predicate=predicate,
         before=_change("remove", predicate, before_val),
         after=_change("add", predicate, after_val),
-        before_parsed=parse_clause_value(predicate, before_val),
-        after_parsed=parse_clause_value(predicate, after_val),
     )
 
 
