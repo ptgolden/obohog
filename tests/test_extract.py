@@ -399,3 +399,22 @@ def test_commit_events_namespace_filter(artifact: Path):
     assert head_a is not None and head_b is not None
     assert events_a == events_b
     assert events_empty == []
+
+
+def test_events_carry_recomposable_decomposition(artifact: Path):
+    # Every events row stores body/qualifiers/comment alongside value, and
+    # the decomposition recomposes to value exactly (the invariant that
+    # makes the parsed columns trustworthy without re-parsing).
+    rows = duckdb.connect().execute(
+        f"SELECT value, body, qualifiers, comment "
+        f"FROM read_parquet('{artifact}/events.parquet')"
+    ).fetchall()
+    assert rows
+    for value, body, qualifiers, comment in rows:
+        assert body is not None
+        recomposed = body
+        if qualifiers:
+            recomposed += " {" + ", ".join(qualifiers) + "}"
+        if comment is not None:
+            recomposed += " ! " + comment
+        assert recomposed == value

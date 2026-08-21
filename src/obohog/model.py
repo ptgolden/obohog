@@ -72,6 +72,14 @@ EVENTS = pa.schema(
         ("predicate", pa.string()),
         ("value", pa.string()),
         ("operation", pa.string()),  # Operation value
+        # Structural decomposition of `value`, captured at parse time from
+        # the fastobo clause object (see obo.decompose_clause). Invariant:
+        # body + " {qualifiers}" + " ! comment" == value, byte for byte.
+        # `value` stays stored as the primitive record; these columns let
+        # query/render skip fastobo entirely.
+        ("body", pa.string()),
+        ("qualifiers", pa.list_(pa.string())),
+        ("comment", pa.string()),  # nullable: absent trailing `!` comment
     ]
 )
 
