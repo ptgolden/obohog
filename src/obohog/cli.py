@@ -1,6 +1,7 @@
 """Command-line interface for building and querying the history artifact."""
 
 import re
+import signal
 from collections import Counter
 from itertools import groupby
 from pathlib import Path
@@ -185,7 +186,48 @@ def _print_branch_commits(branch_commits) -> None:
         console.print(line)
 
 app = typer.Typer(add_completion=False, help="Build and query an OBO ontology history index.")
-console = Console()
+
+
+class _PlainConsole:
+    """Console stand-in when stdout isn't a terminal.
+
+    Piped output has its styles stripped anyway, but rich's per-print
+    machinery (measure, wrap, segment) still costs ~45µs/line — ~97% of
+    render time on large result sets. Bare ``Text`` prints go straight to
+    the stream as their plain form instead (~35x faster; long lines stay
+    unwrapped, which suits pipes and greps). Everything else — markup
+    strings, tables, empty separator prints — delegates to the wrapped
+    Console, which already renders styleless when piped.
+    """
+
+    def __init__(self, rich_console: Console):
+        self._rich = rich_console
+
+    def print(self, *args, **kwargs) -> None:
+        if len(args) == 1 and isinstance(args[0], Text) and not kwargs:
+            self._rich.file.write(args[0].plain + "\n")
+        else:
+            self._rich.print(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._rich, name)
+
+
+def _make_console() -> "Console | _PlainConsole":
+    rich_console = Console()
+    return rich_console if rich_console.is_terminal else _PlainConsole(rich_console)
+
+
+console = _make_console()
+
+
+@app.callback()
+def _app_setup() -> None:
+    # Die silently on a closed pipe (`search ... | head`), like other unix
+    # filters: restore SIGPIPE's default disposition instead of letting
+    # Python turn it into a BrokenPipeError traceback mid-render.
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 
 def _open(artifact: Path) -> HistoryDB:
