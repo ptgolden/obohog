@@ -43,6 +43,27 @@ def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
     )
 
 
+# The SELECT list that fully populates a :class:`Change`, in the exact order
+# :func:`_change_from_row` unpacks. Queries that build Changes interpolate
+# this (optionally after extra leading columns) so the column list and the
+# row mapping can't drift apart.
+_CHANGE_COLUMNS = """c.commit_seq, c.committed_date, c.sha, c.author_name,
+       c.pr_number, c.message,
+       e.operation, e.predicate, e.value,
+       c.branch_commits, c.snapshot_url,
+       e.body, e.qualifiers, e.comment"""
+
+
+def _change_from_row(row) -> "Change":
+    """Build a Change from a row SELECTed with ``_CHANGE_COLUMNS``."""
+    return Change(
+        *row[:9],
+        branch_commits=_wrap_branch_commits(row[9]),
+        snapshot_url=row[10],
+        parsed=_wrap_parsed(row[11], row[12], row[13]),
+    )
+
+
 def _wrap_branch_commits(raw) -> tuple["BranchCommit", ...]:
     """Convert a duckdb list<struct> result into a tuple of BranchCommit."""
     if not raw:
@@ -187,11 +208,7 @@ class HistoryDB:
             params.append(predicate)
         rows = self.con.execute(
             f"""
-            SELECT c.commit_seq, c.committed_date, c.sha, c.author_name,
-                   c.pr_number, c.message,
-                   e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url,
-                   e.body, e.qualifiers, e.comment
+            SELECT {_CHANGE_COLUMNS}
             FROM events e
             JOIN commits c USING (commit_seq)
             WHERE {where}
@@ -199,15 +216,7 @@ class HistoryDB:
             """,
             params,
         ).fetchall()
-        return [
-            Change(
-                *row[:9],
-                branch_commits=_wrap_branch_commits(row[9]),
-                snapshot_url=row[10],
-                parsed=_wrap_parsed(*row[11:14]),
-            )
-            for row in rows
-        ]
+        return [_change_from_row(row) for row in rows]
 
     def term_header(self, term_id: str) -> TermHeader | None:
         """Orientation stats for the term, or ``None`` if it has no events."""
@@ -473,11 +482,7 @@ class HistoryDB:
         cur = self.con.execute(
             f"""
             SELECT e.term_id, s.name,
-                   c.commit_seq, c.committed_date, c.sha, c.author_name,
-                   c.pr_number, c.message,
-                   e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url,
-                   e.body, e.qualifiers, e.comment
+                   {_CHANGE_COLUMNS}
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
@@ -491,17 +496,9 @@ class HistoryDB:
             rows = cur.fetchmany(batch_size)
             if not rows:
                 return
-            for (term_id, name, seq, date, sha, author, pr, message, op, pred,
-                 val, bc, snapshot_url, body, qualifiers, comment) in rows:
+            for row in rows:
                 yield TermChange(
-                    term_id=term_id,
-                    name=name,
-                    change=Change(
-                        seq, date, sha, author, pr, message, op, pred, val,
-                        branch_commits=_wrap_branch_commits(bc),
-                        snapshot_url=snapshot_url,
-                        parsed=_wrap_parsed(body, qualifiers, comment),
-                    ),
+                    term_id=row[0], name=row[1], change=_change_from_row(row[2:])
                 )
 
     def _count_events(self, where: str, params: list[object]) -> EventCounts:
