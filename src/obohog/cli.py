@@ -539,5 +539,31 @@ def releases(
         console.print(line)
 
 
+@app.command()
+def serve(
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+    port: int = typer.Option(8009, "--port", help="Bind port."),
+):
+    """Serve the JSON API and web UI over the configured sources."""
+    try:
+        import uvicorn
+
+        from .web.app import create_app
+    except ModuleNotFoundError as err:
+        console.print(
+            f"[red]The web server needs the 'web' extra "
+            f"(missing module: {err.name}). Install with[/] "
+            "[cyan]uv pip install 'obohog\\[web]'[/]"
+        )
+        raise typer.Exit(1)
+    try:
+        cfg = load_config(config)
+    except ConfigError as err:
+        console.print(f"[red]{err}[/]")
+        raise typer.Exit(1)
+    uvicorn.run(create_app(cfg), host=host, port=port)
+
+
 if __name__ == "__main__":
     app()
