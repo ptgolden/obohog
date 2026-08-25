@@ -15,7 +15,14 @@ from .config import ConfigError, SourceConfig, load_config
 from .providers import get_provider
 from .extract import BuildMode, build_parallel
 from .gitsource import GitSource
-from .query import ArtifactNotFound, HistoryDB, RefNotFound, SchemaMismatch
+from .query import (
+    ArtifactNotFound,
+    HistoryDB,
+    RangeFilters,
+    RefNotFound,
+    SchemaMismatch,
+    SearchFilters,
+)
 from .views import (
     SourceStyle,
     console,
@@ -392,9 +399,9 @@ def diff(
 ):
     """Show clause changes between two points, grouped by term and commit."""
     db, style = _open_source(source, config)
-    filters = dict(term_id=term, namespace=namespace)
+    filters = RangeFilters(term_id=term, namespace=namespace)
     with _query_errors():
-        counts = db.range_counts(ref_a, ref_b, **filters)
+        counts = db.range_counts(ref_a, ref_b, filters)
     if counts.events == 0:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
@@ -403,7 +410,7 @@ def diff(
         counts.events, counts.terms, counts.commits,
         tail=f" between {ref_a} and {ref_b}",
     ))
-    groups = render.pair_by_term_and_commit(db.iter_range_events(ref_a, ref_b, **filters))
+    groups = render.pair_by_term_and_commit(db.iter_range_events(ref_a, ref_b, filters))
     render_paired_groups(groups, style, full=full, show_commits=commits)
     db.close()
 
@@ -453,14 +460,14 @@ def search(
     db, style = _open_source(source, config)
     with _query_errors():
         since_seq = db.resolve_ref(since) if since is not None else None
-        filters = dict(
+        filters = SearchFilters(
             term_id=term, predicate=predicate, since_seq=since_seq,
             regex=regex, ignore_case=ignore_case, namespace=namespace,
         )
         # An invalid --regex pattern surfaces here, on the first query
         # that reaches regexp_matches; the later stream reuses the same
         # pattern, so success here means the stream won't hit it.
-        counts = db.search_counts(query, **filters)
+        counts = db.search_counts(query, filters)
     if counts.events == 0:
         console.print(f'[yellow]No events matching[/] "{query}"')
         db.close()
@@ -475,7 +482,7 @@ def search(
     ))
     console.print(scope)
     groups = render.pair_by_term_and_commit(
-        db.iter_search_events(query, order=order.value, reverse=reverse, **filters),
+        db.iter_search_events(query, filters, order=order.value, reverse=reverse),
         order=order.value,
     )
     filtered = (

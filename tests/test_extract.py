@@ -9,7 +9,14 @@ import pytest
 from obohog import model
 from obohog.extract import BuildMode, build_parallel, extract
 from obohog.gitsource import GitSource
-from obohog.query import ArtifactNotFound, HistoryDB, RefNotFound, SchemaMismatch
+from obohog.query import (
+    ArtifactNotFound,
+    HistoryDB,
+    RangeFilters,
+    RefNotFound,
+    SchemaMismatch,
+    SearchFilters,
+)
 
 OBO = "src/onto.obo"
 
@@ -489,8 +496,8 @@ def test_search_events_predicate_filter_narrows(artifact: Path):
     # DOID:4 was added as an xref on c3. Filtering by predicate=xref keeps it;
     # filtering by predicate=synonym drops it even though it's the same needle.
     db = HistoryDB(artifact)
-    xrefs = db.search_events("DOID:4", predicate="xref")
-    synonyms = db.search_events("DOID:4", predicate="synonym")
+    xrefs = db.search_events("DOID:4", SearchFilters(predicate="xref"))
+    synonyms = db.search_events("DOID:4", SearchFilters(predicate="synonym"))
     db.close()
     assert len(xrefs) == 1 and xrefs[0].change.predicate == "xref"
     assert synonyms == []
@@ -502,8 +509,8 @@ def test_search_events_term_filter_narrows(artifact: Path):
     # Restricting to MONDO:0000002 keeps the hit; restricting to a term
     # without the string drops it.
     db = HistoryDB(artifact)
-    hits = db.search_events("cancer", term_id="MONDO:0000002")
-    off_term = db.search_events("cancer", term_id="MONDO:0000001")
+    hits = db.search_events("cancer", SearchFilters(term_id="MONDO:0000002"))
+    off_term = db.search_events("cancer", SearchFilters(term_id="MONDO:0000001"))
     db.close()
     assert len(hits) == 1
     assert hits[0].term_id == "MONDO:0000002"
@@ -516,7 +523,7 @@ def test_search_events_since_filter_cuts_off_early_commits(artifact: Path):
     # of seq 2 must exclude it.
     db = HistoryDB(artifact)
     all_hits = db.search_events("illness")
-    after_c1 = db.search_events("illness", since_seq=2)
+    after_c1 = db.search_events("illness", SearchFilters(since_seq=2))
     db.close()
     assert len(all_hits) == 1
     assert after_c1 == []
@@ -527,7 +534,7 @@ def test_search_events_ignore_case_substring(artifact: Path):
     # without the flag, it doesn't.
     db = HistoryDB(artifact)
     sensitive = db.search_events("ILLNESS")
-    insensitive = db.search_events("ILLNESS", ignore_case=True)
+    insensitive = db.search_events("ILLNESS", SearchFilters(ignore_case=True))
     db.close()
     assert sensitive == []
     assert len(insensitive) == 1
@@ -537,8 +544,8 @@ def test_search_events_ignore_case_substring(artifact: Path):
 def test_search_events_regex_matches(artifact: Path):
     # The DOID:4 xref matches ^DOID:\d+$; the OMIM-style patterns don't.
     db = HistoryDB(artifact)
-    doid_hits = db.search_events(r"^DOID:\d+$", regex=True)
-    omim_hits = db.search_events(r"^OMIM:\d+$", regex=True)
+    doid_hits = db.search_events(r"^DOID:\d+$", SearchFilters(regex=True))
+    omim_hits = db.search_events(r"^OMIM:\d+$", SearchFilters(regex=True))
     db.close()
     assert len(doid_hits) == 1
     assert doid_hits[0].change.predicate == "xref"
@@ -551,8 +558,10 @@ def test_search_events_regex_ignore_case_combined(artifact: Path):
     # regex uses lowercase. Both flags combine via the 'i' option to
     # regexp_matches.
     db = HistoryDB(artifact)
-    sensitive = db.search_events(r"^doid:\d+$", regex=True)
-    insensitive = db.search_events(r"^doid:\d+$", regex=True, ignore_case=True)
+    sensitive = db.search_events(r"^doid:\d+$", SearchFilters(regex=True))
+    insensitive = db.search_events(
+        r"^doid:\d+$", SearchFilters(regex=True, ignore_case=True)
+    )
     db.close()
     assert sensitive == []
     assert len(insensitive) == 1
@@ -564,7 +573,7 @@ def test_search_events_namespace_filter_keeps_matching_prefix(artifact: Path):
     # from a "which rows" perspective — but the SQL wire-up must be right.
     db = HistoryDB(artifact)
     unfiltered = db.search_events("cancer")
-    with_ns = db.search_events("cancer", namespace="MONDO")
+    with_ns = db.search_events("cancer", SearchFilters(namespace="MONDO"))
     db.close()
     assert with_ns == unfiltered
     assert len(with_ns) >= 1
@@ -572,7 +581,7 @@ def test_search_events_namespace_filter_keeps_matching_prefix(artifact: Path):
 
 def test_search_events_namespace_filter_excludes_other_prefixes(artifact: Path):
     db = HistoryDB(artifact)
-    hits = db.search_events("cancer", namespace="FOO")
+    hits = db.search_events("cancer", SearchFilters(namespace="FOO"))
     db.close()
     assert hits == []
 
@@ -580,8 +589,8 @@ def test_search_events_namespace_filter_excludes_other_prefixes(artifact: Path):
 def test_range_events_namespace_filter(artifact: Path):
     db = HistoryDB(artifact)
     unfiltered = db.range_events("v1.0", "HEAD")
-    with_ns = db.range_events("v1.0", "HEAD", namespace="MONDO")
-    empty = db.range_events("v1.0", "HEAD", namespace="FOO")
+    with_ns = db.range_events("v1.0", "HEAD", RangeFilters(namespace="MONDO"))
+    empty = db.range_events("v1.0", "HEAD", RangeFilters(namespace="FOO"))
     db.close()
     assert with_ns == unfiltered
     assert empty == []
