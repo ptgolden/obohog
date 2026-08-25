@@ -128,17 +128,6 @@ def build(
         events.extend(event_rows)
         skipped.extend(skip_rows)
 
-    meta = [
-        {
-            "schema_version": model.SCHEMA_VERSION,
-            "generator_version": _version(),
-            "source_path": source_path,
-            "first_commit_seq": seqs[0] if seqs else None,
-            "last_commit_seq": seqs[-1] if seqs else None,
-            "n_commits": len(seqs),
-        }
-    ]
-
     releases = _release_rows(tags, seq_dates)
 
     model.write_table(commits, model.COMMITS, out_dir, "commits")
@@ -146,7 +135,11 @@ def build(
     model.write_table(events, model.EVENTS, out_dir, "events")
     model.write_table(releases, model.RELEASES, out_dir, "releases")
     model.write_table(skipped, model.SKIPPED, out_dir, "skipped")
-    model.write_table(meta, model.BUILD_META, out_dir, "build_meta")
+    _write_build_meta(
+        Path(out_dir), source_path=source_path,
+        first=seqs[0] if seqs else None, last=seqs[-1] if seqs else None,
+        n=len(seqs),
+    )
 
     return BuildReport(
         mode=BuildMode.FULL,
@@ -282,6 +275,28 @@ def _version() -> str:
     from . import __version__
 
     return __version__
+
+
+def _write_build_meta(
+    out: Path, *, source_path: str, first: int | None, last: int | None, n: int
+) -> None:
+    """Record what the artifact now covers. ALWAYS the final write of a build.
+
+    ``plan_build`` trusts this row to describe what's on disk, and for an
+    in-place update it is the commit point: an increment that dies before
+    this write leaves a consistent, merely stale artifact (its orphaned
+    ``inc-*`` parts are cleaned up by prefix on the next run, and its extra
+    ``commits``/``skipped`` rows are truncated by ``_validate_resume``).
+    """
+    row = {
+        "schema_version": model.SCHEMA_VERSION,
+        "generator_version": _version(),
+        "source_path": source_path,
+        "first_commit_seq": first,
+        "last_commit_seq": last,
+        "n_commits": n,
+    }
+    model.write_table([row], model.BUILD_META, out, "build_meta")
 
 
 # --- parallel, streaming build over a local clone -----------------------
@@ -444,12 +459,7 @@ def _build_full(
     progress: bool,
 ) -> BuildReport:
     """Build the artifact from scratch over ``windowed``."""
-    # Clear any prior part-files: workers append numbered files that a glob would
-    # union, so stale files from an aborted or earlier run must not survive.
-    for name in ("term_snapshots", "events"):
-        shutil.rmtree(out / name, ignore_errors=True)
-        (out / f"{name}.parquet").unlink(missing_ok=True)
-
+    _reset_part_tables(out)
     n = len(windowed)
     jobs, chunks = _plan_chunks(n, jobs, chunk_size)
 
@@ -471,17 +481,12 @@ def _build_full(
 
     skipped = [row for r in results for row in r["skipped"]]
     model.write_table(skipped, model.SKIPPED, out, "skipped")
-    meta = [
-        {
-            "schema_version": model.SCHEMA_VERSION,
-            "generator_version": _version(),
-            "source_path": obo_path,
-            "first_commit_seq": windowed[0].commit.seq if windowed else None,
-            "last_commit_seq": windowed[-1].commit.seq if windowed else None,
-            "n_commits": n,
-        }
-    ]
-    model.write_table(meta, model.BUILD_META, out, "build_meta")
+    _write_build_meta(
+        out, source_path=obo_path,
+        first=windowed[0].commit.seq if windowed else None,
+        last=windowed[-1].commit.seq if windowed else None,
+        n=n,
+    )
 
     return BuildReport(
         mode=BuildMode.FULL,
@@ -518,14 +523,7 @@ def _build_update(
     old_commits = resume.commit_rows
     new_versions = full[last + 1:]
     n = len(new_versions)
-
-    # An artifact from the serial builder stores single files; move them into
-    # the part-file directories so the appended parts union with them.
-    for name in ("term_snapshots", "events"):
-        single = out / f"{name}.parquet"
-        if single.exists():
-            (out / name).mkdir(exist_ok=True)
-            single.rename(out / name / "base.parquet")
+    _adopt_single_file_tables(out)
 
     # Workers get the walk from the last built commit on: index 0 is the seed
     # (already-built state to diff the first new commit against), so chunk
@@ -553,17 +551,12 @@ def _build_update(
     new_skipped = [row for r in results for row in r["skipped"]]
     model.write_table(old_skipped + new_skipped, model.SKIPPED, out, "skipped")
 
-    meta = [
-        {
-            "schema_version": model.SCHEMA_VERSION,
-            "generator_version": _version(),
-            "source_path": obo_path,
-            "first_commit_seq": resume.meta["first_commit_seq"],
-            "last_commit_seq": full[-1].commit.seq,
-            "n_commits": len(all_commits),
-        }
-    ]
-    model.write_table(meta, model.BUILD_META, out, "build_meta")
+    _write_build_meta(
+        out, source_path=obo_path,
+        first=resume.meta["first_commit_seq"],
+        last=full[-1].commit.seq,
+        n=len(all_commits),
+    )
 
     return BuildReport(
         mode=BuildMode.INCREMENTAL,
@@ -573,6 +566,30 @@ def _build_update(
         events=sum(r["events"] for r in results),
         skipped=len(new_skipped),
     )
+
+
+def _reset_part_tables(out: Path) -> None:
+    """Full-rebuild reset: drop the snapshot/event tables in both layouts.
+
+    Workers append numbered part-files that a glob would union, so stale
+    files from an aborted or earlier run must not survive.
+    """
+    for name in ("term_snapshots", "events"):
+        shutil.rmtree(out / name, ignore_errors=True)
+        (out / f"{name}.parquet").unlink(missing_ok=True)
+
+
+def _adopt_single_file_tables(out: Path) -> None:
+    """Migrate a serial artifact's single-file tables into part-file dirs.
+
+    Appending writes part-files; without this, a leftover single file would
+    shadow (or be shadowed by) the directory when queries glob the table.
+    """
+    for name in ("term_snapshots", "events"):
+        single = out / f"{name}.parquet"
+        if single.exists():
+            (out / name).mkdir(exist_ok=True)
+            single.rename(out / name / "base.parquet")
 
 
 def _clear_aborted_parts(out: Path, last_recorded: int) -> None:
@@ -708,28 +725,10 @@ def _build_chunk(
     # future), so silence it to keep the parent's progress bar clean.
     os.dup2(os.open(os.devnull, os.O_WRONLY), 2)
 
-    out = Path(out_dir)
     src = GitSource(clone_path)
-
     state = _seed_state(src, windowed, start)
-    snap_rows: list[dict] = []
-    event_rows: list[dict] = []
+    writer = _PartWriter(Path(out_dir), chunk_id, prefix)
     skipped: list[dict] = []
-    n_snap = n_evt = batch = since_flush = 0
-
-    def flush() -> None:
-        nonlocal snap_rows, event_rows, batch
-        if snap_rows:
-            model.write_part(
-                snap_rows, model.TERM_SNAPSHOTS,
-                out / "term_snapshots" / f"{prefix}{chunk_id:03d}-{batch:04d}.parquet",
-            )
-        if event_rows:
-            model.write_part(
-                event_rows, model.EVENTS,
-                out / "events" / f"{prefix}{chunk_id:03d}-{batch:04d}.parquet",
-            )
-        snap_rows, event_rows, batch = [], [], batch + 1
 
     for i in range(start, end):
         if ticks is not None:
@@ -746,20 +745,62 @@ def _build_chunk(
             )
             continue
         snaps, events, skips = _delta_rows(version, state.apply(blob))
-        snap_rows.extend(snaps)
-        event_rows.extend(events)
+        writer.add(snaps, events)
         skipped.extend(skips)
-        n_snap += len(snaps)
-        n_evt += len(events)
 
-        since_flush += 1
-        if since_flush >= _FLUSH_EVERY:
-            flush()
-            since_flush = 0
-
-    flush()
+    writer.close()
     src.close()
-    return {"chunk": chunk_id, "snapshots": n_snap, "events": n_evt, "skipped": skipped}
+    return {
+        "chunk": chunk_id, "snapshots": writer.n_snapshots,
+        "events": writer.n_events, "skipped": skipped,
+    }
+
+
+class _PartWriter:
+    """Streams one worker's snapshot/event rows to numbered part-files.
+
+    Buffers rows and flushes every ``_FLUSH_EVERY`` commits so peak memory
+    stays bounded regardless of history length. Part-files are named
+    ``{prefix}{chunk:03d}-{batch:04d}.parquet`` — the batch counter keeps
+    names unique across flushes, and the prefix is how incremental appends
+    stay distinguishable (see ``_clear_aborted_parts``).
+    """
+
+    def __init__(self, out: Path, chunk_id: int, prefix: str) -> None:
+        self._out = out
+        self._chunk_id = chunk_id
+        self._prefix = prefix
+        self._snapshots: list[dict] = []
+        self._events: list[dict] = []
+        self._batch = 0
+        self._commits_buffered = 0
+        self.n_snapshots = 0
+        self.n_events = 0
+
+    def add(self, snapshots: list[dict], events: list[dict]) -> None:
+        """Buffer one commit's rows, flushing if the batch is due."""
+        self._snapshots.extend(snapshots)
+        self._events.extend(events)
+        self.n_snapshots += len(snapshots)
+        self.n_events += len(events)
+        self._commits_buffered += 1
+        if self._commits_buffered >= _FLUSH_EVERY:
+            self._flush()
+
+    def close(self) -> None:
+        self._flush()
+
+    def _flush(self) -> None:
+        name = f"{self._prefix}{self._chunk_id:03d}-{self._batch:04d}.parquet"
+        if self._snapshots:
+            model.write_part(
+                self._snapshots, model.TERM_SNAPSHOTS, self._out / "term_snapshots" / name
+            )
+        if self._events:
+            model.write_part(self._events, model.EVENTS, self._out / "events" / name)
+        self._snapshots, self._events = [], []
+        self._batch += 1
+        self._commits_buffered = 0
 
 
 def _seed_state(
