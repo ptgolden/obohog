@@ -146,9 +146,11 @@ commits) so point-in-time queries are simple range comparisons.
      by diffing clause sets vs the previous version, write `events` rows.
    - Removed terms (present before, absent now) → a removal marker event.
 4. Write Parquet via pyarrow/DuckDB; write `build_meta`.
-5. **Incremental mode** (`--since ARTIFACT`): read last `commit_seq` from prior
-   `build_meta`, seed the "previous version" from the last snapshot state, process
-   only newer commits, append. Keeps ongoing per-release rebuilds cheap.
+5. **Incremental mode** (the default on re-sync): read `last_commit_seq` from
+   the prior `build_meta`, verify the new walk still has that sha at that
+   position (else fall back to a full rebuild), seed the "previous version"
+   from that commit's blob, process only newer commits, append. Keeps ongoing
+   re-syncs seconds-cheap; `--rebuild` forces a from-scratch build.
 
 Cost note: parsing is Rust-backed (fastobo) and one-time; term-level hashing avoids
 storing/diffing unchanged terms; per-commit parse is independent and parallelizable
@@ -293,7 +295,9 @@ data/                         # gitignored per-source working state
 - CLI is source-aware. All query commands (`term`, `commit`, `pr`, `diff`,
   `search`, `releases`) take a required `--source <name>`. The `source`
   subcommand group manages sources: `source list` shows configured sources
-  with disk usage, `source sync <name>` clones + builds a source's database.
+  with build status, artifact schema version (flagging stale artifacts that
+  need a resync), and disk usage; `source sync <name>` clones (or fetches)
+  + builds a source's database.
 - `gitsource` — blob-filtered clone; rename-following single-file walk; scoped,
   delta-packed history fetch via `git backfill --sparse` (sparse-checkout
   scoped to the source's OBO file); blob reads via a persistent
@@ -318,6 +322,15 @@ data/                         # gitignored per-source working state
   - **Per-term skip-and-isolate:** a failing batch is bisected until the single
     offending stanza is found; that one term is recorded in `skipped` and skipped,
     never the whole commit.
+  - **Incremental append** (`update=True`, the `source sync` default): resume
+    from `build_meta`'s `last_commit_seq` after checking the new walk still has
+    the same sha at that position (history rewrite → full rebuild), seed worker
+    state from that commit's blob via the existing chunk-seeding machinery, and
+    append `inc-<seq>`-prefixed part-files. The small metadata tables are
+    rewritten whole; `build_meta` is the commit point and is written last, so
+    an aborted increment leaves a consistent, merely stale artifact whose
+    orphaned parts are cleaned up by prefix on the next run. An up-to-date run
+    still refreshes `releases` (release tags rarely touch the tracked file).
 - `model` — Parquet schemas incl. `releases` and `skipped_commits`.
 - `query`/`cli` — DuckDB over part-file globs or single files; `source sync`
   (with `--jobs`), `term` (with `--limit`, `--since`, `--full`, `--only`,
@@ -357,23 +370,19 @@ data/                         # gitignored per-source working state
 single-threaded build (checksum match on a 12-commit slice).
 
 **Next steps:**
-1. **Incremental updates** — a `source sync --update` path: self-seed from
-   the latest snapshot per term, `git fetch` + `git backfill --sparse` the
-   new commits, append new part-files, extend `commit_seq`; ancestry check
-   as a rewrite guard. This is the top of the queue.
-2. **Prefix migration** — per-source `replaced_prefix` config to
+1. **Prefix migration** — per-source `replaced_prefix` config to
    transparently include `TBD:0000450` events when querying
    `MONDO:0000450`; specified in
    `2026-07-03-note.term-identity-across-renames.md` (deferred note).
-3. **Distribution** — publish part-files to GitHub Releases; document HTTP
+2. **Distribution** — publish part-files to GitHub Releases; document HTTP
    range-query use.
-4. **N-to-M pairing** — detect commits like `1ac4db2^` (two same-target xrefs
+3. **N-to-M pairing** — detect commits like `1ac4db2^` (two same-target xrefs
    collapsed into one with a merged qualifier list). Now tractable given the
    fastobo-parsed body + qualifier sets; the missing piece is grouping
    events by body within a predicate bucket before pairing.
-5. **Non-OBO serializations** — OFN, RDF/XML, Turtle. Would require
+4. **Non-OBO serializations** — OFN, RDF/XML, Turtle. Would require
    abstracting the per-commit stanza scan and per-term parse behind a
    format strategy interface; today's diff-scoped parse depends on OBO's
    line-oriented `[Term]` stanzas.
-6. **If size matters** — evaluate the keyframe + event-replay variant to
+5. **If size matters** — evaluate the keyframe + event-replay variant to
    shrink `term_snapshots`.

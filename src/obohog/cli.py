@@ -413,22 +413,48 @@ def source_sync(
         0, help="Commits per chunk (0 = auto, ~4 chunks/worker)."
     ),
     progress: bool = typer.Option(True, help="Show a per-commit progress bar (parallel builds)."),
+    rebuild: bool = typer.Option(
+        False, "--rebuild",
+        help="Rebuild the database from scratch instead of appending new commits.",
+    ),
 ):
-    """Clone (or update) a source's history and rebuild its database."""
+    """Update a source's clone and bring its database up to date.
+
+    An existing database is extended in place with just the commits that are
+    new since the last sync; a full rebuild happens automatically when
+    appending isn't possible (first sync, schema change, rewritten upstream
+    history) or on --rebuild.
+    """
     source = _resolve_source(name, config)
     clone_path = get_provider(source, console).ensure_synced(source, since=since)
     if jobs == 1:
+        # The serial in-process builder always rebuilds from scratch.
         with GitSource(clone_path) as src:
             counts = run_extract(src, source.tracked_path, source.db_dir, limit=limit)
     else:
         counts = build_parallel(
             clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
             chunk_size=(chunk_size or None), limit=limit, progress=progress,
+            update=not rebuild,
         )
-    msg = (
-        f"[green]Built[/] {source.db_dir} — {counts['commits']} commits, "
-        f"{counts['snapshots']} snapshots, {counts['events']} events"
-    )
+    mode = counts.get("mode", "full")
+    if mode == "up-to-date":
+        console.print(
+            f"[green]Up to date[/] — {source.db_dir} already covers "
+            f"{counts['total_commits']} commits."
+        )
+        return
+    if mode == "incremental":
+        msg = (
+            f"[green]Appended[/] {counts['commits']} new commits to {source.db_dir} "
+            f"(now {counts['total_commits']}) — {counts['snapshots']} snapshots, "
+            f"{counts['events']} events"
+        )
+    else:
+        msg = (
+            f"[green]Built[/] {source.db_dir} — {counts['commits']} commits, "
+            f"{counts['snapshots']} snapshots, {counts['events']} events"
+        )
     if counts.get("skipped"):
         msg += f", [yellow]{counts['skipped']} skipped[/]"
     console.print(msg + ".")

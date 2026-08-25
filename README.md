@@ -70,7 +70,14 @@ uv sync --extra dev
 # of the declared OBO file is downloaded, lazily.
 uv run obohog source sync mondo
 
-# What's currently configured, built, and how much disk it's using:
+# Re-running sync is incremental: it fetches what's new upstream and
+# appends just those commits (seconds, not minutes). --rebuild starts
+# over, and a rebuild also happens automatically when appending isn't
+# safe (schema change, rewritten upstream history).
+uv run obohog source sync mondo
+
+# What's configured, built with which artifact schema (stale artifacts
+# need a resync), and how much disk it's using:
 uv run obohog source list
 ```
 
