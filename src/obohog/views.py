@@ -428,6 +428,22 @@ def render_commit_ordered_groups(
     return EventCounts(events=n_events, terms=len(term_ids), commits=n_commits)
 
 
+def counts_phrase(
+    events: int, terms: int, commits: int, *, noun: str = "events", tail: str = ""
+) -> Text:
+    """``<events> <noun> across <terms> terms and <commits> commits<tail>``,
+    numbers bold, connective text dim — the scope/summary sentence shared by
+    ``diff`` and ``search``."""
+    t = Text()
+    t.append(str(events), style="bold")
+    t.append(f" {noun} across ", style="dim")
+    t.append(str(terms), style="bold")
+    t.append(" terms and ", style="dim")
+    t.append(str(commits), style="bold")
+    t.append(f" commits{tail}", style="dim")
+    return t
+
+
 def render_state(term_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
     """A term's reconstructed clause set as of a resolved ref."""
     if not clauses:

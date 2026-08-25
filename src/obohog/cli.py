@@ -18,6 +18,7 @@ from .query import ArtifactNotFound, HistoryDB, SchemaMismatch
 from .views import (
     SourceStyle,
     console,
+    counts_phrase,
     render_commit_ordered_groups,
     render_commit_view,
     render_paired_groups,
@@ -384,14 +385,10 @@ def diff(
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
         return
-    summary = Text()
-    summary.append(f"{counts.events}", style="bold")
-    summary.append(" events across ", style="dim")
-    summary.append(f"{counts.terms}", style="bold")
-    summary.append(" terms and ", style="dim")
-    summary.append(f"{counts.commits}", style="bold")
-    summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
-    console.print(summary)
+    console.print(counts_phrase(
+        counts.events, counts.terms, counts.commits,
+        tail=f" between {ref_a} and {ref_b}",
+    ))
     groups = render.pair_by_term_and_commit(db.iter_range_events(ref_a, ref_b, **filters))
     render_paired_groups(groups, style, full=full, show_commits=commits)
     db.close()
@@ -453,14 +450,11 @@ def search(
     # Provisional scope, printed before results start streaming. These are
     # SQL-level candidate counts — an upper bound on what survives the
     # clause-aware delta filter; the exact totals land in the footer.
-    scope = Text()
-    scope.append("Scanning ", style="dim")
-    scope.append(f"{counts.events}", style="bold")
-    scope.append(" candidate events across ", style="dim")
-    scope.append(f"{counts.terms}", style="bold")
-    scope.append(" terms and ", style="dim")
-    scope.append(f"{counts.commits}", style="bold")
-    scope.append(" commits …", style="dim")
+    scope = Text("Scanning ", style="dim")
+    scope.append_text(counts_phrase(
+        counts.events, counts.terms, counts.commits,
+        noun="candidate events", tail=" …",
+    ))
     console.print(scope)
     groups = render.pair_by_term_and_commit(
         db.iter_search_events(query, order=order.value, reverse=reverse, **filters),
