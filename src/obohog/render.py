@@ -20,10 +20,9 @@ from itertools import groupby
 from cydifflib import SequenceMatcher
 from typing import Iterable, Iterator, NamedTuple
 
-import fastobo
 from rich.text import Text
 
-from .obo import ParsedValue, decompose_clause
+from .obo import ParsedValue
 from .query import Change, TermChange
 
 PAIR_THRESHOLD = 0.5
@@ -185,45 +184,6 @@ def _truncate(s: str, cap: int | None) -> str:
     if cap is None or len(s) <= cap:
         return s
     return s[: cap - 1] + ELLIPSIS
-
-
-_STANZA_TEMPLATE = "format-version: 1.2\n\n[Term]\nid: TMP:0000001\n{tag}: {value}\n"
-
-
-def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
-    """Parse one OBO clause value using fastobo, returning its structural parts.
-
-    Returns ``None`` when fastobo can't parse the line — some historical
-    clauses in the artifact are malformed enough that fastobo rejects (or
-    even panics on) them; when that happens we fall back to lexical
-    rendering. fastobo already handles the tricky parts (quoted values with
-    escapes, ``!`` inside strings, nested brackets), so we don't hand-parse.
-
-    Keep ``threads=1``. fastobo's default (``threads=0``) starts one thread
-    per logical core on every call, and setting up that pool costs ~19x more
-    than parsing does when the "document" is a single synthetic one-clause
-    stanza. Same reasoning as :mod:`obohog.obo`.
-    """
-    stanza = _STANZA_TEMPLATE.format(tag=predicate, value=value)
-    try:
-        doc = fastobo.loads(stanza, threads=1)
-    except (KeyboardInterrupt, SystemExit):
-        # The bare ``except`` below is here to absorb fastobo's Rust panics
-        # (``BaseException``, not ``Exception``). Interpreter control flow
-        # must not get absorbed with them — swallowing KeyboardInterrupt in
-        # a function this hot makes the CLI unkillable by ^C.
-        raise
-    except BaseException:  # fastobo can panic, not just raise
-        return None
-    frames = list(doc)
-    if not frames:
-        return None
-    for clause in frames[0]:
-        if clause.raw_tag() == "id":
-            continue
-        _, _, serialized = str(clause).partition(": ")
-        return decompose_clause(clause, serialized)
-    return None
 
 
 def _matches(text: str, query: str, regex: bool, ignore_case: bool) -> bool:

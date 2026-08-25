@@ -9,6 +9,9 @@ that information.
 
 import re
 
+import fastobo
+
+from obohog.obo import ParsedValue, decompose_clause
 from obohog.query import Change
 from obohog.render import (
     DEFAULT_TRUNCATE,
@@ -18,9 +21,37 @@ from obohog.render import (
     Remove,
     _tokenize,
     pair_events,
-    parse_clause_value,
     render_op,
 )
+
+_STANZA_TEMPLATE = "format-version: 1.2\n\n[Term]\nid: TMP:0000001\n{tag}: {value}\n"
+
+
+def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
+    """Parse one OBO clause value via fastobo, as the extractor would.
+
+    Test-only convenience: production Changes carry their decomposition
+    from the artifact's body/qualifiers/comment columns, so hand-built
+    test Changes derive it the same way — through a fastobo parse and
+    :func:`obohog.obo.decompose_clause`. Returns ``None`` when fastobo
+    can't parse the line (the malformed-historical-clause case).
+    """
+    stanza = _STANZA_TEMPLATE.format(tag=predicate, value=value)
+    try:
+        doc = fastobo.loads(stanza, threads=1)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # fastobo can panic, not just raise
+        return None
+    frames = list(doc)
+    if not frames:
+        return None
+    for clause in frames[0]:
+        if clause.raw_tag() == "id":
+            continue
+        _, _, serialized = str(clause).partition(": ")
+        return decompose_clause(clause, serialized)
+    return None
 
 
 def _change(op: str, predicate: str, value: str, seq: int = 1) -> Change:
