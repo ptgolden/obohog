@@ -337,12 +337,22 @@ data/                         # gitignored per-source working state
     orphaned parts are cleaned up by prefix on the next run. An up-to-date run
     still refreshes `releases` (release tags rarely touch the tracked file).
 - `model` — Parquet schemas incl. `releases` and `skipped_commits`.
-- `query`/`cli` — DuckDB over part-file globs or single files; `source sync`
-  (with `--jobs`), `term` (with `--limit`, `--since`, `--full`, `--only`,
-  `--at` accepting sha/tag/seq), `commit`, `pr`, `diff`, `search` (with
-  `--regex`, `--ignore-case`, `--namespace`, `--predicate`), `releases`;
-  rich rendering. All query commands are scoped by `--source`.
-- `render` — **structure-aware term timeline**: paired remove/add events on the
+- `query` — DuckDB over part-file globs or single files: typed `Change`/
+  `TermChange` rows, streaming iterators with `(term_id, commit_seq)` /
+  `(commit_seq, term_id)` sort spines, and pre-counts.
+- `cli` — typer commands only: `source sync` (with `--jobs`), `term` (with
+  `--limit`, `--since`, `--full`, `--only`, `--at` accepting sha/tag/seq),
+  `commit`, `pr`, `diff`, `search` (with `--regex`, `--ignore-case`,
+  `--namespace`, `--predicate`), `releases`. All query commands are scoped
+  by `--source`.
+- `views` — the console presentation layer: the process console (with a
+  fast plain-text path for pipes), per-source `SourceStyle` knobs threaded
+  explicitly (no module state — safe for a multi-source process like the
+  future HTTP API), commit headers, and the timeline/commit/paired-group
+  views.
+- `render` — the console-free presentation *pipeline* (group by (term,
+  commit), pair, delta-filter, limit — the spine an HTTP API would page
+  over) plus the **structure-aware term timeline**: paired remove/add events on the
   same predicate render as `~` word-diff edits rather than two adjacent lines.
   Pairing is two-pass — parsed-body identity first (fastobo-parsed), then greedy
   lexical similarity — so a same-target clause whose qualifiers were reordered
