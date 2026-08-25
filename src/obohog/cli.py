@@ -23,7 +23,7 @@ from .config import (
     load_config,
 )
 from .providers import get_provider
-from .extract import build_parallel
+from .extract import BuildMode, build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
 from .query import (
@@ -430,33 +430,32 @@ def source_sync(
     if jobs == 1:
         # The serial in-process builder always rebuilds from scratch.
         with GitSource(clone_path) as src:
-            counts = run_extract(src, source.tracked_path, source.db_dir, limit=limit)
+            report = run_extract(src, source.tracked_path, source.db_dir, limit=limit)
     else:
-        counts = build_parallel(
+        report = build_parallel(
             clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
             chunk_size=(chunk_size or None), limit=limit, progress=progress,
             update=not rebuild,
         )
-    mode = counts.get("mode", "full")
-    if mode == "up-to-date":
+    if report.mode is BuildMode.UP_TO_DATE:
         console.print(
             f"[green]Up to date[/] — {source.db_dir} already covers "
-            f"{counts['total_commits']} commits."
+            f"{report.total_commits} commits."
         )
         return
-    if mode == "incremental":
+    if report.mode is BuildMode.INCREMENTAL:
         msg = (
-            f"[green]Appended[/] {counts['commits']} new commits to {source.db_dir} "
-            f"(now {counts['total_commits']}) — {counts['snapshots']} snapshots, "
-            f"{counts['events']} events"
+            f"[green]Appended[/] {report.commits} new commits to {source.db_dir} "
+            f"(now {report.total_commits}) — {report.snapshots} snapshots, "
+            f"{report.events} events"
         )
     else:
         msg = (
-            f"[green]Built[/] {source.db_dir} — {counts['commits']} commits, "
-            f"{counts['snapshots']} snapshots, {counts['events']} events"
+            f"[green]Built[/] {source.db_dir} — {report.commits} commits, "
+            f"{report.snapshots} snapshots, {report.events} events"
         )
-    if counts.get("skipped"):
-        msg += f", [yellow]{counts['skipped']} skipped[/]"
+    if report.skipped:
+        msg += f", [yellow]{report.skipped} skipped[/]"
     console.print(msg + ".")
 
 

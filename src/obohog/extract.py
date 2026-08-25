@@ -13,12 +13,14 @@ as clause additions. Term creation/removal times are recoverable from snapshot
 presence, so they need no dedicated event kind.
 """
 
+import enum
 import multiprocessing
 import os
 import re
 import shutil
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -57,6 +59,26 @@ _SNAPSHOT_URL = re.compile(r"^Release URL: (\S+)", re.MULTILINE)
 _EMPTY: tuple[Clause, ...] = ()
 
 
+class BuildMode(enum.StrEnum):
+    """How a build run related to what was already on disk."""
+
+    FULL = "full"
+    INCREMENTAL = "incremental"
+    UP_TO_DATE = "up-to-date"
+
+
+@dataclass(frozen=True)
+class BuildReport:
+    """What a build run did, for callers to report."""
+
+    mode: BuildMode
+    commits: int  # commits processed by this run
+    total_commits: int  # commits the artifact covers afterwards
+    snapshots: int
+    events: int
+    skipped: int = 0
+
+
 def _extract_pr_number(message: str) -> int | None:
     m = _PR_MERGE.match(message)
     if m:
@@ -74,7 +96,7 @@ def _extract_snapshot_url(message: str) -> str | None:
 
 def extract(
     src: GitSource, path: str, out_dir: Path, *, limit: int | None = None
-) -> dict[str, int]:
+) -> BuildReport:
     """Build an artifact under ``out_dir`` from ``path``'s history in ``src``.
 
     ``limit`` keeps only the most recent ``limit`` versions (the oldest kept one
@@ -93,7 +115,7 @@ def build(
     *,
     source_path: str,
     tags: Iterable[TagRef] = (),
-) -> dict[str, int]:
+) -> BuildReport:
     commits: list[dict] = []
     snapshots: list[dict] = []
     events: list[dict] = []
@@ -148,14 +170,13 @@ def build(
     model.write_table(releases, model.RELEASES, out_dir, "releases")
     model.write_table(meta, model.BUILD_META, out_dir, "build_meta")
 
-    return {
-        "mode": "full",
-        "commits": len(commits),
-        "total_commits": len(commits),
-        "snapshots": len(snapshots),
-        "events": len(events),
-        "releases": len(releases),
-    }
+    return BuildReport(
+        mode=BuildMode.FULL,
+        commits=len(commits),
+        total_commits=len(commits),
+        snapshots=len(snapshots),
+        events=len(events),
+    )
 
 
 def _release_rows(
@@ -269,7 +290,7 @@ def build_parallel(
     limit: int | None = None,
     progress: bool = False,
     update: bool = False,
-) -> dict:
+) -> BuildReport:
     """Build the artifact from a local clone using a pool of parsing workers.
 
     The commit range is split into contiguous chunks (one per worker). Each
@@ -282,8 +303,8 @@ def build_parallel(
     commits after its recorded ``last_commit_seq`` are parsed and appended (see
     :func:`_build_update`). Falls back to a full rebuild whenever appending
     isn't safe — no artifact, different schema, a ``limit`` bound, or a walk
-    that no longer matches what was built (history rewrite). The returned dict
-    carries ``mode``: ``"full"``, ``"incremental"``, or ``"up-to-date"``.
+    that no longer matches what was built (history rewrite). The report's
+    ``mode`` says which of the three actually ran.
 
     Runs strictly offline: blobs must already be present in ``clone_path``.
     """
@@ -352,14 +373,14 @@ def build_parallel(
     ]
     model.write_table(meta, model.BUILD_META, out, "build_meta")
 
-    return {
-        "mode": "full",
-        "commits": n,
-        "total_commits": n,
-        "snapshots": sum(r["snapshots"] for r in results),
-        "events": sum(r["events"] for r in results),
-        "skipped": len(skipped),
-    }
+    return BuildReport(
+        mode=BuildMode.FULL,
+        commits=n,
+        total_commits=n,
+        snapshots=sum(r["snapshots"] for r in results),
+        events=sum(r["events"] for r in results),
+        skipped=len(skipped),
+    )
 
 
 class _ResumePlan(NamedTuple):
@@ -406,7 +427,7 @@ def _build_update(
     jobs: int | None,
     chunk_size: int | None,
     progress: bool,
-) -> dict:
+) -> BuildReport:
     """Append the walk's commits after ``plan.last`` to an existing artifact.
 
     ``build_meta`` is the commit point and is written last: everything else is
@@ -429,10 +450,10 @@ def _build_update(
         # tags rarely touch the tracked file), so refresh the releases table.
         seq_dates = [(r["commit_seq"], r["committed_date"]) for r in old_commits]
         model.write_table(_release_rows(tags, seq_dates), model.RELEASES, out, "releases")
-        return {
-            "mode": "up-to-date", "commits": 0, "total_commits": len(old_commits),
-            "snapshots": 0, "events": 0, "skipped": 0,
-        }
+        return BuildReport(
+            mode=BuildMode.UP_TO_DATE, commits=0, total_commits=len(old_commits),
+            snapshots=0, events=0,
+        )
 
     # An artifact from the serial builder stores single files; move them into
     # the part-file directories so the appended parts union with them.
@@ -480,14 +501,14 @@ def _build_update(
     ]
     model.write_table(meta, model.BUILD_META, out, "build_meta")
 
-    return {
-        "mode": "incremental",
-        "commits": n,
-        "total_commits": len(all_commits),
-        "snapshots": sum(r["snapshots"] for r in results),
-        "events": sum(r["events"] for r in results),
-        "skipped": len(new_skipped),
-    }
+    return BuildReport(
+        mode=BuildMode.INCREMENTAL,
+        commits=n,
+        total_commits=len(all_commits),
+        snapshots=sum(r["snapshots"] for r in results),
+        events=sum(r["events"] for r in results),
+        skipped=len(new_skipped),
+    )
 
 
 def _clear_aborted_parts(out: Path, last_recorded: int) -> None:

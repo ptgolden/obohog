@@ -6,7 +6,7 @@ import duckdb
 import pytest
 
 from obohog import model
-from obohog.extract import build_parallel, extract
+from obohog.extract import BuildMode, build_parallel, extract
 from obohog.gitsource import GitSource
 from obohog.query import ArtifactNotFound, HistoryDB, SchemaMismatch
 
@@ -131,10 +131,10 @@ def test_incremental_update_matches_full_rebuild(obo_repo: Path, tmp_path: Path)
     inc = tmp_path / "inc"
     build_parallel(str(obo_repo), OBO, inc, jobs=2)
     _extend_repo(obo_repo)
-    counts = build_parallel(str(obo_repo), OBO, inc, jobs=2, update=True)
-    assert counts["mode"] == "incremental"
-    assert counts["commits"] == 2
-    assert counts["total_commits"] == 7
+    report = build_parallel(str(obo_repo), OBO, inc, jobs=2, update=True)
+    assert report.mode is BuildMode.INCREMENTAL
+    assert report.commits == 2
+    assert report.total_commits == 7
 
     fresh = tmp_path / "fresh"
     build_parallel(str(obo_repo), OBO, fresh, jobs=2)
@@ -148,8 +148,8 @@ def test_incremental_after_serial_build(obo_repo: Path, tmp_path: Path):
     with GitSource(obo_repo) as src:
         extract(src, OBO, inc)
     _extend_repo(obo_repo)
-    counts = build_parallel(str(obo_repo), OBO, inc, jobs=2, update=True)
-    assert counts["mode"] == "incremental"
+    report = build_parallel(str(obo_repo), OBO, inc, jobs=2, update=True)
+    assert report.mode is BuildMode.INCREMENTAL
 
     fresh = tmp_path / "fresh"
     build_parallel(str(obo_repo), OBO, fresh, jobs=2)
@@ -169,9 +169,9 @@ def test_incremental_up_to_date_still_refreshes_releases(obo_repo: Path, tmp_pat
     # A release tagged after the last file-touching commit: no new file
     # versions, but the releases table must gain the tag.
     _git(obo_repo, "tag", "v1.1")
-    counts = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
-    assert counts["mode"] == "up-to-date"
-    assert counts["commits"] == 0
+    report = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert report.mode is BuildMode.UP_TO_DATE
+    assert report.commits == 0
     db = HistoryDB(out)
     tags = {row[0] for row in db.con.execute("SELECT tag FROM releases").fetchall()}
     db.close()
@@ -185,8 +185,8 @@ def test_incremental_falls_back_on_history_rewrite(obo_repo: Path, tmp_path: Pat
     build_parallel(str(obo_repo), OBO, out, jobs=2)
     _git(obo_repo, "commit", "--amend", "-qm", "c4 amended",
          date="2021-01-05T00:00:00+00:00")
-    counts = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
-    assert counts["mode"] == "full"
+    report = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert report.mode is BuildMode.FULL
     db = HistoryDB(out)
     last = db.con.execute(
         "SELECT message FROM commits ORDER BY commit_seq DESC LIMIT 1"
@@ -201,8 +201,8 @@ def test_incremental_falls_back_on_schema_mismatch(obo_repo: Path, tmp_path: Pat
     meta = model.read_build_meta(out)
     meta["schema_version"] = "0"
     model.write_table([meta], model.BUILD_META, out, "build_meta")
-    counts = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
-    assert counts["mode"] == "full"
+    report = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert report.mode is BuildMode.FULL
     assert model.read_build_meta(out)["schema_version"] == model.SCHEMA_VERSION
 
 
@@ -217,8 +217,8 @@ def test_incremental_cleans_aborted_parts(obo_repo: Path, tmp_path: Path):
         "body": "ghost", "qualifiers": [], "comment": None,
     }
     model.write_part([stray], model.EVENTS, out / "events" / "inc-0000005-000-0000.parquet")
-    counts = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
-    assert counts["mode"] == "up-to-date"
+    report = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert report.mode is BuildMode.UP_TO_DATE
     db = HistoryDB(out)
     n = db.con.execute(
         "SELECT count(*) FROM events WHERE term_id = 'MONDO:9999999'"
