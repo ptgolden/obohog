@@ -11,6 +11,7 @@ from typing import Iterator, NamedTuple
 
 import duckdb
 
+from . import model
 from .obo import ParsedValue
 
 
@@ -24,6 +25,15 @@ class EventCounts(NamedTuple):
 
 class ArtifactNotFound(Exception):
     """Raised when an artifact directory lacks the core history tables."""
+
+
+class SchemaMismatch(Exception):
+    """Raised when an artifact was built with a different schema version.
+
+    Queries assume the current schema's columns exist; letting a stale
+    artifact through surfaces as a confusing DuckDB binder error deep in
+    some query instead of a clear "rebuild me".
+    """
 
 
 def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
@@ -122,6 +132,14 @@ class HistoryDB:
             raise ArtifactNotFound(
                 f"No history artifact at '{self.dir}' (missing: {', '.join(absent)}). "
                 "Run `obohog source sync <name>` first."
+            )
+        meta = model.read_build_meta(self.dir)
+        built = meta["schema_version"] if meta else None
+        if built != model.SCHEMA_VERSION:
+            raise SchemaMismatch(
+                f"Artifact at '{self.dir}' was built with schema "
+                f"{built or 'unknown'}; this obohog reads schema "
+                f"{model.SCHEMA_VERSION}. Rebuild it with `obohog source sync <name>`."
             )
         self.con = duckdb.connect(":memory:")
         for name in ("commits", "term_snapshots", "events", "releases", "skipped"):

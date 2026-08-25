@@ -31,6 +31,7 @@ from .query import (
     Change,
     EventCounts,
     HistoryDB,
+    SchemaMismatch,
     TermChange,
     TermHeader,
 )
@@ -247,10 +248,10 @@ def _app_setup() -> None:
 
 
 def _open(artifact: Path) -> HistoryDB:
-    """Open an artifact, exiting cleanly with guidance if it isn't there."""
+    """Open an artifact, exiting cleanly with guidance if it isn't usable."""
     try:
         return HistoryDB(artifact)
-    except ArtifactNotFound as err:
+    except (ArtifactNotFound, SchemaMismatch) as err:
         console.print(f"[red]{err}[/]")
         raise typer.Exit(1)
 
@@ -337,6 +338,8 @@ def _source_status(source: SourceConfig) -> tuple[str, str]:
         db = HistoryDB(source.db_dir)
     except ArtifactNotFound:
         return "not built", "—"
+    except SchemaMismatch:
+        return "stale", "—"
     row = db.con.execute("SELECT COUNT(*) FROM commits").fetchone()
     db.close()
     return "built", f"{row[0]:,}" if row else "—"

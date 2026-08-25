@@ -127,6 +127,19 @@ FILES = {
 }
 
 
+def read_build_meta(artifact_dir: Path | str) -> dict | None:
+    """Return the artifact's single ``build_meta`` row, or None if absent.
+
+    One tiny row — read it with pyarrow directly rather than spinning up a
+    DuckDB connection.
+    """
+    path = Path(artifact_dir) / "build_meta.parquet"
+    if not path.exists():
+        return None
+    rows = pq.read_table(path).to_pylist()
+    return rows[0] if rows else None
+
+
 def write_table(rows: list[dict], schema: pa.Schema, out_dir: Path, name: str) -> Path:
     """Write ``rows`` as ``<out_dir>/<name>.parquet`` using ``schema``."""
     out_dir.mkdir(parents=True, exist_ok=True)

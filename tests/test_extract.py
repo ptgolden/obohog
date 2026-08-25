@@ -5,9 +5,10 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from obohog import model
 from obohog.extract import build_parallel, extract
 from obohog.gitsource import GitSource
-from obohog.query import ArtifactNotFound, HistoryDB
+from obohog.query import ArtifactNotFound, HistoryDB, SchemaMismatch
 
 OBO = "src/onto.obo"
 
@@ -91,6 +92,20 @@ def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path
 def test_missing_artifact_raises_clear_error(tmp_path: Path):
     with pytest.raises(ArtifactNotFound, match="Run `obohog source sync"):
         HistoryDB(tmp_path / "does-not-exist")
+
+
+def test_stale_schema_raises_clear_error(artifact: Path):
+    meta = model.read_build_meta(artifact)
+    meta["schema_version"] = "0"
+    model.write_table([meta], model.BUILD_META, artifact, "build_meta")
+    with pytest.raises(SchemaMismatch, match="built with schema 0"):
+        HistoryDB(artifact)
+
+
+def test_absent_build_meta_raises_schema_mismatch(artifact: Path):
+    (artifact / "build_meta.parquet").unlink()
+    with pytest.raises(SchemaMismatch, match="built with schema unknown"):
+        HistoryDB(artifact)
 
 
 def test_term_events_are_clause_deltas(artifact: Path):
