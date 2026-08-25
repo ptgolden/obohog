@@ -1,0 +1,71 @@
+{# Shared rendering for ops, commit headers, and page sections.
+
+   These consume the service layer's shapes directly: OpOut spans map to
+   <del>/<ins>/plain text — the HTML counterpart of the CLI's bracket
+   markers — and CommitOut carries subject/pr_url/hide_sha pre-resolved. #}
+
+{%- macro spans(sp) -%}
+  {%- for s in sp -%}
+    {%- if s.role == 'same' -%}{{ s.text }}
+    {%- elif s.role == 'del' -%}<del>{{ s.text }}</del>
+    {%- elif s.role == 'ins' -%}<ins>{{ s.text }}</ins>
+    {%- elif s.role == 'note' -%}  <span class="note">{{ s.text }}</span>
+    {%- endif -%}
+  {%- endfor -%}
+{%- endmacro -%}
+
+{%- macro op(o) -%}
+<div class="op op-{{ o.kind }}">
+  <span class="marker">{{ {'add': '+', 'remove': '-', 'edit': '~'}[o.kind] }}</span>
+  <span class="pred">{{ o.predicate }}:</span> {{ spans(o.head) }}
+  {%- for ql in o.quals %}
+  <div class="qual qual-{{ ql.kind }}">
+    {%- if ql.kind != 'context' -%}
+    <span class="marker">{{ {'del': '-', 'ins': '+', 'edit': '~'}[ql.kind] }}</span>
+    {%- endif %} {{ spans(ql.spans) }}</div>
+  {%- endfor %}
+</div>
+{%- endmacro -%}
+
+{%- macro commit_header(c, src) -%}
+<div class="commit-header">
+  {%- if not c.hide_sha %}
+  <a class="sha" href="/{{ src }}/commits/{{ c.sha[:7] }}">{{ c.sha[:7] }}</a>
+  {%- endif %}
+  <span class="date">{{ c.committed_date | dateonly }}</span>
+  <span class="author">{{ c.author_name }}</span>
+  <span class="subject">{{ c.subject }}</span>
+  {%- if c.pr_url %}
+  <a class="pr" href="{{ c.pr_url }}">PR #{{ c.pr_number }}</a>
+  {%- elif c.pr_number is not none %}
+  <span class="pr">PR #{{ c.pr_number }}</span>
+  {%- endif %}
+  {%- if c.snapshot_url %}
+  <a class="pr" href="{{ c.snapshot_url }}">release</a>
+  {%- endif %}
+</div>
+{%- endmacro -%}
+
+{%- macro term_link(src, term_id) -%}
+<a class="term" href="/{{ src }}/terms/{{ term_id }}">{{ term_id }}</a>
+{%- endmacro -%}
+
+{%- macro term_section(s, src) -%}
+<section class="term-section">
+  <h3>{{ term_link(src, s.term_id) }}{% if s.name %} <span class="name">— {{ s.name }}</span>{% endif %}</h3>
+  {%- for g in s.commits %}
+  {{ commit_header(g.commit, src) }}
+  {%- for o in g.ops %}{{ op(o) }}{% endfor %}
+  {%- endfor %}
+</section>
+{%- endmacro -%}
+
+{%- macro commit_section(s, src) -%}
+<section class="commit-section">
+  {{ commit_header(s.commit, src) }}
+  {%- for t in s.terms %}
+  <h4>{{ term_link(src, t.term_id) }}{% if t.name %} <span class="name">— {{ t.name }}</span>{% endif %}</h4>
+  {%- for o in t.ops %}{{ op(o) }}{% endfor %}
+  {%- endfor %}
+</section>
+{%- endmacro -%}

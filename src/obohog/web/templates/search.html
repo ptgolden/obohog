@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ src }} — search — obohog{% endblock %}
+{% block nav %}<span class="dim">{{ src }}</span>{% endblock %}
+{% block content %}
+<h1>Search {{ src }}</h1>
+<form class="search" method="get" action="/{{ src }}/search">
+  <input type="search" name="q" value="{{ params.q if params else '' }}"
+         placeholder="substring or regex over clause values" autofocus>
+  <div class="filters">
+    <label>predicate <input name="predicate" size="10"
+      value="{{ params.predicate or '' if params else '' }}"></label>
+    <label>namespace <input name="namespace" size="8"
+      value="{{ params.namespace or '' if params else '' }}"></label>
+    <label>term <input name="term" size="14"
+      value="{{ params.term or '' if params else '' }}"></label>
+    <label>order
+      <select name="order">
+        <option value="term" {% if params and params.order == 'term' %}selected{% endif %}>by term</option>
+        <option value="date" {% if params and params.order == 'date' %}selected{% endif %}>by date</option>
+      </select>
+    </label>
+    <label><input type="checkbox" name="regex" value="true"
+      {% if params and params.regex %}checked{% endif %}> regex</label>
+    <label><input type="checkbox" name="ignore_case" value="true"
+      {% if params and params.ignore_case %}checked{% endif %}> ignore case</label>
+    <button type="submit">search</button>
+  </div>
+</form>
+
+{% if page %}
+<p class="dim">Scanning {{ page.counts.events }} candidate events across
+  {{ page.counts.terms }} terms and {{ page.counts.commits }} commits …</p>
+<div id="results">
+  {% include 'partials/search_results.html' %}
+</div>
+{% endif %}
+{% endblock %}

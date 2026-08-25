@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% import 'partials/macros.html' as m %}
+{% block title %}commit {{ view.commit.sha[:7] }} — {{ src }} — obohog{% endblock %}
+{% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
+{% block content %}
+<h1>Commit</h1>
+{{ m.commit_header(view.commit, src) }}
+{% if view.commit.raw_subject %}<p class="dim raw-subject">{{ view.commit.raw_subject }}</p>{% endif %}
+<p class="dim">{{ view.terms | length }} terms changed</p>
+{% for t in view.terms %}
+<section class="term-section">
+  <h3>{{ m.term_link(src, t.term_id) }}{% if t.name %} <span class="name">— {{ t.name }}</span>{% endif %}</h3>
+  {% for o in t.ops %}{{ m.op(o) }}{% endfor %}
+</section>
+{% endfor %}
+{% endblock %}

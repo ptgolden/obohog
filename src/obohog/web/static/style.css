@@ -1,0 +1,151 @@
+/* obohog — hand-written, no build step. Terminal-flavored: monospace ops,
+   git-style +/-/~ colors, quiet chrome. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --dim: #767676;
+  --line: #e4e4e4;
+  --add: #1a7f37;
+  --add-bg: #dafbe1;
+  --del: #cf222e;
+  --del-bg: #ffebe9;
+  --edit: #9a6700;
+  --accent: #0969da;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --fg: #d8dce2;
+    --dim: #8a919d;
+    --line: #2a2f38;
+    --add: #57ab5a;
+    --add-bg: #12261e;
+    --del: #e5534b;
+    --del-bg: #2d1a1c;
+    --edit: #c69026;
+    --accent: #539bf5;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, sans-serif;
+}
+main { max-width: 62rem; margin: 0 auto; padding: 1rem 1.25rem 4rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { font-size: 1.4rem; }
+h1 .name, h3 .name, h4 .name { font-weight: normal; }
+.dim { color: var(--dim); }
+.empty { color: var(--dim); font-style: italic; }
+.error { color: var(--del); }
+
+header.site {
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 1.25rem;
+}
+header.site nav { max-width: 62rem; margin: 0 auto; display: flex; gap: 1rem; }
+.brand { font-weight: 700; color: var(--fg); }
+
+/* Sources table */
+table.sources { border-collapse: collapse; width: 100%; }
+table.sources th, table.sources td {
+  text-align: left;
+  padding: 0.3rem 0.8rem 0.3rem 0;
+  border-bottom: 1px solid var(--line);
+}
+table.sources th { color: var(--dim); font-weight: normal; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.status-built { color: var(--add); }
+.status-stale { color: var(--edit); }
+.status-not-built { color: var(--dim); }
+
+/* Search form */
+form.search { margin: 0.75rem 0 1.5rem; }
+form.search input[type="search"] {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  font-size: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+form.search .filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+  align-items: center;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+form.search .filters input, form.search .filters select {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.15rem 0.3rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+form.search button {
+  padding: 0.25rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+form.search button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Sections */
+section.term-section, section.commit-section { margin: 1.25rem 0; }
+section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
+
+.commit-header {
+  margin: 0.6rem 0 0.15rem;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+.commit-header .sha { font-family: ui-monospace, monospace; }
+.commit-header .subject { color: var(--fg); }
+.raw-subject { font-style: italic; margin: 0.1rem 0; font-size: 0.85rem; }
+
+/* Ops — the diff lines */
+.op {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.83rem;
+  padding-left: 1.25rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.op .marker { display: inline-block; width: 1ch; font-weight: 700; }
+.op-add .marker { color: var(--add); }
+.op-remove .marker { color: var(--del); }
+.op-edit .marker { color: var(--edit); }
+.op .pred { color: var(--dim); }
+.op del {
+  color: var(--del);
+  background: var(--del-bg);
+  text-decoration: line-through;
+}
+.op ins {
+  color: var(--add);
+  background: var(--add-bg);
+  text-decoration: none;
+}
+.op .note { color: var(--dim); font-style: italic; }
+
+.qual { padding-left: 3ch; }
+.qual .marker { width: 1ch; font-weight: 700; }
+.qual-context { color: var(--dim); }
+.qual-del .marker { color: var(--del); }
+.qual-ins .marker { color: var(--add); }
+.qual-edit .marker { color: var(--edit); }
+
+.load-more { padding: 1rem 0; text-align: center; }
+
+ul.pr-terms { padding-left: 1.25rem; }

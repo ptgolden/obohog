@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% import 'partials/macros.html' as m %}
+{% block title %}{{ timeline.term_id }} — {{ src }} — obohog{% endblock %}
+{% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
+{% block content %}
+<h1>{{ timeline.term_id }}{% if timeline.header and timeline.header.current_name %}
+  <span class="name">— {{ timeline.header.current_name }}</span>{% endif %}</h1>
+
+{% if timeline.header %}
+<p class="dim">
+  {% if timeline.shown_events != timeline.total_events -%}
+  showing {{ timeline.shown_events }} of {{ timeline.total_events }} events
+  {%- else -%}
+  {{ timeline.total_events }} events
+  {%- endif %} across {{ timeline.commits | length }} commits
+  · first {{ timeline.header.first_date | dateonly }}
+  · last {{ timeline.header.last_date | dateonly }}
+</p>
+{% endif %}
+{% if timeline.by_predicate %}
+<p class="dim">by predicate:
+  {% for pred, n in timeline.by_predicate.items() %}{{ pred }} {{ n }}{{ ", " if not loop.last }}{% endfor %}
+</p>
+{% endif %}
+
+{% for g in timeline.commits %}
+<section class="commit-section">
+  {{ m.commit_header(g.commit, src) }}
+  {% for o in g.ops %}{{ m.op(o) }}{% endfor %}
+</section>
+{% endfor %}
+{% endblock %}

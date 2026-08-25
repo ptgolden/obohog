@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% import 'partials/macros.html' as m %}
+{% block title %}PR #{{ pr.number }} — {{ src }} — obohog{% endblock %}
+{% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
+{% block content %}
+<h1>PR #{{ pr.number }}</h1>
+{% if pr.url %}<p><a href="{{ pr.url }}">{{ pr.url }}</a></p>{% endif %}
+<p class="dim">{{ pr.terms | length }} terms touched</p>
+<ul class="pr-terms">
+  {% for t in pr.terms %}
+  <li>{{ m.term_link(src, t.term_id) }}{% if t.name %} <span class="name dim">— {{ t.name }}</span>{% endif %}</li>
+  {% endfor %}
+</ul>
+{% endblock %}

@@ -183,6 +183,89 @@ def test_openapi_document_serves(client):
     assert "/api/v1/sources/{src}/search" in r.json()["paths"]
 
 
+# ---------------------------------------------------------------------------
+# HTML pages.
+
+
+def test_home_lists_sources_as_html(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert 'href="/onto/search"' in r.text
+    assert "not built" in r.text  # the empty source, unlinked
+
+
+def test_term_page_renders_ops(client):
+    r = client.get("/onto/terms/MONDO:0000001")
+    assert r.status_code == 200
+    assert "alpha" in r.text
+    assert 'class="op op-add"' in r.text
+    assert "xref" in r.text
+
+
+def test_term_page_unknown_term_is_html_404(client):
+    r = client.get("/onto/terms/MONDO:9999999")
+    assert r.status_code == 404
+    assert r.headers["content-type"].startswith("text/html")
+    assert "no history" in r.text
+
+
+def test_search_page_without_query_shows_form_only(client):
+    r = client.get("/onto/search")
+    assert r.status_code == 200
+    assert "<form" in r.text
+    assert "candidate events" not in r.text
+
+
+def test_search_page_renders_first_page_with_load_more(client):
+    r = client.get("/onto/search", params={"q": "SHARED", "limit": 1})
+    assert r.status_code == 200
+    assert "candidate events" in r.text
+    assert "MONDO:0000001" in r.text
+    assert 'hx-trigger="revealed"' in r.text
+    assert "after=MONDO%3A0000001" in r.text
+
+
+def test_search_results_fragment_pages(client):
+    r = client.get(
+        "/onto/search/results",
+        params={"q": "SHARED", "limit": 1, "after": "MONDO:0000001"},
+    )
+    assert r.status_code == 200
+    assert "<html" not in r.text  # bare fragment
+    assert "MONDO:0000002" in r.text
+    assert "MONDO:0000001" not in r.text.replace("after=MONDO%3A0000001", "")
+    # Last page: no sentinel.
+    last = client.get(
+        "/onto/search/results",
+        params={"q": "SHARED", "limit": 5, "after": "MONDO:0000003"},
+    )
+    assert "hx-trigger" not in last.text
+
+
+def test_htmx_error_is_bare_fragment(client):
+    r = client.get(
+        "/nope/search",
+        params={"q": "x"},
+        headers={"HX-Request": "true"},
+    )
+    assert r.status_code == 404
+    assert "<html" not in r.text
+    assert "nope" in r.text
+
+
+def test_unknown_source_page_is_html_404(client):
+    r = client.get("/nope/search")
+    assert r.status_code == 404
+    assert r.headers["content-type"].startswith("text/html")
+
+
+def test_static_serves_htmx(client):
+    r = client.get("/static/htmx.min.js")
+    assert r.status_code == 200
+    assert "htmx" in r.text[:200]
+
+
 def test_registry_reopens_when_build_meta_changes(
     paged_artifact: Path, tmp_path: Path
 ):
