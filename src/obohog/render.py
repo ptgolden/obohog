@@ -336,26 +336,61 @@ def take_sections(
         yield g
 
 
-def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:
-    """Render one paired-or-unpaired event as a rich ``Text`` line."""
+class Span(NamedTuple):
+    """One run of rendered text with a presentation role, no markup.
+
+    The roles are the full vocabulary any adapter needs: ``same`` renders
+    plain, ``del``/``ins`` get the word-diff treatment (bracket markers on
+    the terminal, ``<del>``/``<ins>`` in HTML), ``note`` is a dim editorial
+    tag (e.g. ``(qualifier order rewritten)``).
+    """
+
+    role: str  # "same" | "del" | "ins" | "note"
+    text: str
+
+
+class QualLine(NamedTuple):
+    """One indented sub-line of a qualifier block."""
+
+    kind: str  # "context" | "del" | "ins" | "edit"
+    spans: list[Span]
+
+
+class OpView(NamedTuple):
+    """A fully-decided rendering of one op, free of any output format.
+
+    ``head`` is the content after ``<marker> <predicate>: `` on the top
+    line; ``quals`` are the indented qualifier sub-lines (empty except for
+    qualifier-block edits). Adapters — the rich terminal renderer below,
+    HTML templates — only map roles to markup; every presentation decision
+    (dispatch, pairing, truncation, word-diffing) already happened here.
+    """
+
+    kind: str  # "add" | "remove" | "edit"
+    predicate: str
+    head: list[Span]
+    quals: list[QualLine]
+
+
+def op_view(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> OpView:
+    """Build the structured rendering of one paired-or-unpaired event."""
     if isinstance(op, Add):
-        return _render_plain(op.predicate, op.change.value, "+", "bold green", truncate)
+        return OpView(
+            "add", op.predicate,
+            [Span("same", _truncate(op.change.value, truncate))], [],
+        )
     if isinstance(op, Remove):
-        return _render_plain(op.predicate, op.change.value, "-", "bold red", truncate)
+        return OpView(
+            "remove", op.predicate,
+            [Span("same", _truncate(op.change.value, truncate))], [],
+        )
     if isinstance(op, Edit):
-        return _render_edit(op, truncate)
+        return _edit_view(op, truncate)
     raise TypeError(f"unknown op: {op!r}")
 
 
-def _render_plain(predicate: str, value: str, marker: str, style: str, cap: int | None) -> Text:
-    line = Text("    ")
-    line.append(f"{marker} ", style=style)
-    line.append(f"{predicate}: {_truncate(value, cap)}")
-    return line
-
-
-def _render_edit(edit: Edit, cap: int | None) -> Text:
-    """Render a paired remove/add as one ``~`` line, structure-aware.
+def _edit_view(edit: Edit, cap: int | None) -> OpView:
+    """View a paired remove/add as one ``~`` op, structure-aware.
 
     Reads the pairing-time fastobo parses off the ``Edit`` —
     ``(body, qualifiers, ! comment)`` per side — and picks a rendering
@@ -371,8 +406,8 @@ def _render_edit(edit: Edit, cap: int | None) -> Text:
     * Qualifier multiset differs (anywhere) → render as a **block**: body +
       comment on the top ``~`` line (word-diffed inline if they changed),
       then each qualifier on its own indented sub-line with a ``-``/``+``/``~``
-      marker or dim if kept. Reads like an axiom-annotation diff, not a
-      run-together sentence.
+      marker or as plain context if kept. Reads like an axiom-annotation
+      diff, not a run-together sentence.
     * Everything else (including any case where fastobo couldn't parse
       either side) → the token-level word-diff fallback.
     """
@@ -388,54 +423,48 @@ def _render_edit(edit: Edit, cap: int | None) -> Text:
 
         if body_same and quals_multiset_same:
             if not comment_same:
-                return _render_comment_only(predicate, b, a, cap)
+                return OpView("edit", predicate, _comment_only_spans(b, a, cap), [])
             if not quals_order_same:
-                return _render_reorder_only(predicate, a, cap)
+                return OpView("edit", predicate, _reorder_only_spans(a, cap), [])
         if not quals_multiset_same:
-            return _render_qualifier_block(predicate, b, a, cap)
+            return _qualifier_block_view(predicate, b, a, cap)
 
-    return _render_token_diff(predicate, edit.before.value, edit.after.value, cap)
+    return OpView(
+        "edit", predicate,
+        _word_diff_spans(edit.before.value, edit.after.value, cap), [],
+    )
 
 
-def _render_comment_only(
-    predicate: str, before: ParsedValue, after: ParsedValue, cap: int | None
-) -> Text:
+def _comment_only_spans(
+    before: ParsedValue, after: ParsedValue, cap: int | None
+) -> list[Span]:
     """Only the trailing ``!`` name comment differs.
 
-    Render the shared body + qualifiers plain and the comment change as a
+    The shared body + qualifiers render plain and the comment change as a
     single bracketed edit — no token-level word-diff on the label itself.
     We used to tag this case (``(referenced term renamed)``) but the tag
     was making an interpretive leap: sometimes the target really was
     renamed elsewhere, sometimes a label was manually added or removed,
-    and the reader can see which from the ``[-...-] {+...+}`` marks
-    without us projecting a story.
+    and the reader can see which from the del/ins marks without us
+    projecting a story.
     """
-    line = Text("    ")
-    line.append("~ ", style="bold yellow")
-    line.append(f"{predicate}: ")
-    line.append(_truncate(_head(before), cap))
-    line.append(" ! ")
+    spans = [Span("same", _truncate(_head(before), cap)), Span("same", " ! ")]
     old = _truncate(before.comment or "", cap)
     new = _truncate(after.comment or "", cap)
     if old:
-        line.append(f"[-{old}-]", style="red")
+        spans.append(Span("del", old))
     if new:
-        line.append(f"{{+{new}+}}", style="green")
-    return line
+        spans.append(Span("ins", new))
+    return spans
 
 
-def _render_reorder_only(
-    predicate: str, current: ParsedValue, cap: int | None
-) -> Text:
+def _reorder_only_spans(current: ParsedValue, cap: int | None) -> list[Span]:
     """Qualifier multiset unchanged; only the order was rewritten."""
-    line = Text("    ")
-    line.append("~ ", style="bold yellow")
-    line.append(f"{predicate}: ")
-    line.append(_truncate(_head(current), cap))
+    spans = [Span("same", _truncate(_head(current), cap))]
     if current.comment:
-        line.append(f" ! {_truncate(current.comment, cap)}")
-    line.append("  (qualifier order rewritten)", style="dim")
-    return line
+        spans.append(Span("same", f" ! {_truncate(current.comment, cap)}"))
+    spans.append(Span("note", "(qualifier order rewritten)"))
+    return spans
 
 
 def _head(pv: ParsedValue) -> str:
@@ -445,84 +474,68 @@ def _head(pv: ParsedValue) -> str:
     return f"{pv.body} {{{', '.join(pv.qualifiers)}}}"
 
 
-def _render_qualifier_block(
+def _qualifier_block_view(
     predicate: str, before: ParsedValue, after: ParsedValue, cap: int | None
-) -> Text:
-    """Render a body + comment on the top line, then indent the qualifier diff.
+) -> OpView:
+    """Body + comment on the top line, then the qualifier diff as sub-lines.
 
-    The qualifier list diffs as a sequence: kept qualifiers render dim as
-    context, inserts as ``+``, deletes as ``-``. A ``replace`` opcode gets
+    The qualifier list diffs as a sequence: kept qualifiers become context
+    lines, inserts ``+``, deletes ``-``. A ``replace`` opcode gets
     sub-paired by similarity so a qualifier whose value was edited (same
     ``key`` on both sides, different value) shows as one ``~`` line with an
     inline word-diff, rather than a ``-`` / ``+`` pair.
     """
-    text = Text("    ")
-    text.append("~ ", style="bold yellow")
-    text.append(f"{predicate}: ")
-    _append_body(text, before.body, after.body, cap)
-    _append_comment_tail(text, before.comment, after.comment, cap)
+    head = _body_spans(before.body, after.body, cap)
+    head.extend(_comment_tail_spans(before.comment, after.comment, cap))
 
+    quals: list[QualLine] = []
     matcher = SequenceMatcher(None, before.qualifiers, after.qualifiers, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             for q in before.qualifiers[i1:i2]:
-                # Context line: no marker, indent aligned with the value column
-                # of the marked lines. Same convention as git diff's leading
-                # space for unchanged context.
-                text.append("\n        ")
-                text.append(_truncate(q, cap))
+                quals.append(QualLine("context", [Span("same", _truncate(q, cap))]))
         elif tag == "delete":
             for q in before.qualifiers[i1:i2]:
-                text.append("\n      ")
-                text.append("- ", style="bold red")
-                text.append(_truncate(q, cap))
+                quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
         elif tag == "insert":
             for q in after.qualifiers[j1:j2]:
-                text.append("\n      ")
-                text.append("+ ", style="bold green")
-                text.append(_truncate(q, cap))
+                quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
         elif tag == "replace":
             removes = list(before.qualifiers[i1:i2])
             adds = list(after.qualifiers[j1:j2])
             pairs, unpaired_r, unpaired_a = _pair_strings(removes, adds)
             for r, a in pairs:
-                text.append("\n      ")
-                text.append("~ ", style="bold yellow")
-                _append_word_diff(text, r, a, cap)
+                quals.append(QualLine("edit", _word_diff_spans(r, a, cap)))
             for q in unpaired_r:
-                text.append("\n      ")
-                text.append("- ", style="bold red")
-                text.append(_truncate(q, cap))
+                quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
             for q in unpaired_a:
-                text.append("\n      ")
-                text.append("+ ", style="bold green")
-                text.append(_truncate(q, cap))
-    return text
+                quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
+    return OpView("edit", predicate, head, quals)
 
 
-def _append_body(text: Text, before: str, after: str, cap: int | None) -> None:
+def _body_spans(before: str, after: str, cap: int | None) -> list[Span]:
     """Body of the clause: plain if unchanged, word-diffed if changed."""
     if before == after:
-        text.append(_truncate(before, cap))
-    else:
-        _append_word_diff(text, before, after, cap)
+        return [Span("same", _truncate(before, cap))]
+    return _word_diff_spans(before, after, cap)
 
 
-def _append_comment_tail(
-    text: Text, before: str | None, after: str | None, cap: int | None
-) -> None:
-    """Trailing ``! comment``: skip if absent both sides, plain if unchanged,
-    bracketed pair if changed."""
+def _comment_tail_spans(
+    before: str | None, after: str | None, cap: int | None
+) -> list[Span]:
+    """Trailing ``! comment``: nothing if absent both sides, plain if
+    unchanged, del/ins pair if changed."""
     if not before and not after:
-        return
-    text.append(" ! ")
+        return []
+    spans = [Span("same", " ! ")]
     if before == after:
-        text.append(_truncate(after or "", cap))
-        return
+        spans.append(Span("same", _truncate(after or "", cap)))
+        return spans
     if before:
-        text.append(f"[-{_truncate(before, cap)}-]", style="red")
+        spans.append(Span("del", _truncate(before, cap)))
     if after:
-        text.append(f"{{+{_truncate(after, cap)}+}}", style="green")
+        spans.append(Span("ins", _truncate(after, cap)))
+    return spans
 
 
 def _pair_strings(
@@ -559,41 +572,81 @@ def _pair_strings(
     return pairs, unpaired_r, unpaired_a
 
 
-def _append_word_diff(text: Text, before: str, after: str, cap: int | None) -> None:
-    """Append the token-level word-diff of ``before`` → ``after`` to ``text``.
+def _word_diff_spans(before: str, after: str, cap: int | None) -> list[Span]:
+    """The token-level word-diff of ``before`` → ``after`` as spans.
 
     Runs at the **token** level (see ``_TOKEN_RE``) so identifier swaps,
     snake_case edits, and qualifier-membership changes show as whole-token
-    edits rather than character shuffles. Uses git's ``--word-diff=plain``
-    bracket markers (``[-old-]``, ``{+new+}``) so the diff stays readable
-    when piped to a file or a non-color terminal; the markers are
-    additionally styled red/green when the console supports it.
+    edits rather than character shuffles. Also the fallback for a whole
+    edit when fastobo couldn't parse either side.
     """
     b_tokens = _tokenize(_truncate(before, cap))
     a_tokens = _tokenize(_truncate(after, cap))
+    spans: list[Span] = []
     matcher = SequenceMatcher(None, b_tokens, a_tokens, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
-            text.append("".join(b_tokens[i1:i2]))
+            spans.append(Span("same", "".join(b_tokens[i1:i2])))
         elif tag == "delete":
-            text.append(f"[-{''.join(b_tokens[i1:i2])}-]", style="red")
+            spans.append(Span("del", "".join(b_tokens[i1:i2])))
         elif tag == "insert":
-            text.append(f"{{+{''.join(a_tokens[j1:j2])}+}}", style="green")
+            spans.append(Span("ins", "".join(a_tokens[j1:j2])))
         elif tag == "replace":
-            text.append(f"[-{''.join(b_tokens[i1:i2])}-]", style="red")
-            text.append(f"{{+{''.join(a_tokens[j1:j2])}+}}", style="green")
+            spans.append(Span("del", "".join(b_tokens[i1:i2])))
+            spans.append(Span("ins", "".join(a_tokens[j1:j2])))
+    return spans
 
 
-def _render_token_diff(
-    predicate: str, before: str, after: str, cap: int | None
-) -> Text:
-    """Fallback: token-level word-diff over the raw value strings.
+# ---------------------------------------------------------------------------
+# The rich terminal adapter. Everything above is console-free; from here on
+# spans and lines become styled ``Text``. del/ins spans use git's
+# ``--word-diff=plain`` bracket markers (``[-old-]``, ``{+new+}``) so the
+# diff stays readable when piped to a file or a non-color terminal; the
+# markers are additionally styled red/green when the console supports it.
 
-    Used when fastobo can't parse either side, or when there are no
-    qualifiers to break out into a block. The output is a single ``~`` line.
-    """
+_OP_MARKERS = {
+    "add": ("+ ", "bold green"),
+    "remove": ("- ", "bold red"),
+    "edit": ("~ ", "bold yellow"),
+}
+
+
+def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:
+    """Render one paired-or-unpaired event as a rich ``Text`` line."""
+    return render_op_view(op_view(op, truncate))
+
+
+def render_op_view(view: OpView) -> Text:
+    """Map an :class:`OpView` to terminal form: markers, indents, styles."""
+    marker, style = _OP_MARKERS[view.kind]
     line = Text("    ")
-    line.append("~ ", style="bold yellow")
-    line.append(f"{predicate}: ")
-    _append_word_diff(line, before, after, cap)
+    line.append(marker, style=style)
+    line.append(f"{view.predicate}: ")
+    _append_spans(line, view.head)
+    for ql in view.quals:
+        if ql.kind == "context":
+            # Context line: no marker, indent aligned with the value column
+            # of the marked lines. Same convention as git diff's leading
+            # space for unchanged context.
+            line.append("\n        ")
+        else:
+            line.append("\n      ")
+            marker, style = _OP_MARKERS[_QUAL_OP_KIND[ql.kind]]
+            line.append(marker, style=style)
+        _append_spans(line, ql.spans)
     return line
+
+
+_QUAL_OP_KIND = {"del": "remove", "ins": "add", "edit": "edit"}
+
+
+def _append_spans(text: Text, spans: list[Span]) -> None:
+    for role, s in spans:
+        if role == "same":
+            text.append(s)
+        elif role == "del":
+            text.append(f"[-{s}-]", style="red")
+        elif role == "ins":
+            text.append(f"{{+{s}+}}", style="green")
+        elif role == "note":
+            text.append(f"  {s}", style="dim")
