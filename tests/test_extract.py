@@ -89,6 +89,144 @@ def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path
     assert "MONDO:0000002" in skipped_ids  # the bad term is recorded, not fatal
 
 
+def _extend_repo(repo: Path) -> None:
+    """Two more upstream commits + a tag, landing after an initial build.
+
+    c5 removes MONDO:0000002 and adds MONDO:0000003 — a term removal across
+    the incremental boundary is exactly what the seed state must get right.
+    """
+    from conftest import HEADER, _git, _term, _write
+
+    t1 = _term(
+        "MONDO:0000001", "name: disease", 'synonym: "illness" EXACT []', "xref: DOID:4"
+    )
+    t3 = _term("MONDO:0000003", "name: syndrome")
+    _write(repo, "src/onto.obo", HEADER + t1 + "\n" + t3)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c5 swap terms", date="2021-01-06T00:00:00+00:00")
+
+    t3b = _term("MONDO:0000003", "name: syndrome", "xref: NCIT:C123")
+    _write(repo, "src/onto.obo", HEADER + t1 + "\n" + t3b)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c6 add xref", date="2021-01-07T00:00:00+00:00")
+    _git(repo, "tag", "v2.0")
+
+
+def _assert_same_artifact(a: Path, b: Path) -> None:
+    da, db = HistoryDB(a), HistoryDB(b)
+    checks = [
+        ("events", "term_id, commit_seq, operation, predicate, value, body, comment"),
+        ("term_snapshots", "term_id, commit_seq, content_hash"),
+        ("commits", "commit_seq, sha, pr_number, message"),
+        ("releases", "tag, sha, commit_seq"),
+    ]
+    for table, cols in checks:
+        assert _multiset(da, table, cols) == _multiset(db, table, cols), table
+    da.close()
+    db.close()
+    assert model.read_build_meta(a) == model.read_build_meta(b)
+
+
+def test_incremental_update_matches_full_rebuild(obo_repo: Path, tmp_path: Path):
+    inc = tmp_path / "inc"
+    build_parallel(str(obo_repo), OBO, inc, jobs=2)
+    _extend_repo(obo_repo)
+    counts = build_parallel(str(obo_repo), OBO, inc, jobs=2, update=True)
+    assert counts["mode"] == "incremental"
+    assert counts["commits"] == 2
+    assert counts["total_commits"] == 7
+
+    fresh = tmp_path / "fresh"
+    build_parallel(str(obo_repo), OBO, fresh, jobs=2)
+    _assert_same_artifact(inc, fresh)
+
+
+def test_incremental_after_serial_build(obo_repo: Path, tmp_path: Path):
+    # A serial artifact stores single files, not part-file dirs; appending
+    # must migrate them so the union stays complete.
+    inc = tmp_path / "inc"
+    with GitSource(obo_repo) as src:
+        extract(src, OBO, inc)
+    _extend_repo(obo_repo)
+    counts = build_parallel(str(obo_repo), OBO, inc, jobs=2, update=True)
+    assert counts["mode"] == "incremental"
+
+    fresh = tmp_path / "fresh"
+    build_parallel(str(obo_repo), OBO, fresh, jobs=2)
+    # skipped exists only on the incremental artifact; compare the rest.
+    da, db = HistoryDB(inc), HistoryDB(fresh)
+    cols = "term_id, commit_seq, operation, predicate, value"
+    assert _multiset(da, "events", cols) == _multiset(db, "events", cols)
+    da.close()
+    db.close()
+
+
+def test_incremental_up_to_date_still_refreshes_releases(obo_repo: Path, tmp_path: Path):
+    from conftest import _git
+
+    out = tmp_path / "a"
+    build_parallel(str(obo_repo), OBO, out, jobs=2)
+    # A release tagged after the last file-touching commit: no new file
+    # versions, but the releases table must gain the tag.
+    _git(obo_repo, "tag", "v1.1")
+    counts = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert counts["mode"] == "up-to-date"
+    assert counts["commits"] == 0
+    db = HistoryDB(out)
+    tags = {row[0] for row in db.con.execute("SELECT tag FROM releases").fetchall()}
+    db.close()
+    assert tags == {"v1.0", "v1.1"}
+
+
+def test_incremental_falls_back_on_history_rewrite(obo_repo: Path, tmp_path: Path):
+    from conftest import _git
+
+    out = tmp_path / "a"
+    build_parallel(str(obo_repo), OBO, out, jobs=2)
+    _git(obo_repo, "commit", "--amend", "-qm", "c4 amended",
+         date="2021-01-05T00:00:00+00:00")
+    counts = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert counts["mode"] == "full"
+    db = HistoryDB(out)
+    last = db.con.execute(
+        "SELECT message FROM commits ORDER BY commit_seq DESC LIMIT 1"
+    ).fetchone()[0]
+    db.close()
+    assert last == "c4 amended"
+
+
+def test_incremental_falls_back_on_schema_mismatch(obo_repo: Path, tmp_path: Path):
+    out = tmp_path / "a"
+    build_parallel(str(obo_repo), OBO, out, jobs=2)
+    meta = model.read_build_meta(out)
+    meta["schema_version"] = "0"
+    model.write_table([meta], model.BUILD_META, out, "build_meta")
+    counts = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert counts["mode"] == "full"
+    assert model.read_build_meta(out)["schema_version"] == model.SCHEMA_VERSION
+
+
+def test_incremental_cleans_aborted_parts(obo_repo: Path, tmp_path: Path):
+    out = tmp_path / "a"
+    build_parallel(str(obo_repo), OBO, out, jobs=2)
+    # A part-file from an increment that died before its build_meta write:
+    # its starting seq (5) is beyond the recorded last_commit_seq (4).
+    stray = {
+        "term_id": "MONDO:9999999", "commit_seq": 99, "sha": "dead",
+        "predicate": "name", "value": "ghost", "operation": "add",
+        "body": "ghost", "qualifiers": [], "comment": None,
+    }
+    model.write_part([stray], model.EVENTS, out / "events" / "inc-0000005-000-0000.parquet")
+    counts = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert counts["mode"] == "up-to-date"
+    db = HistoryDB(out)
+    n = db.con.execute(
+        "SELECT count(*) FROM events WHERE term_id = 'MONDO:9999999'"
+    ).fetchone()[0]
+    db.close()
+    assert n == 0
+
+
 def test_missing_artifact_raises_clear_error(tmp_path: Path):
     with pytest.raises(ArtifactNotFound, match="Run `obohog source sync"):
         HistoryDB(tmp_path / "does-not-exist")

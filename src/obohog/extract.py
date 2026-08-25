@@ -21,6 +21,9 @@ from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 from datetime import timezone
 from pathlib import Path
+from typing import NamedTuple
+
+import pyarrow.parquet as pq
 
 from . import model
 from .gitsource import CommitInfo, FileVersion, GitError, GitSource, TagRef
@@ -146,7 +149,9 @@ def build(
     model.write_table(meta, model.BUILD_META, out_dir, "build_meta")
 
     return {
+        "mode": "full",
         "commits": len(commits),
+        "total_commits": len(commits),
         "snapshots": len(snapshots),
         "events": len(events),
         "releases": len(releases),
@@ -263,6 +268,7 @@ def build_parallel(
     chunk_size: int | None = None,
     limit: int | None = None,
     progress: bool = False,
+    update: bool = False,
 ) -> dict:
     """Build the artifact from a local clone using a pool of parsing workers.
 
@@ -272,15 +278,17 @@ def build_parallel(
     to per-chunk Parquet part-files. The parent writes ``commits``, ``releases``,
     ``skipped_commits`` and ``build_meta`` directly (no parsing needed).
 
+    With ``update=True``, an existing artifact is extended in place: only the
+    commits after its recorded ``last_commit_seq`` are parsed and appended (see
+    :func:`_build_update`). Falls back to a full rebuild whenever appending
+    isn't safe — no artifact, different schema, a ``limit`` bound, or a walk
+    that no longer matches what was built (history rewrite). The returned dict
+    carries ``mode``: ``"full"``, ``"incremental"``, or ``"up-to-date"``.
+
     Runs strictly offline: blobs must already be present in ``clone_path``.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    # Clear any prior part-files: workers append numbered files that a glob would
-    # union, so stale files from an aborted or earlier run must not survive.
-    for name in ("term_snapshots", "events"):
-        shutil.rmtree(out / name, ignore_errors=True)
-        (out / f"{name}.parquet").unlink(missing_ok=True)
 
     # The parent's `iter_file_history` uses `git log --follow`, which fires
     # rename detection and can need blobs for *former* paths of the tracked
@@ -295,18 +303,24 @@ def build_parallel(
 
     os.environ["GIT_NO_LAZY_FETCH"] = "1"
 
+    plan = _resume_plan(out, full) if (update and limit is None) else None
+    if plan is not None:
+        return _build_update(
+            clone_path, obo_path, out, full, tags, plan,
+            jobs=jobs, chunk_size=chunk_size, progress=progress,
+        )
+
+    # --- full rebuild ---
+    # Clear any prior part-files: workers append numbered files that a glob would
+    # union, so stale files from an aborted or earlier run must not survive.
+    for name in ("term_snapshots", "events"):
+        shutil.rmtree(out / name, ignore_errors=True)
+        (out / f"{name}.parquet").unlink(missing_ok=True)
+
     offset = 0 if limit is None else max(0, len(full) - limit)
     windowed = full[offset:]
     n = len(windowed)
-    jobs = jobs or max(1, (os.cpu_count() or 2) - 2)
-    # More chunks than workers so the pool can load-balance dynamically (a worker
-    # that finishes grabs the next queued chunk). Each chunk pays a one-parse seed
-    # cost, so default to a handful per worker rather than one-per-commit.
-    if chunk_size and chunk_size > 0:
-        n_chunks = -(-n // chunk_size)  # ceil
-    else:
-        n_chunks = jobs * 4
-    bounds = _chunk_bounds(n, max(1, min(n_chunks, n or 1)))
+    jobs, bounds = _plan_chunks(n, jobs, chunk_size)
 
     # Parent-written tables (derived from commit metadata alone).
     commit_rows = [_commit_row(v.commit) for v in windowed]
@@ -314,27 +328,9 @@ def build_parallel(
     seq_dates = [(r["commit_seq"], r["committed_date"]) for r in commit_rows]
     model.write_table(_release_rows(tags, seq_dates), model.RELEASES, out, "releases")
 
-    # "spawn" (not fork): workers parse with fastobo's threaded runtime, and
-    # fork() in a multi-threaded process risks deadlock.
-    ctx = multiprocessing.get_context("spawn")
-    manager = ctx.Manager() if progress else None
-    ticks = manager.Queue() if manager else None  # workers report per-commit
-    try:
-        with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as pool:
-            # Send the already-computed windowed versions to each worker so
-            # they don't each re-walk `git log --follow`. Pickle cost is small
-            # (dataclasses of str/int/datetime) and pays for itself many times
-            # over vs. per-worker subprocess overhead.
-            futures = [
-                pool.submit(_build_chunk, clone_path, windowed, str(out), i, s, e, ticks)
-                for i, (s, e) in enumerate(bounds)
-            ]
-            if progress:
-                _consume_ticks(futures, ticks, n)
-            results = [f.result() for f in futures]
-    finally:
-        if manager is not None:
-            manager.shutdown()
+    results = _run_chunks(
+        clone_path, windowed, out, bounds, jobs=jobs, progress=progress, total=n,
+    )
 
     # Guarantee the core tables exist even if this (degenerate) build produced no
     # part-files, so queries never hit a missing table.
@@ -357,11 +353,213 @@ def build_parallel(
     model.write_table(meta, model.BUILD_META, out, "build_meta")
 
     return {
+        "mode": "full",
         "commits": n,
+        "total_commits": n,
         "snapshots": sum(r["snapshots"] for r in results),
         "events": sum(r["events"] for r in results),
         "skipped": len(skipped),
     }
+
+
+class _ResumePlan(NamedTuple):
+    """A validated go-ahead for appending to an existing artifact."""
+
+    last: int  # index in the walk (== commit_seq) of the last built commit
+    commit_rows: list[dict]  # the artifact's current commits table
+    meta: dict  # the artifact's current build_meta row
+
+
+def _resume_plan(out: Path, full: list) -> _ResumePlan | None:
+    """Validate that ``out`` can be extended in place given the walk ``full``.
+
+    None means "can't append" — no artifact, a different schema, or a walk
+    that no longer matches what was built (history rewrite, changed clone
+    bounds, tracked-file rename changing the ``--follow`` resolution). The
+    check is positional: the artifact's last built commit must sit at index
+    ``last_commit_seq`` of the new walk with the same sha, which holds
+    exactly when the previously built prefix is unchanged.
+    """
+    meta = model.read_build_meta(out)
+    if meta is None or meta["schema_version"] != model.SCHEMA_VERSION:
+        return None
+    last = meta["last_commit_seq"]
+    if last is None or last >= len(full):
+        return None
+    if not (out / "commits.parquet").exists():
+        return None
+    commit_rows = pq.read_table(out / "commits.parquet").to_pylist()
+    last_sha = next((r["sha"] for r in commit_rows if r["commit_seq"] == last), None)
+    if last_sha is None or full[last].commit.sha != last_sha:
+        return None
+    return _ResumePlan(last=last, commit_rows=commit_rows, meta=meta)
+
+
+def _build_update(
+    clone_path: str,
+    obo_path: str,
+    out: Path,
+    full: list,
+    tags: Iterable[TagRef],
+    plan: _ResumePlan,
+    *,
+    jobs: int | None,
+    chunk_size: int | None,
+    progress: bool,
+) -> dict:
+    """Append the walk's commits after ``plan.last`` to an existing artifact.
+
+    ``build_meta`` is the commit point and is written last: everything else is
+    either derivable-and-truncatable (``commits``/``skipped`` rows beyond the
+    recorded ``last_commit_seq`` are dropped before appending) or cleaned up by
+    prefix (``inc-*`` part-files from an increment that never reached its
+    ``build_meta`` write). An aborted increment therefore leaves a consistent,
+    merely stale artifact behind.
+    """
+    last = plan.last
+    # Truncate to what build_meta actually recorded, in case a prior increment
+    # died between its table writes and its build_meta write.
+    old_commits = [r for r in plan.commit_rows if r["commit_seq"] <= last]
+    _clear_aborted_parts(out, last)
+
+    new_versions = full[last + 1:]
+    n = len(new_versions)
+    if n == 0:
+        # No new file commits — but new *tags* may still have appeared (release
+        # tags rarely touch the tracked file), so refresh the releases table.
+        seq_dates = [(r["commit_seq"], r["committed_date"]) for r in old_commits]
+        model.write_table(_release_rows(tags, seq_dates), model.RELEASES, out, "releases")
+        return {
+            "mode": "up-to-date", "commits": 0, "total_commits": len(old_commits),
+            "snapshots": 0, "events": 0, "skipped": 0,
+        }
+
+    # An artifact from the serial builder stores single files; move them into
+    # the part-file directories so the appended parts union with them.
+    for name in ("term_snapshots", "events"):
+        single = out / f"{name}.parquet"
+        if single.exists():
+            (out / name).mkdir(exist_ok=True)
+            single.rename(out / name / "base.parquet")
+
+    # Workers get the walk from the last built commit on: index 0 is the seed
+    # (already-built state to diff the first new commit against), so chunk
+    # bounds over the n new commits shift up by one.
+    tail = full[last:]
+    jobs, rel_bounds = _plan_chunks(n, jobs, chunk_size)
+    bounds = [(s + 1, e + 1) for s, e in rel_bounds]
+    results = _run_chunks(
+        clone_path, tail, out, bounds,
+        jobs=jobs, progress=progress, total=n, prefix=f"inc-{last + 1:07d}-",
+    )
+
+    new_commit_rows = [_commit_row(v.commit) for v in new_versions]
+    all_commits = old_commits + new_commit_rows
+    model.write_table(all_commits, model.COMMITS, out, "commits")
+    seq_dates = [(r["commit_seq"], r["committed_date"]) for r in all_commits]
+    model.write_table(_release_rows(tags, seq_dates), model.RELEASES, out, "releases")
+
+    old_skipped: list[dict] = []
+    if (out / "skipped.parquet").exists():
+        old_skipped = [
+            r for r in pq.read_table(out / "skipped.parquet").to_pylist()
+            if r["commit_seq"] <= last
+        ]
+    new_skipped = [row for r in results for row in r["skipped"]]
+    model.write_table(old_skipped + new_skipped, model.SKIPPED, out, "skipped")
+
+    meta = [
+        {
+            "schema_version": model.SCHEMA_VERSION,
+            "generator_version": _version(),
+            "source_path": obo_path,
+            "first_commit_seq": plan.meta["first_commit_seq"],
+            "last_commit_seq": full[-1].commit.seq,
+            "n_commits": len(all_commits),
+        }
+    ]
+    model.write_table(meta, model.BUILD_META, out, "build_meta")
+
+    return {
+        "mode": "incremental",
+        "commits": n,
+        "total_commits": len(all_commits),
+        "snapshots": sum(r["snapshots"] for r in results),
+        "events": sum(r["events"] for r in results),
+        "skipped": len(new_skipped),
+    }
+
+
+def _clear_aborted_parts(out: Path, last_recorded: int) -> None:
+    """Delete ``inc-*`` part-files from increments never recorded in build_meta.
+
+    A recorded increment always has its starting seq covered by
+    ``last_commit_seq``; a part-file starting beyond it can only come from an
+    increment that died before its ``build_meta`` write.
+    """
+    for name in ("term_snapshots", "events"):
+        directory = out / name
+        if not directory.is_dir():
+            continue
+        for part in directory.glob("inc-*.parquet"):
+            try:
+                first_seq = int(part.name.split("-")[1])
+            except (IndexError, ValueError):
+                continue
+            if first_seq > last_recorded:
+                part.unlink()
+
+
+def _plan_chunks(
+    n: int, jobs: int | None, chunk_size: int | None
+) -> tuple[int, list[tuple[int, int]]]:
+    """Resolve the worker count and chunk bounds for ``n`` commits."""
+    jobs = jobs or max(1, (os.cpu_count() or 2) - 2)
+    # More chunks than workers so the pool can load-balance dynamically (a worker
+    # that finishes grabs the next queued chunk). Each chunk pays a one-parse seed
+    # cost, so default to a handful per worker rather than one-per-commit.
+    if chunk_size and chunk_size > 0:
+        n_chunks = -(-n // chunk_size)  # ceil
+    else:
+        n_chunks = jobs * 4
+    return jobs, _chunk_bounds(n, max(1, min(n_chunks, n or 1)))
+
+
+def _run_chunks(
+    clone_path: str,
+    versions: list[FileVersion],
+    out: Path,
+    bounds: list[tuple[int, int]],
+    *,
+    jobs: int,
+    progress: bool,
+    total: int,
+    prefix: str = "",
+) -> list[dict]:
+    """Run ``_build_chunk`` over ``bounds`` in a spawn-based process pool."""
+    # "spawn" (not fork): workers parse with fastobo's threaded runtime, and
+    # fork() in a multi-threaded process risks deadlock.
+    ctx = multiprocessing.get_context("spawn")
+    manager = ctx.Manager() if progress else None
+    ticks = manager.Queue() if manager else None  # workers report per-commit
+    try:
+        with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as pool:
+            # Send the already-computed versions to each worker so they don't
+            # each re-walk `git log --follow`. Pickle cost is small
+            # (dataclasses of str/int/datetime) and pays for itself many times
+            # over vs. per-worker subprocess overhead.
+            futures = [
+                pool.submit(
+                    _build_chunk, clone_path, versions, str(out), i, s, e, ticks, prefix
+                )
+                for i, (s, e) in enumerate(bounds)
+            ]
+            if progress:
+                _consume_ticks(futures, ticks, total)
+            return [f.result() for f in futures]
+    finally:
+        if manager is not None:
+            manager.shutdown()
 
 
 def _consume_ticks(futures, ticks, total: int) -> None:
@@ -402,6 +600,7 @@ def _build_chunk(
     start: int,
     end: int,
     ticks=None,
+    prefix: str = "",
 ) -> dict:
     """Worker: parse+diff ``windowed[start:end]`` and stream part-files.
 
@@ -428,12 +627,12 @@ def _build_chunk(
         if snap_rows:
             model.write_part(
                 snap_rows, model.TERM_SNAPSHOTS,
-                out / "term_snapshots" / f"{chunk_id:03d}-{batch:04d}.parquet",
+                out / "term_snapshots" / f"{prefix}{chunk_id:03d}-{batch:04d}.parquet",
             )
         if event_rows:
             model.write_part(
                 event_rows, model.EVENTS,
-                out / "events" / f"{chunk_id:03d}-{batch:04d}.parquet",
+                out / "events" / f"{prefix}{chunk_id:03d}-{batch:04d}.parquet",
             )
         snap_rows, event_rows, batch = [], [], batch + 1
 
