@@ -324,24 +324,128 @@ def build_parallel(
 
     os.environ["GIT_NO_LAZY_FETCH"] = "1"
 
-    plan = _resume_plan(out, full) if (update and limit is None) else None
-    if plan is not None:
+    plan = plan_build(out, full, limit=limit, update=update)
+    if plan.resume is not None:
+        _clear_aborted_parts(out, plan.resume.last)
+    if plan.mode is BuildMode.UP_TO_DATE:
+        return _refresh_releases(out, tags, plan.resume)
+    if plan.mode is BuildMode.INCREMENTAL:
         return _build_update(
-            clone_path, obo_path, out, full, tags, plan,
+            clone_path, obo_path, out, full, tags, plan.resume,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
         )
+    return _build_full(
+        clone_path, obo_path, out, full[plan.offset:], tags,
+        jobs=jobs, chunk_size=chunk_size, progress=progress,
+    )
 
-    # --- full rebuild ---
+
+class _ResumePlan(NamedTuple):
+    """A validated go-ahead for appending to an existing artifact."""
+
+    last: int  # index in the walk (== commit_seq) of the last built commit
+    commit_rows: list[dict]  # the artifact's commits table, up to ``last``
+    meta: dict  # the artifact's current build_meta row
+
+
+@dataclass(frozen=True)
+class BuildPlan:
+    """A declarative decision about how a build run treats the artifact."""
+
+    mode: BuildMode
+    offset: int = 0  # FULL: window start in the walk (from ``limit``)
+    resume: _ResumePlan | None = None  # INCREMENTAL / UP_TO_DATE only
+
+
+def plan_build(
+    out: Path, full: list, *, limit: int | None, update: bool
+) -> BuildPlan:
+    """Decide how a run over the walk ``full`` should treat the artifact at ``out``.
+
+    Appending requires ``update`` with no ``limit`` window, and an artifact
+    whose recorded state still matches the walk (see :func:`_validate_resume`);
+    anything else falls back to a full rebuild. Only reads artifact metadata —
+    the decision itself is pure.
+    """
+    if update and limit is None:
+        meta = model.read_build_meta(out)
+        commit_rows = (
+            pq.read_table(out / "commits.parquet").to_pylist()
+            if (out / "commits.parquet").exists()
+            else []
+        )
+        resume = _validate_resume(meta, commit_rows, full)
+        if resume is not None:
+            mode = (
+                BuildMode.UP_TO_DATE
+                if resume.last == len(full) - 1
+                else BuildMode.INCREMENTAL
+            )
+            return BuildPlan(mode=mode, resume=resume)
+    offset = 0 if limit is None else max(0, len(full) - limit)
+    return BuildPlan(mode=BuildMode.FULL, offset=offset)
+
+
+def _validate_resume(
+    meta: dict | None, commit_rows: list[dict], full: list
+) -> _ResumePlan | None:
+    """Check that an artifact with this metadata can be extended by this walk.
+
+    None means "can't append" — no artifact, a different schema, or a walk
+    that no longer matches what was built (history rewrite, changed clone
+    bounds, tracked-file rename changing the ``--follow`` resolution). The
+    check is positional: the artifact's last built commit must sit at index
+    ``last_commit_seq`` of the new walk with the same sha, which holds
+    exactly when the previously built prefix is unchanged.
+    """
+    if meta is None or meta["schema_version"] != model.SCHEMA_VERSION:
+        return None
+    last = meta["last_commit_seq"]
+    if last is None or last >= len(full):
+        return None
+    last_sha = next((r["sha"] for r in commit_rows if r["commit_seq"] == last), None)
+    if last_sha is None or full[last].commit.sha != last_sha:
+        return None
+    # Truncate to what build_meta actually recorded, in case a prior increment
+    # died between its table writes and its build_meta write.
+    kept = [r for r in commit_rows if r["commit_seq"] <= last]
+    return _ResumePlan(last=last, commit_rows=kept, meta=meta)
+
+
+def _refresh_releases(
+    out: Path, tags: Iterable[TagRef], resume: _ResumePlan
+) -> BuildReport:
+    """The up-to-date case: no new file commits, but new release *tags* may
+    still have appeared (they rarely touch the tracked file), so remap the
+    releases table before reporting."""
+    seq_dates = [(r["commit_seq"], r["committed_date"]) for r in resume.commit_rows]
+    model.write_table(_release_rows(tags, seq_dates), model.RELEASES, out, "releases")
+    return BuildReport(
+        mode=BuildMode.UP_TO_DATE, commits=0,
+        total_commits=len(resume.commit_rows), snapshots=0, events=0,
+    )
+
+
+def _build_full(
+    clone_path: str,
+    obo_path: str,
+    out: Path,
+    windowed: list[FileVersion],
+    tags: Iterable[TagRef],
+    *,
+    jobs: int | None,
+    chunk_size: int | None,
+    progress: bool,
+) -> BuildReport:
+    """Build the artifact from scratch over ``windowed``."""
     # Clear any prior part-files: workers append numbered files that a glob would
     # union, so stale files from an aborted or earlier run must not survive.
     for name in ("term_snapshots", "events"):
         shutil.rmtree(out / name, ignore_errors=True)
         (out / f"{name}.parquet").unlink(missing_ok=True)
 
-    offset = 0 if limit is None else max(0, len(full) - limit)
-    windowed = full[offset:]
     n = len(windowed)
-    jobs, bounds = _plan_chunks(n, jobs, chunk_size)
+    jobs, chunks = _plan_chunks(n, jobs, chunk_size)
 
     # Parent-written tables (derived from commit metadata alone).
     commit_rows = [_commit_row(v.commit) for v in windowed]
@@ -350,7 +454,7 @@ def build_parallel(
     model.write_table(_release_rows(tags, seq_dates), model.RELEASES, out, "releases")
 
     results = _run_chunks(
-        clone_path, windowed, out, bounds, jobs=jobs, progress=progress, total=n,
+        clone_path, windowed, out, chunks, jobs=jobs, progress=progress, total=n,
     )
 
     # Guarantee the core tables exist even if this (degenerate) build produced no
@@ -383,52 +487,19 @@ def build_parallel(
     )
 
 
-class _ResumePlan(NamedTuple):
-    """A validated go-ahead for appending to an existing artifact."""
-
-    last: int  # index in the walk (== commit_seq) of the last built commit
-    commit_rows: list[dict]  # the artifact's current commits table
-    meta: dict  # the artifact's current build_meta row
-
-
-def _resume_plan(out: Path, full: list) -> _ResumePlan | None:
-    """Validate that ``out`` can be extended in place given the walk ``full``.
-
-    None means "can't append" — no artifact, a different schema, or a walk
-    that no longer matches what was built (history rewrite, changed clone
-    bounds, tracked-file rename changing the ``--follow`` resolution). The
-    check is positional: the artifact's last built commit must sit at index
-    ``last_commit_seq`` of the new walk with the same sha, which holds
-    exactly when the previously built prefix is unchanged.
-    """
-    meta = model.read_build_meta(out)
-    if meta is None or meta["schema_version"] != model.SCHEMA_VERSION:
-        return None
-    last = meta["last_commit_seq"]
-    if last is None or last >= len(full):
-        return None
-    if not (out / "commits.parquet").exists():
-        return None
-    commit_rows = pq.read_table(out / "commits.parquet").to_pylist()
-    last_sha = next((r["sha"] for r in commit_rows if r["commit_seq"] == last), None)
-    if last_sha is None or full[last].commit.sha != last_sha:
-        return None
-    return _ResumePlan(last=last, commit_rows=commit_rows, meta=meta)
-
-
 def _build_update(
     clone_path: str,
     obo_path: str,
     out: Path,
     full: list,
     tags: Iterable[TagRef],
-    plan: _ResumePlan,
+    resume: _ResumePlan,
     *,
     jobs: int | None,
     chunk_size: int | None,
     progress: bool,
 ) -> BuildReport:
-    """Append the walk's commits after ``plan.last`` to an existing artifact.
+    """Append the walk's commits after ``resume.last`` to an existing artifact.
 
     ``build_meta`` is the commit point and is written last: everything else is
     either derivable-and-truncatable (``commits``/``skipped`` rows beyond the
@@ -437,23 +508,10 @@ def _build_update(
     ``build_meta`` write). An aborted increment therefore leaves a consistent,
     merely stale artifact behind.
     """
-    last = plan.last
-    # Truncate to what build_meta actually recorded, in case a prior increment
-    # died between its table writes and its build_meta write.
-    old_commits = [r for r in plan.commit_rows if r["commit_seq"] <= last]
-    _clear_aborted_parts(out, last)
-
+    last = resume.last
+    old_commits = resume.commit_rows
     new_versions = full[last + 1:]
     n = len(new_versions)
-    if n == 0:
-        # No new file commits — but new *tags* may still have appeared (release
-        # tags rarely touch the tracked file), so refresh the releases table.
-        seq_dates = [(r["commit_seq"], r["committed_date"]) for r in old_commits]
-        model.write_table(_release_rows(tags, seq_dates), model.RELEASES, out, "releases")
-        return BuildReport(
-            mode=BuildMode.UP_TO_DATE, commits=0, total_commits=len(old_commits),
-            snapshots=0, events=0,
-        )
 
     # An artifact from the serial builder stores single files; move them into
     # the part-file directories so the appended parts union with them.
@@ -467,10 +525,10 @@ def _build_update(
     # (already-built state to diff the first new commit against), so chunk
     # bounds over the n new commits shift up by one.
     tail = full[last:]
-    jobs, rel_bounds = _plan_chunks(n, jobs, chunk_size)
-    bounds = [(s + 1, e + 1) for s, e in rel_bounds]
+    jobs, chunks = _plan_chunks(n, jobs, chunk_size)
+    chunks = [Chunk(c.id, c.start + 1, c.end + 1) for c in chunks]
     results = _run_chunks(
-        clone_path, tail, out, bounds,
+        clone_path, tail, out, chunks,
         jobs=jobs, progress=progress, total=n, prefix=f"inc-{last + 1:07d}-",
     )
 
@@ -494,7 +552,7 @@ def _build_update(
             "schema_version": model.SCHEMA_VERSION,
             "generator_version": _version(),
             "source_path": obo_path,
-            "first_commit_seq": plan.meta["first_commit_seq"],
+            "first_commit_seq": resume.meta["first_commit_seq"],
             "last_commit_seq": full[-1].commit.seq,
             "n_commits": len(all_commits),
         }
@@ -531,10 +589,18 @@ def _clear_aborted_parts(out: Path, last_recorded: int) -> None:
                 part.unlink()
 
 
+class Chunk(NamedTuple):
+    """A contiguous span of walk indices for one worker task."""
+
+    id: int
+    start: int
+    end: int
+
+
 def _plan_chunks(
     n: int, jobs: int | None, chunk_size: int | None
-) -> tuple[int, list[tuple[int, int]]]:
-    """Resolve the worker count and chunk bounds for ``n`` commits."""
+) -> tuple[int, list[Chunk]]:
+    """Resolve the worker count and chunk spans for ``n`` commits."""
     jobs = jobs or max(1, (os.cpu_count() or 2) - 2)
     # More chunks than workers so the pool can load-balance dynamically (a worker
     # that finishes grabs the next queued chunk). Each chunk pays a one-parse seed
@@ -543,21 +609,22 @@ def _plan_chunks(
         n_chunks = -(-n // chunk_size)  # ceil
     else:
         n_chunks = jobs * 4
-    return jobs, _chunk_bounds(n, max(1, min(n_chunks, n or 1)))
+    bounds = _chunk_bounds(n, max(1, min(n_chunks, n or 1)))
+    return jobs, [Chunk(i, s, e) for i, (s, e) in enumerate(bounds)]
 
 
 def _run_chunks(
     clone_path: str,
     versions: list[FileVersion],
     out: Path,
-    bounds: list[tuple[int, int]],
+    chunks: list[Chunk],
     *,
     jobs: int,
     progress: bool,
     total: int,
     prefix: str = "",
 ) -> list[dict]:
-    """Run ``_build_chunk`` over ``bounds`` in a spawn-based process pool."""
+    """Run ``_build_chunk`` over ``chunks`` in a spawn-based process pool."""
     # "spawn" (not fork): workers parse with fastobo's threaded runtime, and
     # fork() in a multi-threaded process risks deadlock.
     ctx = multiprocessing.get_context("spawn")
@@ -571,9 +638,10 @@ def _run_chunks(
             # over vs. per-worker subprocess overhead.
             futures = [
                 pool.submit(
-                    _build_chunk, clone_path, versions, str(out), i, s, e, ticks, prefix
+                    _build_chunk, clone_path, versions, str(out),
+                    c.id, c.start, c.end, ticks, prefix,
                 )
-                for i, (s, e) in enumerate(bounds)
+                for c in chunks
             ]
             if progress:
                 _consume_ticks(futures, ticks, total)
