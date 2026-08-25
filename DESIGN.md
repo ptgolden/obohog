@@ -303,22 +303,27 @@ data/                         # gitignored per-source working state
   scoped to the source's OBO file); blob reads via a persistent
   `git cat-file --batch`.
 - `obo` — fastobo normalization (single-threaded parse, `threads=1`), canonical
-  clause sets, content hashing, clause diffing.
-- `extract` — single-threaded `build()` (full-parse reference) and a **parallel,
-  streaming `build_parallel()`**: the commit range is split into **more chunks
-  than workers** (default ~4/worker, tunable via `--chunk-size`) and dispatched
-  dynamically by the process pool, so a worker that finishes a light chunk grabs
-  the next queued one instead of idling (the earlier tail-latency issue). Each
-  chunk is seeded by the previous chunk's last commit — a one-parse cost that
-  bounds how small chunks can usefully get. Parquet **part-files** are flushed
-  periodically to bound memory; output dirs are cleared first so re-runs don't
-  accumulate stale files.
-  - **Diff-scoped parsing:** rather than fastobo-parsing all ~45 MB each commit,
-    a worker splits the file into stanzas by text (cheap), hashes each, and hands
-    fastobo *only the stanzas whose bytes changed*, carrying unchanged term state
-    forward. This is ~10× faster (verified byte-identical to full parsing) and
-    more resilient — an unparseable stanza only matters at the commit that
-    touches it.
+  clause sets, content hashing, clause diffing; **`DocumentState`**, the one
+  diff core every builder drives: it applies one version's bytes at a time and
+  returns a typed `CommitDelta` (changed terms with clause-level diffs,
+  removed terms, per-stanza failures).
+- `extract` — orchestration over that core: a serial in-process `build()` and
+  a **parallel, streaming `build_parallel()`** sharing the same semantics (an
+  independent naive full-parse oracle lives in the test suite). The commit
+  range is split into **more chunks than workers** (default ~4/worker, tunable
+  via `--chunk-size`) and dispatched dynamically by the process pool, so a
+  worker that finishes a light chunk grabs the next queued one instead of
+  idling (the earlier tail-latency issue). Each chunk is seeded by the
+  previous chunk's last commit — a one-parse cost that bounds how small chunks
+  can usefully get. Parquet **part-files** are flushed periodically to bound
+  memory; output dirs are cleared first so re-runs don't accumulate stale
+  files.
+  - **Diff-scoped parsing** (inside `DocumentState.apply`): rather than
+    fastobo-parsing all ~45 MB each commit, split the file into stanzas by
+    text (cheap), hash each, and hand fastobo *only the stanzas whose bytes
+    changed*, carrying unchanged term state forward. This is ~10× faster
+    (verified byte-identical to full parsing) and more resilient — an
+    unparseable stanza only matters at the commit that touches it.
   - **Per-term skip-and-isolate:** a failing batch is bisected until the single
     offending stanza is found; that one term is recorded in `skipped` and skipped,
     never the whole commit.
