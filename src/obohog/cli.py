@@ -4,6 +4,7 @@ import enum
 import re
 import signal
 from collections import Counter
+from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
 from typing import Iterable, Iterator, NamedTuple, Optional
@@ -36,25 +37,43 @@ from .query import (
     TermHeader,
 )
 
-# Set at each query command's entry by ``_open_source`` from the resolved
-# source config. Query commands are single-threaded and run one at a time
-# per CLI invocation, so a module-level slot is safe here.
-_PR_URL_BASE: str | None = None
-
-# For synthetic-git source types (github-release, bioportal), commit shas
-# reference nothing outside the local materialized repo — noise, not
-# signal. Skip them in the commit-header line for those source types.
-_HIDE_COMMIT_SHA: bool = False
-
-# Prepended to the commit subject in the header line. Used to tag BioPortal
-# commits with ``"BioPortal: "`` since their subjects (e.g. ``2025-08-29``,
-# ``Submission #4``) don't otherwise carry the source's identity, and can
-# collide visually with the date column.
-_SUBJECT_PREFIX: str = ""
-
 # GitHub HTTPS URL, with or without a trailing ``.git``. Anything else
 # (SSH URLs, local paths, non-GitHub hosts) → no PR link.
 _GITHUB_HTTPS = re.compile(r"^https?://github\.com/([^/]+/[^/]+?)(?:\.git)?/?$")
+
+
+@dataclass(frozen=True)
+class SourceStyle:
+    """Per-source presentation knobs, resolved once from the source config.
+
+    Threaded explicitly through the view functions (never module state) so
+    concurrent consumers — one process serving several sources, like the
+    future HTTP API — each render with their own source's knobs.
+    """
+
+    # GitHub PR link base (``https://github.com/{owner}/{repo}/pull/``), or
+    # None when the repo isn't on GitHub and PR numbers render as bare text.
+    pr_url_base: str | None = None
+    # Synthetic-git source types (github-release, bioportal): commit shas
+    # reference nothing outside the local materialized repo — noise, not
+    # signal. Skip them in the commit-header line.
+    hide_sha: bool = False
+    # Prepended to the commit subject in the header line. Used to tag
+    # BioPortal commits with ``"BioPortal: "`` since their subjects (e.g.
+    # ``2025-08-29``, ``Submission #4``) don't otherwise carry the source's
+    # identity, and can collide visually with the date column.
+    subject_prefix: str = ""
+
+
+def _style_for(src: SourceConfig) -> SourceStyle:
+    """Resolve the presentation knobs for a configured source."""
+    # Only git-file / github-release sources have a `repo` URL that could
+    # yield a GitHub PR link base. BioPortal sources render without one.
+    return SourceStyle(
+        pr_url_base=_pr_url_base(src.repo) if hasattr(src, "repo") else None,
+        hide_sha=not isinstance(src, GitFileSource),
+        subject_prefix="BioPortal: " if isinstance(src, BioPortalSource) else "",
+    )
 
 
 def _pr_url_base(repo: str) -> str | None:
@@ -62,14 +81,14 @@ def _pr_url_base(repo: str) -> str | None:
     return f"https://github.com/{m.group(1)}/pull/" if m else None
 
 
-def _print_pr_link(pr_number: int) -> None:
+def _print_pr_link(pr_number: int, style: SourceStyle) -> None:
     """Print an indented line for the PR — clickable URL if the source is on
     GitHub, otherwise the bare number so pre-2023 pattern still gets tagged
     visibly even when there's no place to link to."""
-    if _PR_URL_BASE is None:
+    if style.pr_url_base is None:
         console.print(Text(f"    → PR #{pr_number}", style="dim"))
         return
-    url = f"{_PR_URL_BASE}{pr_number}"
+    url = f"{style.pr_url_base}{pr_number}"
     line = Text("    → ", style="dim")
     line.append(url, style=f"link {url} dim cyan")
     console.print(line)
@@ -113,16 +132,16 @@ def _pr_title_from_merge(message: str) -> str | None:
     return None
 
 
-def _commit_header_prefix(head, lead: str) -> Text:
+def _commit_header_prefix(head, lead: str, style: SourceStyle) -> Text:
     """Build the ``<lead><sha> <date> <author>  `` prefix that leads a
     commit-header line. ``lead`` is the caller-specific leading text
     (e.g. ``"\\n● "``, ``"  ● "``) that differs by view.
 
-    Skips the sha for synthetic-git source types where it references
-    only the local materialized repo — noise, not signal.
+    Skips the sha when ``style.hide_sha`` says it references only the
+    local materialized repo — noise, not signal.
     """
     line = Text(lead)
-    if not _HIDE_COMMIT_SHA:
+    if not style.hide_sha:
         line.append(head.sha[:7], style="bold yellow")
         line.append(f"  {_date(head.committed_date)}  ")
     else:
@@ -132,7 +151,9 @@ def _commit_header_prefix(head, lead: str) -> Text:
     return line
 
 
-def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> None:
+def _render_commit_header(
+    head, prefix: Text, style: SourceStyle, show_commits: bool = False
+) -> None:
     """Given an already-built ``sha  date  author  `` prefix Text, append the
     editorial subject line and print, followed by any demoted boilerplate,
     PR link, and branch commits.
@@ -149,29 +170,28 @@ def _render_commit_header(head, prefix: Text, show_commits: bool = False) -> Non
       * branch commits: shown when present (only editorial signal for
         old-style merges with empty bodies)
 
-    ``_SUBJECT_PREFIX`` (set per-source via :func:`_open_source`) is
-    prepended to the editorial line — e.g. ``BioPortal: `` for
-    BioPortal sources so their bare-date subjects don't visually collide
-    with the date column.
+    ``style.subject_prefix`` is prepended to the editorial line — e.g.
+    ``BioPortal: `` for BioPortal sources so their bare-date subjects
+    don't visually collide with the date column.
     """
     pr_title = _pr_title_from_merge(head.message)
     subject = head.message.splitlines()[0] if head.message else ""
     snapshot_url = getattr(head, "snapshot_url", None)
     if pr_title is not None:
-        prefix.append(_SUBJECT_PREFIX + pr_title, style="dim")
+        prefix.append(style.subject_prefix + pr_title, style="dim")
         console.print(prefix)
         console.print(Text("      " + subject, style="dim italic"))
         if head.pr_number is not None:
-            _print_pr_link(head.pr_number)
+            _print_pr_link(head.pr_number, style)
         if snapshot_url:
             _print_snapshot_link(snapshot_url)
         if show_commits and head.branch_commits:
             _print_branch_commits(head.branch_commits)
     else:
-        prefix.append(_SUBJECT_PREFIX + subject, style="dim")
+        prefix.append(style.subject_prefix + subject, style="dim")
         console.print(prefix)
         if head.pr_number is not None:
-            _print_pr_link(head.pr_number)
+            _print_pr_link(head.pr_number, style)
         if snapshot_url:
             _print_snapshot_link(snapshot_url)
         if head.branch_commits:
@@ -266,27 +286,10 @@ def _resolve_source(source: str, config: Optional[Path]) -> SourceConfig:
         raise typer.Exit(1)
 
 
-def _open_source(source: str, config: Optional[Path]) -> HistoryDB:
-    """Combine config lookup and DB open into one call for query commands.
-
-    Also configures per-source render knobs (PR URL base, sha visibility,
-    subject prefix) as module-level state — query commands are
-    single-threaded, one-source-per-invocation, so a global slot is
-    the pragmatic choice.
-    """
+def _open_source(source: str, config: Optional[Path]) -> tuple[HistoryDB, SourceStyle]:
+    """Resolve a source, open its artifact, and return its presentation style."""
     src = _resolve_source(source, config)
-    global _PR_URL_BASE, _HIDE_COMMIT_SHA, _SUBJECT_PREFIX
-    # Only git-file / github-release sources have a `repo` URL that could
-    # yield a GitHub PR link base. BioPortal sources render without one.
-    _PR_URL_BASE = _pr_url_base(src.repo) if hasattr(src, "repo") else None
-    # Commit shas are meaningful (they identify a real upstream commit)
-    # only for git-file sources. The other providers materialize a
-    # synthetic repo, and their shas are build-time artifacts.
-    _HIDE_COMMIT_SHA = not isinstance(src, GitFileSource)
-    # BioPortal commit subjects (a bare date, or "Submission #N") don't
-    # otherwise identify their source, so tag them.
-    _SUBJECT_PREFIX = "BioPortal: " if isinstance(src, BioPortalSource) else ""
-    return _open(src.db_dir)
+    return _open(src.db_dir), _style_for(src)
 
 
 source_app = typer.Typer(add_completion=False, help="Manage configured ontology sources.")
@@ -516,7 +519,7 @@ def term(
     ),
 ):
     """Show a term's change history, or its reconstructed state at a point."""
-    db = _open_source(source, config)
+    db, style = _open_source(source, config)
     if at is not None:
         at_seq = db.resolve_ref(at)
         _render_state(term_id, at, db.term_at(term_id, at_seq))
@@ -525,7 +528,7 @@ def term(
         changes = db.term_timeline(term_id, predicate=only)
         since_seq = db.resolve_ref(since) if since is not None else None
         _render_timeline(
-            term_id, header, changes,
+            term_id, header, changes, style,
             limit=limit, since_seq=since_seq, full=full, show_commits=commits,
         )
     db.close()
@@ -546,13 +549,13 @@ def commit(
     ),
 ):
     """Show what changed at one commit, structurally rendered per term."""
-    db = _open_source(source, config)
+    db, style = _open_source(source, config)
     head, events = db.commit_events(sha, namespace=namespace)
     if head is None:
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
         db.close()
         return
-    _render_commit_view(head, events, full=full, show_commits=commits)
+    _render_commit_view(head, events, style, full=full, show_commits=commits)
     db.close()
 
 
@@ -563,7 +566,7 @@ def pr(
     config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
 ):
     """List the terms changed by a pull request."""
-    db = _open_source(source, config)
+    db, _ = _open_source(source, config)
     terms = db.pr_terms(number)
     if not terms:
         console.print(f"[yellow]No indexed changes for PR[/] #{number}")
@@ -595,7 +598,7 @@ def diff(
     ),
 ):
     """Show clause changes between two points, grouped by term and commit."""
-    db = _open_source(source, config)
+    db, style = _open_source(source, config)
     filters = dict(term_id=term, namespace=namespace)
     counts = db.range_counts(ref_a, ref_b, **filters)
     if counts.events == 0:
@@ -611,7 +614,7 @@ def diff(
     summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
     console.print(summary)
     groups = render.pair_by_term_and_commit(db.iter_range_events(ref_a, ref_b, **filters))
-    _render_paired_groups(groups, full=full, show_commits=commits)
+    _render_paired_groups(groups, style, full=full, show_commits=commits)
     db.close()
 
 
@@ -657,7 +660,7 @@ def search(
     ),
 ):
     """Find commits that added or removed a clause matching QUERY."""
-    db = _open_source(source, config)
+    db, style = _open_source(source, config)
     since_seq = db.resolve_ref(since) if since is not None else None
     filters = dict(
         term_id=term, predicate=predicate, since_seq=since_seq,
@@ -698,9 +701,9 @@ def search(
         )
         filtered = render.take_sections(filtered, limit, section_key, truncated)
     if order is SearchOrder.term:
-        stats = _render_paired_groups(filtered, full=full, show_commits=commits)
+        stats = _render_paired_groups(filtered, style, full=full, show_commits=commits)
     else:
-        stats = _render_commit_ordered_groups(filtered, full=full, show_commits=commits)
+        stats = _render_commit_ordered_groups(filtered, style, full=full, show_commits=commits)
     if stats.events == 0:
         console.print(f'\n[yellow]No events matching[/] "{query}"')
     else:
@@ -735,7 +738,7 @@ def releases(
     config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
 ):
     """List release tags indexed for a source."""
-    db = _open_source(source, config)
+    db, _ = _open_source(source, config)
     rows = db.releases()
     db.close()
     if not rows:
@@ -752,6 +755,7 @@ def _render_timeline(
     term_id: str,
     header: TermHeader | None,
     changes: list[Change],
+    style: SourceStyle,
     limit: int | None = None,
     since_seq: int | None = None,
     full: bool = False,
@@ -771,14 +775,14 @@ def _render_timeline(
         keep = set(seqs[-limit:])
         changes = [c for c in changes if c.commit_seq in keep]
 
-    _render_header(term_id, header, changes, total_events, limit, since_seq)
+    _render_header(term_id, header, changes, total_events, limit, since_seq, style)
 
     cap = None if full else render.DEFAULT_TRUNCATE
     for _, group in groupby(changes, key=lambda c: c.commit_seq):
         rows = list(group)
         head = rows[0]
-        header_line = _commit_header_prefix(head, "\n● ")
-        _render_commit_header(head, header_line, show_commits=show_commits)
+        header_line = _commit_header_prefix(head, "\n● ", style)
+        _render_commit_header(head, header_line, style, show_commits=show_commits)
         for op in render.pair_events(rows):
             console.print(render.render_op(op, truncate=cap))
 
@@ -790,6 +794,7 @@ def _render_header(
     total_events: int,
     limit: int | None,
     since_seq: int | None,
+    style: SourceStyle,
 ) -> None:
     """Print the orientation header: name, span, and predicate counts."""
     title = Text()
@@ -816,7 +821,7 @@ def _render_header(
         console.print(summary)
 
         span = Text()
-        if _HIDE_COMMIT_SHA:
+        if style.hide_sha:
             span.append(f"first {_date(header.first_date)}", style="dim")
             span.append("  ·  ", style="dim")
             span.append(f"last {_date(header.last_date)}", style="dim")
@@ -846,12 +851,12 @@ def _render_header(
 
 
 def _render_commit_view(
-    head: Change, events: list[TermChange], full: bool = False,
-    show_commits: bool = False,
+    head: Change, events: list[TermChange], style: SourceStyle,
+    full: bool = False, show_commits: bool = False,
 ) -> None:
     """Structural view of one commit: header + per-term event groups."""
-    header_line = _commit_header_prefix(head, "● ")
-    _render_commit_header(head, header_line, show_commits=show_commits)
+    header_line = _commit_header_prefix(head, "● ", style)
+    _render_commit_header(head, header_line, style, show_commits=show_commits)
     n_terms = len({tc.term_id for tc in events})
     console.print(Text(f"{n_terms} terms changed", style="dim"))
 
@@ -869,7 +874,8 @@ def _render_commit_view(
 
 
 def _render_paired_groups(
-    groups: Iterable[render.PairedCommit], full: bool = False, show_commits: bool = False
+    groups: Iterable[render.PairedCommit], style: SourceStyle,
+    full: bool = False, show_commits: bool = False,
 ) -> EventCounts:
     """Render (term, commit) op groups as per-term sections.
 
@@ -898,8 +904,8 @@ def _render_paired_groups(
         console.print(title)
         for entry in term_entries:
             commit_seqs.add(entry.head.commit_seq)
-            commit_header = _commit_header_prefix(entry.head, "  ● ")
-            _render_commit_header(entry.head, commit_header, show_commits=show_commits)
+            commit_header = _commit_header_prefix(entry.head, "  ● ", style)
+            _render_commit_header(entry.head, commit_header, style, show_commits=show_commits)
             for op in entry.ops:
                 n_events += 2 if isinstance(op, render.Edit) else 1
                 console.print(render.render_op(op, truncate=cap))
@@ -907,7 +913,8 @@ def _render_paired_groups(
 
 
 def _render_commit_ordered_groups(
-    groups: Iterable[render.PairedCommit], full: bool = False, show_commits: bool = False
+    groups: Iterable[render.PairedCommit], style: SourceStyle,
+    full: bool = False, show_commits: bool = False,
 ) -> EventCounts:
     """Render (term, commit) op groups as commit blocks, newest first.
 
@@ -924,7 +931,8 @@ def _render_commit_ordered_groups(
         n_commits += 1
         head = entries[0].head
         _render_commit_header(
-            head, _commit_header_prefix(head, "\n● "), show_commits=show_commits
+            head, _commit_header_prefix(head, "\n● ", style), style,
+            show_commits=show_commits,
         )
         for entry in entries:
             term_ids.add(entry.term_id)
