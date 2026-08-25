@@ -114,18 +114,24 @@ section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
 .commit-header .subject { color: var(--fg); }
 .raw-subject { font-style: italic; margin: 0.1rem 0; font-size: 0.85rem; }
 
-/* Ops — the diff lines */
+/* Ops — the diff lines. Each .line is a flex row: fixed marker column,
+   then pre-wrap text so continuations hang-indent under the value. */
 .op {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.83rem;
-  padding-left: 1.25rem;
+  line-height: 1.45;
+}
+.op .line { display: flex; padding-left: 1.25rem; }
+.op .line.qual { padding-left: calc(1.25rem + 2ch); }
+.op .marker { flex: none; width: 2ch; font-weight: 700; }
+.op .text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  min-width: 0;
 }
-.op .marker { display: inline-block; width: 1ch; font-weight: 700; }
-.op-add .marker { color: var(--add); }
-.op-remove .marker { color: var(--del); }
-.op-edit .marker { color: var(--edit); }
+.op-add > .line > .marker { color: var(--add); }
+.op-remove > .line > .marker { color: var(--del); }
+.op-edit > .line > .marker { color: var(--edit); }
 .op .pred { color: var(--dim); }
 .op del {
   color: var(--del);
@@ -137,14 +143,12 @@ section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
   background: var(--add-bg);
   text-decoration: none;
 }
-.op .note { color: var(--dim); font-style: italic; }
+.op .note { color: var(--dim); font-style: italic; margin-left: 1ch; }
 
-.qual { padding-left: 3ch; }
-.qual .marker { width: 1ch; font-weight: 700; }
 .qual-context { color: var(--dim); }
-.qual-del .marker { color: var(--del); }
-.qual-ins .marker { color: var(--add); }
-.qual-edit .marker { color: var(--edit); }
+.op .qual-del > .marker { color: var(--del); }
+.op .qual-ins > .marker { color: var(--add); }
+.op .qual-edit > .marker { color: var(--edit); }
 
 .load-more { padding: 1rem 0; text-align: center; }
 

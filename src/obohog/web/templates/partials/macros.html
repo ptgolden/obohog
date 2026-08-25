@@ -14,16 +14,14 @@
   {%- endfor -%}
 {%- endmacro -%}
 
+{#- .text is white-space: pre-wrap, so its markup must stay on one line —
+    any template newline or indent inside it would render literally. -#}
 {%- macro op(o) -%}
 <div class="op op-{{ o.kind }}">
-  <span class="marker">{{ {'add': '+', 'remove': '-', 'edit': '~'}[o.kind] }}</span>
-  <span class="pred">{{ o.predicate }}:</span> {{ spans(o.head) }}
-  {%- for ql in o.quals %}
-  <div class="qual qual-{{ ql.kind }}">
-    {%- if ql.kind != 'context' -%}
-    <span class="marker">{{ {'del': '-', 'ins': '+', 'edit': '~'}[ql.kind] }}</span>
-    {%- endif %} {{ spans(ql.spans) }}</div>
-  {%- endfor %}
+<div class="line"><span class="marker">{{ {'add': '+', 'remove': '-', 'edit': '~'}[o.kind] }}</span><span class="text"><span class="pred">{{ o.predicate }}:</span> {{ spans(o.head) }}</span></div>
+{%- for ql in o.quals %}
+<div class="line qual qual-{{ ql.kind }}"><span class="marker">{{ {'del': '-', 'ins': '+', 'edit': '~', 'context': ''}[ql.kind] }}</span><span class="text">{{ spans(ql.spans) }}</span></div>
+{%- endfor %}
 </div>
 {%- endmacro -%}
 
