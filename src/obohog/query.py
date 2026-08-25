@@ -176,23 +176,15 @@ class HistoryDB:
     def _create_view(self, name: str, source: str) -> None:
         """Create a DuckDB view over the parquet path ``source``.
 
-        Older artifacts predate the ``snapshot_url`` column on ``commits``;
-        wrap them so callers can always ``SELECT c.snapshot_url`` without
-        branching. Add-on columns projected here should always be nullable.
+        No per-column back-compat here: the schema check at open refuses
+        artifacts that don't match ``model.SCHEMA_VERSION``, so every
+        current column is guaranteed present.
         """
         # read_parquet needs a literal path (CREATE VIEW can't bind params);
         # escape single quotes in the path we control.
         literal = source.replace("'", "''")
         self.con.execute(
-            f"CREATE VIEW {name}_raw AS SELECT * FROM read_parquet('{literal}')"
-        )
-        cols = {row[1] for row in self.con.execute(f"PRAGMA table_info('{name}_raw')").fetchall()}
-        projections = [f"*"]
-        if name == "commits" and "snapshot_url" not in cols:
-            projections.append("CAST(NULL AS VARCHAR) AS snapshot_url")
-        select_list = ", ".join(projections)
-        self.con.execute(
-            f"CREATE VIEW {name} AS SELECT {select_list} FROM {name}_raw"
+            f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{literal}')"
         )
 
     def _source(self, name: str) -> str | None:
