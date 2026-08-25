@@ -369,9 +369,10 @@ data/                         # gitignored per-source working state
     line token word-diff using a compound-identifier-aware tokenizer that keeps
     CURIEs, URLs, and snake_case names whole while splitting on structural
     punctuation. Git `--word-diff=plain` markers stay readable when piped.
-- **50 tests**, incl. parallel-build == single-threaded equivalence, stale
-  part-file clearing, structure-aware rendering, and the commit-1476 pairing
-  regression.
+- **123 tests**, incl. parallel == serial and incremental == full-rebuild
+  artifact equivalence, a naive full-parse oracle for the diff-scoped
+  parser, stale part-file clearing, structure-aware rendering, and the
+  commit-1476 pairing regression.
 
 **Local state:**
 - `./data/mondo/clone/` — full history of `mondo-edit.obo`, 2017-09→2026-06
