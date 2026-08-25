@@ -80,8 +80,9 @@ def _extract_pr_number(message: str) -> int | None:
 
 
 def _extract_snapshot_url(message: str) -> str | None:
-    m = _SNAPSHOT_URL.search(message)
-    return m.group(1) if m else None
+    if m := _SNAPSHOT_URL.search(message):
+        return m.group(1)
+    return None
 
 
 def extract(
