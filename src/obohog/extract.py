@@ -72,11 +72,9 @@ class BuildReport:
 
 
 def _extract_pr_number(message: str) -> int | None:
-    m = _PR_MERGE.match(message)
-    if m:
+    if m := _PR_MERGE.match(message):
         return int(m.group(1))
-    m = _PR_SQUASH.search(message)
-    if m:
+    if m := _PR_SQUASH.search(message):
         return int(m.group(1))
     return None
 
