@@ -226,6 +226,22 @@ def test_search_page_renders_first_page_with_load_more(client):
     assert "after=MONDO%3A0000001" in r.text
 
 
+def test_search_form_blank_filters_do_not_filter(client):
+    # The HTML form submits untouched fields as empty strings
+    # (?q=...&predicate=&namespace=&term=) — they must mean "no filter",
+    # not "match the empty string".
+    r = client.get(
+        "/onto/search?q=SHARED&predicate=&namespace=&term=&order=term"
+    )
+    assert r.status_code == 200
+    assert "MONDO:0000001" in r.text
+    api = client.get(
+        "/api/v1/sources/onto/search",
+        params={"q": "SHARED", "predicate": "", "namespace": "", "term": ""},
+    ).json()
+    assert len(api["sections"]) == 4
+
+
 def test_search_results_fragment_pages(client):
     r = client.get(
         "/onto/search/results",

@@ -16,7 +16,7 @@ from datetime import datetime
 from itertools import groupby
 from typing import Generic, Iterator, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import model, render
 from .config import AnySource, Config
@@ -211,6 +211,15 @@ class SearchParams(BaseModel):
     limit: int = Field(default=DEFAULT_PAGE, ge=1, le=MAX_PAGE)
     after: str | None = None
     full: bool = False
+
+    @field_validator(
+        "term", "predicate", "namespace", "since", "after", mode="before"
+    )
+    @classmethod
+    def _blank_is_absent(cls, value):
+        """HTML forms submit untouched fields as empty strings; an empty
+        filter means "no filter", not "match the empty string"."""
+        return None if value == "" else value
 
 
 # ---------------------------------------------------------------------------
@@ -544,9 +553,9 @@ def diff(
     full: bool = False,
 ) -> PageOut[TermSectionOut]:
     """One page of changes between two refs, term-major. Counts are exact."""
-    filters = RangeFilters(term_id=term, namespace=namespace)
+    filters = RangeFilters(term_id=term or None, namespace=namespace or None)
     counts = db.range_counts(ref_a, ref_b, filters)
-    events = db.iter_range_events(ref_a, ref_b, filters, after=after)
+    events = db.iter_range_events(ref_a, ref_b, filters, after=after or None)
     groups = render.pair_by_term_and_commit(events)
     taken, next_cursor = _take_page(groups, "term", limit)
     return PageOut(
