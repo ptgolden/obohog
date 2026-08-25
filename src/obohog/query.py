@@ -159,7 +159,7 @@ class HistoryDB:
                 "Run `obohog source sync <name>` first."
             )
         meta = model.read_build_meta(self.dir)
-        built = meta["schema_version"] if meta else None
+        built = meta.schema_version if meta else None
         if built != model.SCHEMA_VERSION:
             raise SchemaMismatch(
                 f"Artifact at '{self.dir}' was built with schema "

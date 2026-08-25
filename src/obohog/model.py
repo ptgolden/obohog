@@ -7,6 +7,7 @@ deltas derived by diffing adjacent snapshots). ``build_meta`` records provenance
 """
 
 import enum
+from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow as pa
@@ -127,7 +128,21 @@ FILES = {
 }
 
 
-def read_build_meta(artifact_dir: Path | str) -> dict | None:
+@dataclass(frozen=True)
+class BuildMeta:
+    """The artifact's ``build_meta`` row, typed: what's on disk and how it
+    was built. The compatibility gate (``schema_version``) and the
+    incremental-sync resume point (``last_commit_seq``) both live here."""
+
+    schema_version: str
+    generator_version: str
+    source_path: str
+    first_commit_seq: int | None
+    last_commit_seq: int | None
+    n_commits: int
+
+
+def read_build_meta(artifact_dir: Path | str) -> BuildMeta | None:
     """Return the artifact's single ``build_meta`` row, or None if absent.
 
     One tiny row — read it with pyarrow directly rather than spinning up a
@@ -137,7 +152,17 @@ def read_build_meta(artifact_dir: Path | str) -> dict | None:
     if not path.exists():
         return None
     rows = pq.read_table(path).to_pylist()
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    row = rows[0]
+    return BuildMeta(
+        schema_version=row["schema_version"],
+        generator_version=row["generator_version"],
+        source_path=row["source_path"],
+        first_commit_seq=row["first_commit_seq"],
+        last_commit_seq=row["last_commit_seq"],
+        n_commits=row["n_commits"],
+    )
 
 
 def write_table(rows: list[dict], schema: pa.Schema, out_dir: Path, name: str) -> Path:

@@ -157,8 +157,8 @@ def _source_status(source: SourceConfig) -> _SourceStatus:
         if core_present:
             return _SourceStatus("[yellow]stale[/]", "[yellow]?[/]", "—", True)
         return _SourceStatus("not built", "—", "—", False)
-    schema = meta["schema_version"] or "?"
-    n = meta["n_commits"]
+    schema = meta.schema_version or "?"
+    n = meta.n_commits
     commits = f"{n:,}" if n is not None else "—"
     if schema != model.SCHEMA_VERSION:
         return _SourceStatus(

@@ -21,7 +21,7 @@ import re
 import shutil
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -288,15 +288,15 @@ def _write_build_meta(
     ``inc-*`` parts are cleaned up by prefix on the next run, and its extra
     ``commits``/``skipped`` rows are truncated by ``_validate_resume``).
     """
-    row = {
-        "schema_version": model.SCHEMA_VERSION,
-        "generator_version": _version(),
-        "source_path": source_path,
-        "first_commit_seq": first,
-        "last_commit_seq": last,
-        "n_commits": n,
-    }
-    model.write_table([row], model.BUILD_META, out, "build_meta")
+    meta = model.BuildMeta(
+        schema_version=model.SCHEMA_VERSION,
+        generator_version=_version(),
+        source_path=source_path,
+        first_commit_seq=first,
+        last_commit_seq=last,
+        n_commits=n,
+    )
+    model.write_table([asdict(meta)], model.BUILD_META, out, "build_meta")
 
 
 # --- parallel, streaming build over a local clone -----------------------
@@ -366,7 +366,7 @@ class _ResumePlan(NamedTuple):
 
     last: int  # index in the walk (== commit_seq) of the last built commit
     commit_rows: list[dict]  # the artifact's commits table, up to ``last``
-    meta: dict  # the artifact's current build_meta row
+    meta: model.BuildMeta  # the artifact's current build_meta row
 
 
 @dataclass(frozen=True)
@@ -408,7 +408,7 @@ def plan_build(
 
 
 def _validate_resume(
-    meta: dict | None, commit_rows: list[dict], full: list
+    meta: "model.BuildMeta | None", commit_rows: list[dict], full: list
 ) -> _ResumePlan | None:
     """Check that an artifact with this metadata can be extended by this walk.
 
@@ -419,9 +419,9 @@ def _validate_resume(
     ``last_commit_seq`` of the new walk with the same sha, which holds
     exactly when the previously built prefix is unchanged.
     """
-    if meta is None or meta["schema_version"] != model.SCHEMA_VERSION:
+    if meta is None or meta.schema_version != model.SCHEMA_VERSION:
         return None
-    last = meta["last_commit_seq"]
+    last = meta.last_commit_seq
     if last is None or last >= len(full):
         return None
     last_sha = next((r["sha"] for r in commit_rows if r["commit_seq"] == last), None)
@@ -479,7 +479,7 @@ def _build_full(
         if not (out / name).is_dir():
             model.write_table([], schema, out, name)
 
-    skipped = [row for r in results for row in r["skipped"]]
+    skipped = [row for r in results for row in r.skipped]
     model.write_table(skipped, model.SKIPPED, out, "skipped")
     _write_build_meta(
         out, source_path=obo_path,
@@ -492,8 +492,8 @@ def _build_full(
         mode=BuildMode.FULL,
         commits=n,
         total_commits=n,
-        snapshots=sum(r["snapshots"] for r in results),
-        events=sum(r["events"] for r in results),
+        snapshots=sum(r.snapshots for r in results),
+        events=sum(r.events for r in results),
         skipped=len(skipped),
     )
 
@@ -548,12 +548,12 @@ def _build_update(
             r for r in pq.read_table(out / "skipped.parquet").to_pylist()
             if r["commit_seq"] <= last
         ]
-    new_skipped = [row for r in results for row in r["skipped"]]
+    new_skipped = [row for r in results for row in r.skipped]
     model.write_table(old_skipped + new_skipped, model.SKIPPED, out, "skipped")
 
     _write_build_meta(
         out, source_path=obo_path,
-        first=resume.meta["first_commit_seq"],
+        first=resume.meta.first_commit_seq,
         last=full[-1].commit.seq,
         n=len(all_commits),
     )
@@ -562,8 +562,8 @@ def _build_update(
         mode=BuildMode.INCREMENTAL,
         commits=n,
         total_commits=len(all_commits),
-        snapshots=sum(r["snapshots"] for r in results),
-        events=sum(r["events"] for r in results),
+        snapshots=sum(r.snapshots for r in results),
+        events=sum(r.events for r in results),
         skipped=len(new_skipped),
     )
 
@@ -620,6 +620,15 @@ class Chunk(NamedTuple):
     end: int
 
 
+class ChunkResult(NamedTuple):
+    """What one worker chunk produced, returned across the process boundary."""
+
+    chunk: int
+    snapshots: int
+    events: int
+    skipped: list[dict]  # skip rows, shaped for model.SKIPPED
+
+
 def _plan_chunks(
     n: int, jobs: int | None, chunk_size: int | None
 ) -> tuple[int, list[Chunk]]:
@@ -646,7 +655,7 @@ def _run_chunks(
     progress: bool,
     total: int,
     prefix: str = "",
-) -> list[dict]:
+) -> "list[ChunkResult]":
     """Run ``_build_chunk`` over ``chunks`` in a spawn-based process pool."""
     # "spawn" (not fork): workers parse with fastobo's threaded runtime, and
     # fork() in a multi-threaded process risks deadlock.
@@ -713,7 +722,7 @@ def _build_chunk(
     end: int,
     ticks=None,
     prefix: str = "",
-) -> dict:
+) -> "ChunkResult":
     """Worker: apply ``windowed[start:end]`` to the document state, stream part-files.
 
     ``windowed`` is the pre-computed versions list from the parent process,
@@ -750,10 +759,10 @@ def _build_chunk(
 
     writer.close()
     src.close()
-    return {
-        "chunk": chunk_id, "snapshots": writer.n_snapshots,
-        "events": writer.n_events, "skipped": skipped,
-    }
+    return ChunkResult(
+        chunk=chunk_id, snapshots=writer.n_snapshots,
+        events=writer.n_events, skipped=skipped,
+    )
 
 
 class _PartWriter:

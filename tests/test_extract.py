@@ -1,5 +1,6 @@
 """End-to-end: build an artifact from the fixture repo and query it."""
 
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import duckdb
@@ -239,12 +240,11 @@ def test_incremental_falls_back_on_history_rewrite(obo_repo: Path, tmp_path: Pat
 def test_incremental_falls_back_on_schema_mismatch(obo_repo: Path, tmp_path: Path):
     out = tmp_path / "a"
     build_parallel(str(obo_repo), OBO, out, jobs=2)
-    meta = model.read_build_meta(out)
-    meta["schema_version"] = "0"
-    model.write_table([meta], model.BUILD_META, out, "build_meta")
+    meta = replace(model.read_build_meta(out), schema_version="0")
+    model.write_table([asdict(meta)], model.BUILD_META, out, "build_meta")
     report = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
     assert report.mode is BuildMode.FULL
-    assert model.read_build_meta(out)["schema_version"] == model.SCHEMA_VERSION
+    assert model.read_build_meta(out).schema_version == model.SCHEMA_VERSION
 
 
 def test_incremental_cleans_aborted_parts(obo_repo: Path, tmp_path: Path):
@@ -274,9 +274,8 @@ def test_missing_artifact_raises_clear_error(tmp_path: Path):
 
 
 def test_stale_schema_raises_clear_error(artifact: Path):
-    meta = model.read_build_meta(artifact)
-    meta["schema_version"] = "0"
-    model.write_table([meta], model.BUILD_META, artifact, "build_meta")
+    meta = replace(model.read_build_meta(artifact), schema_version="0")
+    model.write_table([asdict(meta)], model.BUILD_META, artifact, "build_meta")
     with pytest.raises(SchemaMismatch, match="built with schema 0"):
         HistoryDB(artifact)
 
