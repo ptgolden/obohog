@@ -10,7 +10,7 @@ import duckdb
 import typer
 from rich.text import Text
 
-from . import model, render
+from . import model, render, service
 from .config import ConfigError, SourceConfig, load_config
 from .providers import get_provider
 from .extract import BuildMode, build_parallel
@@ -152,29 +152,19 @@ class _SourceStatus(NamedTuple):
 
 
 def _source_status(source: SourceConfig) -> _SourceStatus:
-    """Best-effort status columns for a configured source, from build_meta."""
-    meta = model.read_build_meta(source.db_dir) if source.db_dir.exists() else None
-    if meta is None:
-        # Distinguish "nothing there" from an artifact too old to even carry
-        # build_meta (which the query layer refuses as schema-unknown).
-        core_present = any(
-            (source.db_dir / f"{name}.parquet").exists() or (source.db_dir / name).is_dir()
-            for name in ("commits", "term_snapshots", "events")
+    """Rich-marked status columns for a source, from the service layer."""
+    info = service.source_info(source.name, source)
+    commits = f"{info.n_commits:,}" if info.n_commits is not None else "—"
+    if info.status == "stale":
+        schema = (
+            f"[yellow]{info.schema_version} → {model.SCHEMA_VERSION}[/]"
+            if info.schema_version is not None
+            else "[yellow]?[/]"
         )
-        if core_present:
-            return _SourceStatus("[yellow]stale[/]", "[yellow]?[/]", "—", True)
+        return _SourceStatus("[yellow]stale[/]", schema, commits, True)
+    if info.status == "not built":
         return _SourceStatus("not built", "—", "—", False)
-    schema = meta.schema_version or "?"
-    n = meta.n_commits
-    commits = f"{n:,}" if n is not None else "—"
-    if schema != model.SCHEMA_VERSION:
-        return _SourceStatus(
-            "[yellow]stale[/]",
-            f"[yellow]{schema} → {model.SCHEMA_VERSION}[/]",
-            commits,
-            True,
-        )
-    return _SourceStatus("built", schema, commits, False)
+    return _SourceStatus("built", info.schema_version or "?", commits, False)
 
 
 def _dir_size(path: Path) -> int:

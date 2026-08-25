@@ -365,10 +365,11 @@ def _take_page(
 
 def list_sources(cfg: Config) -> list[SourceInfo]:
     """Status of every configured source, from build_meta (no HistoryDB)."""
-    return [_source_info(name, src) for name, src in cfg.sources.items()]
+    return [source_info(name, src) for name, src in cfg.sources.items()]
 
 
-def _source_info(name: str, source: AnySource) -> SourceInfo:
+def source_info(name: str, source: AnySource) -> SourceInfo:
+    """One source's build status, markup-free (the CLI adds the color)."""
     meta = model.read_build_meta(source.db_dir) if source.db_dir.exists() else None
     if meta is None:
         # Distinguish "nothing there" from an artifact too old to even
