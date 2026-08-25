@@ -12,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.text import Text
 
-from . import render
+from . import model, render
 from .config import (
     BioPortalSource,
     Config,
@@ -315,34 +315,60 @@ def source_list(
     table.add_column("repo", style="dim", overflow="fold")
     table.add_column("file", style="dim", overflow="fold")
     table.add_column("status", style="dim", no_wrap=True)
+    table.add_column("schema", style="dim", no_wrap=True, justify="right")
     table.add_column("commits", style="dim", no_wrap=True, justify="right")
     table.add_column("clone", style="dim", no_wrap=True, justify="right")
     table.add_column("db", style="dim", no_wrap=True, justify="right")
+    any_stale = False
     for name, source in cfg.sources.items():
-        status, commits = _source_status(source)
+        st = _source_status(source)
+        any_stale = any_stale or st.stale
         clone = _fmt_size(_dir_size(source.clone_dir))
         db = _fmt_size(_dir_size(source.db_dir))
         table.add_row(
             name, source.source_display, source.tracked_path,
-            status, commits, clone, db,
+            st.status, st.schema, st.commits, clone, db,
         )
     console.print()
     console.print(table)
+    if any_stale:
+        console.print(
+            "\n[yellow]Stale sources were built with an older schema and can't "
+            "be queried; run [cyan]obohog source sync <name>[/] to rebuild.[/]"
+        )
 
 
-def _source_status(source: SourceConfig) -> tuple[str, str]:
-    """Best-effort status label + commit count for a configured source."""
-    if not source.db_dir.exists():
-        return "not built", "—"
-    try:
-        db = HistoryDB(source.db_dir)
-    except ArtifactNotFound:
-        return "not built", "—"
-    except SchemaMismatch:
-        return "stale", "—"
-    row = db.con.execute("SELECT COUNT(*) FROM commits").fetchone()
-    db.close()
-    return "built", f"{row[0]:,}" if row else "—"
+class _SourceStatus(NamedTuple):
+    status: str
+    schema: str
+    commits: str
+    stale: bool
+
+
+def _source_status(source: SourceConfig) -> _SourceStatus:
+    """Best-effort status columns for a configured source, from build_meta."""
+    meta = model.read_build_meta(source.db_dir) if source.db_dir.exists() else None
+    if meta is None:
+        # Distinguish "nothing there" from an artifact too old to even carry
+        # build_meta (which the query layer refuses as schema-unknown).
+        core_present = any(
+            (source.db_dir / f"{name}.parquet").exists() or (source.db_dir / name).is_dir()
+            for name in ("commits", "term_snapshots", "events")
+        )
+        if core_present:
+            return _SourceStatus("[yellow]stale[/]", "[yellow]?[/]", "—", True)
+        return _SourceStatus("not built", "—", "—", False)
+    schema = meta["schema_version"] or "?"
+    n = meta["n_commits"]
+    commits = f"{n:,}" if n is not None else "—"
+    if schema != model.SCHEMA_VERSION:
+        return _SourceStatus(
+            "[yellow]stale[/]",
+            f"[yellow]{schema} → {model.SCHEMA_VERSION}[/]",
+            commits,
+            True,
+        )
+    return _SourceStatus("built", schema, commits, False)
 
 
 def _dir_size(path: Path) -> int:
