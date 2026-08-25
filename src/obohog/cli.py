@@ -2,9 +2,11 @@
 
 import enum
 import signal
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+import duckdb
 import typer
 from rich.text import Text
 
@@ -14,7 +16,7 @@ from .providers import get_provider
 from .extract import BuildMode, build_parallel
 from .extract import extract as run_extract
 from .gitsource import GitSource
-from .query import ArtifactNotFound, HistoryDB, SchemaMismatch
+from .query import ArtifactNotFound, HistoryDB, RefNotFound, SchemaMismatch
 from .views import (
     SourceStyle,
     console,
@@ -70,6 +72,21 @@ def _open_source(source: str, config: Optional[Path]) -> tuple[HistoryDB, Source
     """Resolve a source, open its artifact, and return its presentation style."""
     src = _resolve_source(source, config)
     return _open(src.db_dir), style_for(src)
+
+
+@contextmanager
+def _query_errors():
+    """Turn expected bad-input failures into clean CLI errors.
+
+    Covers a ref that resolves to nothing (``--at``, ``--since``, diff
+    refs) and a ``--regex`` pattern DuckDB rejects — user input, not
+    bugs, so no traceback.
+    """
+    try:
+        yield
+    except (RefNotFound, duckdb.InvalidInputException) as err:
+        console.print(f"[red]{err}[/]")
+        raise typer.Exit(1)
 
 
 source_app = typer.Typer(add_completion=False, help="Manage configured ontology sources.")
@@ -301,12 +318,14 @@ def term(
     """Show a term's change history, or its reconstructed state at a point."""
     db, style = _open_source(source, config)
     if at is not None:
-        at_seq = db.resolve_ref(at)
+        with _query_errors():
+            at_seq = db.resolve_ref(at)
         render_state(term_id, at, db.term_at(term_id, at_seq))
     else:
         header = db.term_header(term_id)
         changes = db.term_timeline(term_id, predicate=only)
-        since_seq = db.resolve_ref(since) if since is not None else None
+        with _query_errors():
+            since_seq = db.resolve_ref(since) if since is not None else None
         render_timeline(
             term_id, header, changes, style,
             limit=limit, since_seq=since_seq, full=full, show_commits=commits,
@@ -380,7 +399,8 @@ def diff(
     """Show clause changes between two points, grouped by term and commit."""
     db, style = _open_source(source, config)
     filters = dict(term_id=term, namespace=namespace)
-    counts = db.range_counts(ref_a, ref_b, **filters)
+    with _query_errors():
+        counts = db.range_counts(ref_a, ref_b, **filters)
     if counts.events == 0:
         console.print(f"[yellow]No changes between[/] {ref_a} [yellow]and[/] {ref_b}")
         db.close()
@@ -437,12 +457,16 @@ def search(
 ):
     """Find commits that added or removed a clause matching QUERY."""
     db, style = _open_source(source, config)
-    since_seq = db.resolve_ref(since) if since is not None else None
-    filters = dict(
-        term_id=term, predicate=predicate, since_seq=since_seq,
-        regex=regex, ignore_case=ignore_case, namespace=namespace,
-    )
-    counts = db.search_counts(query, **filters)
+    with _query_errors():
+        since_seq = db.resolve_ref(since) if since is not None else None
+        filters = dict(
+            term_id=term, predicate=predicate, since_seq=since_seq,
+            regex=regex, ignore_case=ignore_case, namespace=namespace,
+        )
+        # An invalid --regex pattern surfaces here, on the first query
+        # that reaches regexp_matches; the later stream reuses the same
+        # pattern, so success here means the stream won't hit it.
+        counts = db.search_counts(query, **filters)
     if counts.events == 0:
         console.print(f'[yellow]No events matching[/] "{query}"')
         db.close()

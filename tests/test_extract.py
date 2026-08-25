@@ -8,7 +8,7 @@ import pytest
 from obohog import model
 from obohog.extract import BuildMode, build_parallel, extract
 from obohog.gitsource import GitSource
-from obohog.query import ArtifactNotFound, HistoryDB, SchemaMismatch
+from obohog.query import ArtifactNotFound, HistoryDB, RefNotFound, SchemaMismatch
 
 OBO = "src/onto.obo"
 
@@ -438,6 +438,13 @@ def test_diff_accepts_head(artifact: Path):
     by_seq = db.range_events("v1.0", "4")
     db.close()
     assert by_head == by_seq
+
+
+def test_unresolvable_ref_raises_typed_error(artifact: Path):
+    db = HistoryDB(artifact)
+    with pytest.raises(RefNotFound, match="no-such-ref"):
+        db.resolve_ref("no-such-ref")
+    db.close()
 
 
 def test_pr_terms_from_message(artifact: Path):

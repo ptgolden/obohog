@@ -36,6 +36,10 @@ class SchemaMismatch(Exception):
     """
 
 
+class RefNotFound(Exception):
+    """Raised when a user-supplied ref matches no tag, sha, or commit_seq."""
+
+
 def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
     """Convert the artifact's decomposition columns into a ParsedValue."""
     return ParsedValue(
@@ -365,7 +369,10 @@ class HistoryDB:
             [ref],
         ).fetchone()
         if row is None:
-            raise KeyError(f"could not resolve ref {ref!r} to a commit")
+            raise RefNotFound(
+                f"could not resolve ref {ref!r} — expected a release tag, "
+                "short sha, HEAD, or commit_seq"
+            )
         return row[0]
 
     def _range_where(
