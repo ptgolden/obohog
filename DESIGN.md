@@ -173,6 +173,29 @@ CLI (`obohog`):
 - `pr <n>` — terms affected by a PR.
 - `diff <releaseA> <releaseB> [--term MONDO:x]` — changes between two releases.
 
+HTTP (`obohog serve`, read-only; the `web` extra):
+- **One service layer** (`service.py`) that the JSON routes, the HTML pages,
+  and any future agent adapter (MCP) all call — typed Pydantic results, no
+  query logic in any adapter. Nothing in `service.py` imports FastAPI, so an
+  MCP server later is a page of thin wrappers.
+- **JSON API** under `/api/v1` (OpenAPI at `/api/docs`): sources, releases,
+  term timeline/state, search, diff, commit, PR. Ops arrive as role-tagged
+  spans (`same`/`del`/`ins`/`note`) plus raw before/after values.
+- **Web UI**: server-rendered Jinja2 + HTMX (no SPA). Search results page
+  incrementally — a sentinel `div` `hx-get`s the next fragment when revealed.
+- **Pagination**: bounded by default (50 sections, cap 500), keyset cursor =
+  the section key (`term_id` for term order, `commit_seq` for date order);
+  `next_cursor` passes back as `after`, and pages concatenate to exactly the
+  unpaged stream.
+- **Concurrency & refresh**: one open `HistoryDB` per source in a registry;
+  each request gets a `fork()` (a DuckDB cursor sharing the parent's view
+  catalog). `build_meta.parquet` is always the artifact's final write, so a
+  changed `(mtime_ns, size)` stat means a CLI re-sync completed and the
+  handle is reopened.
+- **Error mapping**: unknown source / bad ref / no rows → 404; bad regex or
+  cursor → 400; missing-or-stale artifact → 503 with a re-sync hint. HTML
+  routes render error pages (bare fragments for HTMX requests).
+
 ### Commit-header rendering: GitHub-specific heuristics with a graceful fallback
 
 `obohog term`, `commit`, `diff`, and `search` all render a per-commit header
@@ -243,9 +266,17 @@ src/obohog/
   gitsource.py                # blobless clone / rename-aware log walk / cat-file blob reader
   obo.py                      # frame normalization, canonical clause set, hashing
   model.py                    # Parquet schemas / table writers
-  query.py                    # DuckDB query helpers (shared by CLI + API)
-  render.py                   # structural word-diff, pairing, delta search
-  cli.py                      # command-line entry point (source subcommand + query commands)
+  query.py                    # DuckDB query helpers (shared by CLI + service layer)
+  render.py                   # console-free pipeline: pairing, delta filter, op_view spans
+  views.py                    # rich console presentation (SourceStyle, timeline/commit views)
+  service.py                  # shared service layer: typed results + keyset paging (CLI status, JSON, HTML)
+  cli.py                      # command-line entry point (source subcommand + query commands + serve)
+  web/                        # the HTTP layer (the `web` extra; FastAPI imports live here)
+    app.py                    #   create_app(config): routers, registry, error mapping
+    deps.py                   #   SourceRegistry: per-source HistoryDB cache + build_meta invalidation
+    api.py                    #   /api/v1 JSON routes
+    pages.py                  #   HTML pages + HTMX search-results fragment
+    templates/ static/        #   Jinja2 templates; vendored htmx + hand-written CSS
   providers/
     __init__.py               # get_provider(source, console) → Provider dispatcher
     _synthetic_git.py         # shared helpers: git init/tag/commit-or-tag-head for materializer providers
@@ -369,10 +400,17 @@ data/                         # gitignored per-source working state
     line token word-diff using a compound-identifier-aware tokenizer that keeps
     CURIEs, URLs, and snake_case names whole while splitting on structural
     punctuation. Git `--word-diff=plain` markers stay readable when piped.
-- **123 tests**, incl. parallel == serial and incremental == full-rebuild
+- `service` / `web` — the read-only HTTP layer described under
+  *Interfaces*: one typed service layer (Pydantic models, keyset-cursor
+  pages, ops as role-tagged spans built by `render.op_view`) with thin
+  FastAPI JSON routes and Jinja2/HTMX pages over it. `obohog serve`.
+  MCP for agents is deliberately deferred; the service layer is shaped so
+  it lands later as a thin adapter.
+- **178 tests**, incl. parallel == serial and incremental == full-rebuild
   artifact equivalence, a naive full-parse oracle for the diff-scoped
-  parser, stale part-file clearing, structure-aware rendering, and the
-  commit-1476 pairing regression.
+  parser, stale part-file clearing, structure-aware rendering, the
+  commit-1476 pairing regression, cursor-paging round-trips (query,
+  service, and HTTP layers), concurrent forks, and registry invalidation.
 
 **Local state:**
 - `./data/mondo/clone/` — full history of `mondo-edit.obo`, 2017-09→2026-06
