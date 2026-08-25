@@ -9,42 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import HEADER, _git, _term, _write
-from obohog.extract import extract
-from obohog.gitsource import GitSource
 from obohog.query import HistoryDB, RangeFilters, SearchFilters
-
-OBO = "onto.obo"
-
-
-@pytest.fixture(scope="module")
-def paged_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Artifact where a "SHARED:" xref appears on four terms across four commits."""
-    base = tmp_path_factory.mktemp("paged")
-    repo = base / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q", "-b", "main")
-
-    terms: list[str] = []
-
-    def commit(msg: str, date: str) -> None:
-        _write(repo, OBO, HEADER + "\n".join(terms))
-        _git(repo, "add", "-A")
-        _git(repo, "commit", "-qm", msg, date=date)
-
-    terms.append(_term("MONDO:0000001", "name: alpha", "xref: SHARED:1"))
-    commit("c0 alpha", "2021-01-01T00:00:00+00:00")
-    terms.append(_term("MONDO:0000002", "name: beta", "xref: SHARED:2"))
-    commit("c1 beta", "2021-01-02T00:00:00+00:00")
-    terms.append(_term("MONDO:0000003", "name: gamma", "xref: SHARED:3"))
-    commit("c2 gamma", "2021-01-03T00:00:00+00:00")
-    terms.append(_term("MONDO:0000004", "name: delta", "xref: SHARED:4"))
-    commit("c3 delta", "2021-01-04T00:00:00+00:00")
-
-    out = base / "artifact"
-    with GitSource(repo) as src:
-        extract(src, OBO, out)
-    return out
 
 
 @pytest.fixture(scope="module")

@@ -128,7 +128,7 @@ def _print_snapshot_link(url: str) -> None:
 _MERGE_BOILERPLATE = re.compile(r"^Merge pull request #(\d+) from ")
 
 
-def _pr_title_from_merge(message: str) -> str | None:
+def pr_title_from_merge(message: str) -> str | None:
     """Return the PR title embedded in a classic GitHub merge commit body.
 
     GitHub-specific heuristic: when line 1 matches ``Merge pull request #N
@@ -190,7 +190,7 @@ def _render_commit_header(
     ``BioPortal: `` for BioPortal sources so their bare-date subjects
     don't visually collide with the date column.
     """
-    pr_title = _pr_title_from_merge(head.message)
+    pr_title = pr_title_from_merge(head.message)
     subject = head.message.splitlines()[0] if head.message else ""
     snapshot_url = getattr(head, "snapshot_url", None)
     if pr_title is not None:
