@@ -14,7 +14,6 @@ from . import model, render
 from .config import ConfigError, SourceConfig, load_config
 from .providers import get_provider
 from .extract import BuildMode, build_parallel
-from .extract import extract as run_extract
 from .gitsource import GitSource
 from .query import ArtifactNotFound, HistoryDB, RefNotFound, SchemaMismatch
 from .views import (
@@ -207,7 +206,7 @@ def source_sync(
     ),
     limit: Optional[int] = typer.Option(None, help="Index only the most recent N versions."),
     jobs: int = typer.Option(
-        0, help="Parser processes: 0 = auto (cores-2), 1 = single-threaded, N = that many."
+        0, help="Parser worker processes: 0 = auto (cores-2), N = that many."
     ),
     chunk_size: int = typer.Option(
         0, help="Commits per chunk (0 = auto, ~4 chunks/worker)."
@@ -227,16 +226,11 @@ def source_sync(
     """
     source = _resolve_source(name, config)
     clone_path = get_provider(source, console).ensure_synced(source, since=since)
-    if jobs == 1:
-        # The serial in-process builder always rebuilds from scratch.
-        with GitSource(clone_path) as src:
-            report = run_extract(src, source.tracked_path, source.db_dir, limit=limit)
-    else:
-        report = build_parallel(
-            clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
-            chunk_size=(chunk_size or None), limit=limit, progress=progress,
-            update=not rebuild,
-        )
+    report = build_parallel(
+        clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
+        chunk_size=(chunk_size or None), limit=limit, progress=progress,
+        update=not rebuild,
+    )
     if report.mode is BuildMode.UP_TO_DATE:
         console.print(
             f"[green]Up to date[/] — {source.db_dir} already covers "
