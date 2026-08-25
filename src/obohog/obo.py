@@ -203,6 +203,8 @@ def _parse_batch(
     try:
         doc = fastobo.load(io.BytesIO(blob), threads=1)
         frames = [f for f in doc if isinstance(f, fastobo.term.TermFrame)]
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # fastobo can panic, not just raise
         if len(ids) == 1:
             failed.append(ids[0])
