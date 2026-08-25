@@ -126,6 +126,22 @@ class GitSource:
         _run(cmd, cwd=None)
         return cls(dest)
 
+    def fetch(self) -> None:
+        """Update the clone from its origin, advancing the local branch.
+
+        Our clones are ``--no-checkout`` and have no working tree in use, so
+        it's safe to move the local branch ref straight to the fetched remote
+        tip. Plain ``git fetch`` alone only updates ``refs/remotes/origin/*``,
+        and the history walk starts at HEAD — without the ref update it would
+        never see new upstream commits.
+        """
+        _run_streaming(["git", "fetch", "origin"], cwd=self.repo_dir)
+        branch = _run(["git", "symbolic-ref", "--short", "HEAD"], cwd=self.repo_dir).strip()
+        _run(
+            ["git", "update-ref", f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"],
+            cwd=self.repo_dir,
+        )
+
     def backfill_file(self, path: str) -> None:
         """Pre-fetch every historical blob of ``path`` in one delta-packed pass.
 
