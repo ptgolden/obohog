@@ -1,23 +1,30 @@
-"""Terminal rendering for the term timeline.
+"""Presentation pipeline for the term timeline: pairing, filtering, rendering.
 
 The events table is authoritative — nothing here changes what is recorded. This
-module only decides *how* to present a commit's events: pairing an ``add`` and a
-``remove`` of the same predicate that describe an edit to the same clause, and
-rendering the pair as an inline ``~`` line with intra-value diff highlighting
-(git ``--word-diff`` style). Unpaired events render as ``+`` / ``-`` as before.
+module decides *how* to present a commit's events: grouping the query layer's
+row stream into (term, commit) units, pairing an ``add`` and a ``remove`` of
+the same predicate that describe an edit to the same clause, filtering paired
+edits by whether the query hit their changed portion, and rendering each op as
+an inline ``~`` line with intra-value diff highlighting (git ``--word-diff``
+style). Unpaired events render as ``+`` / ``-`` as before.
+
+Everything up to rendering is console-free — the same grouping/pairing/
+filtering pipeline serves any consumer of query results (CLI today, HTTP API
+later); only the ``render_*`` functions commit to rich ``Text`` output.
 """
 
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from itertools import groupby
 from cydifflib import SequenceMatcher
-from typing import Iterable
+from typing import Iterable, Iterator, NamedTuple
 
 import fastobo
 from rich.text import Text
 
 from .obo import ParsedValue, decompose_clause
-from .query import Change
+from .query import Change, TermChange
 
 PAIR_THRESHOLD = 0.5
 DEFAULT_TRUNCATE = 200
@@ -288,6 +295,85 @@ def edit_delta_matches(
         if _matches(qualifier, query, regex, ignore_case):
             return True
     return False
+
+
+class PairedCommit(NamedTuple):
+    """One (term, commit) group's events, paired into render ops."""
+
+    term_id: str
+    name: str | None  # the term's name at this commit, if snapshotted
+    head: Change
+    ops: list[Op]
+
+
+def pair_by_term_and_commit(
+    events: Iterable[TermChange], order: str = "term"
+) -> Iterator[PairedCommit]:
+    """Group ``events`` by (term, commit) and pair each group into ops.
+
+    Pairing runs once here; both the search filter and the renderer
+    consume the resulting ops, so an ``Edit`` is guaranteed to render
+    exactly as it was filtered. ``order`` must name the stream's actual
+    sort spine (see :meth:`obohog.query.HistoryDB._iter_term_changes`) so
+    groupings are contiguous: ``"term"`` for term-major streams, ``"date"``
+    for commit-major ones. Either way each yielded group is one (term,
+    commit) pair — only the arrival order differs.
+
+    Lazy: each group is paired as the underlying stream reaches it, so a
+    streaming source (:meth:`obohog.query.HistoryDB.iter_search_events`)
+    renders its first results long before the full result set has been
+    fetched.
+    """
+    if order == "term":
+        key = lambda tc: (tc.term_id, tc.change.commit_seq)
+    else:
+        key = lambda tc: (tc.change.commit_seq, tc.term_id)
+    for _, group in groupby(events, key=key):
+        rows = list(group)
+        yield PairedCommit(
+            rows[0].term_id,
+            rows[0].name,
+            rows[0].change,
+            pair_events([tc.change for tc in rows]),
+        )
+
+
+def filter_ops_by_delta_match(
+    ops: list[Op], query: str, regex: bool, ignore_case: bool
+) -> list[Op]:
+    """Keep adds/removes; keep edits only if their delta contains the query."""
+    return [
+        op for op in ops
+        if not isinstance(op, Edit)
+        or edit_delta_matches(op, query, regex, ignore_case)
+    ]
+
+
+def take_sections(
+    groups: Iterable[PairedCommit],
+    limit: int,
+    section_key,
+    truncated: list[bool],
+) -> Iterator[PairedCommit]:
+    """Pass groups through until ``limit`` distinct sections have completed.
+
+    ``section_key`` maps a group to its section identity (term id for
+    term-ordered output, commit seq for date-ordered). Stops consuming
+    the underlying stream at the section boundary — with a streaming
+    source this abandons the query after only a prefix has been fetched.
+    Sets ``truncated[0]`` when the limit actually cut something off.
+    """
+    current = object()
+    seen = 0
+    for g in groups:
+        key = section_key(g)
+        if key != current:
+            current = key
+            seen += 1
+            if seen > limit:
+                truncated[0] = True
+                return
+        yield g
 
 
 def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:

@@ -610,7 +610,7 @@ def diff(
     summary.append(f"{counts.commits}", style="bold")
     summary.append(f" commits between {ref_a} and {ref_b}", style="dim")
     console.print(summary)
-    groups = _pair_by_term_and_commit(db.iter_range_events(ref_a, ref_b, **filters))
+    groups = render.pair_by_term_and_commit(db.iter_range_events(ref_a, ref_b, **filters))
     _render_paired_groups(groups, full=full, show_commits=commits)
     db.close()
 
@@ -680,13 +680,13 @@ def search(
     scope.append(f"{counts.commits}", style="bold")
     scope.append(" commits …", style="dim")
     console.print(scope)
-    groups = _pair_by_term_and_commit(
+    groups = render.pair_by_term_and_commit(
         db.iter_search_events(query, order=order.value, reverse=reverse, **filters),
         order=order.value,
     )
     filtered = (
         g for g in
-        (g._replace(ops=_filter_ops_by_delta_match(g.ops, query, regex, ignore_case))
+        (g._replace(ops=render.filter_ops_by_delta_match(g.ops, query, regex, ignore_case))
          for g in groups)
         if g.ops
     )
@@ -696,7 +696,7 @@ def search(
             (lambda g: g.term_id) if order is SearchOrder.term
             else (lambda g: g.head.commit_seq)
         )
-        filtered = _take_sections(filtered, limit, section_key, truncated)
+        filtered = render.take_sections(filtered, limit, section_key, truncated)
     if order is SearchOrder.term:
         stats = _render_paired_groups(filtered, full=full, show_commits=commits)
     else:
@@ -868,59 +868,8 @@ def _render_commit_view(
             console.print(render.render_op(op, truncate=cap))
 
 
-class _PairedCommit(NamedTuple):
-    """One (term, commit) group's events, paired into render ops."""
-
-    term_id: str
-    name: str | None  # the term's name at this commit, if snapshotted
-    head: Change
-    ops: list[render.Op]
-
-
-def _pair_by_term_and_commit(
-    events: Iterable[TermChange], order: str = "term"
-) -> Iterator[_PairedCommit]:
-    """Group ``events`` by (term, commit) and pair each group into ops.
-
-    Pairing runs once here; both the search filter and the renderer
-    consume the resulting ops, so an ``Edit`` is guaranteed to render
-    exactly as it was filtered. ``order`` must name the stream's actual
-    sort spine (see :meth:`HistoryDB._iter_term_changes`) so groupings
-    are contiguous: ``"term"`` for term-major streams, ``"date"`` for
-    commit-major ones. Either way each yielded group is one (term,
-    commit) pair — only the arrival order differs.
-
-    Lazy: each group is paired as the underlying stream reaches it, so a
-    streaming source (:meth:`HistoryDB.iter_search_events`) renders its
-    first results long before the full result set has been fetched.
-    """
-    if order == "term":
-        key = lambda tc: (tc.term_id, tc.change.commit_seq)
-    else:
-        key = lambda tc: (tc.change.commit_seq, tc.term_id)
-    for _, group in groupby(events, key=key):
-        rows = list(group)
-        yield _PairedCommit(
-            rows[0].term_id,
-            rows[0].name,
-            rows[0].change,
-            render.pair_events([tc.change for tc in rows]),
-        )
-
-
-def _filter_ops_by_delta_match(
-    ops: list[render.Op], query: str, regex: bool, ignore_case: bool
-) -> list[render.Op]:
-    """Keep adds/removes; keep edits only if their delta contains the query."""
-    return [
-        op for op in ops
-        if not isinstance(op, render.Edit)
-        or render.edit_delta_matches(op, query, regex, ignore_case)
-    ]
-
-
 def _render_paired_groups(
-    groups: Iterable[_PairedCommit], full: bool = False, show_commits: bool = False
+    groups: Iterable[render.PairedCommit], full: bool = False, show_commits: bool = False
 ) -> EventCounts:
     """Render (term, commit) op groups as per-term sections.
 
@@ -957,35 +906,8 @@ def _render_paired_groups(
     return EventCounts(events=n_events, terms=n_terms, commits=len(commit_seqs))
 
 
-def _take_sections(
-    groups: Iterable[_PairedCommit],
-    limit: int,
-    section_key,
-    truncated: list[bool],
-) -> Iterator[_PairedCommit]:
-    """Pass groups through until ``limit`` distinct sections have completed.
-
-    ``section_key`` maps a group to its section identity (term id for
-    term-ordered output, commit seq for date-ordered). Stops consuming
-    the underlying stream at the section boundary — with a streaming
-    source this abandons the query after only a prefix has been fetched.
-    Sets ``truncated[0]`` when the limit actually cut something off.
-    """
-    current = object()
-    seen = 0
-    for g in groups:
-        key = section_key(g)
-        if key != current:
-            current = key
-            seen += 1
-            if seen > limit:
-                truncated[0] = True
-                return
-        yield g
-
-
 def _render_commit_ordered_groups(
-    groups: Iterable[_PairedCommit], full: bool = False, show_commits: bool = False
+    groups: Iterable[render.PairedCommit], full: bool = False, show_commits: bool = False
 ) -> EventCounts:
     """Render (term, commit) op groups as commit blocks, newest first.
 
