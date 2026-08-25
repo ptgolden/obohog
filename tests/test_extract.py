@@ -89,6 +89,52 @@ def test_removing_an_unparseable_term_does_not_crash(bad_then_removed_repo: Path
     assert "MONDO:0000002" in skipped_ids  # the bad term is recorded, not fatal
 
 
+def test_build_matches_naive_full_parse_oracle(obo_repo: Path, tmp_path: Path):
+    """The diff-scoped parse must match an obviously-correct reference.
+
+    The shipped core skips stanzas whose raw bytes didn't change and parses
+    changed stanzas in isolation against the header context. This oracle
+    fully re-parses every version and diffs whole document states — if the
+    stanza splitter mis-carved a boundary or the byte-hash shortcut ever
+    diverged from a real parse, the two would disagree.
+    """
+    from obohog.obo import clause_delta, parse_terms
+
+    out = tmp_path / "art"
+    build_parallel(str(obo_repo), OBO, out, jobs=2)
+
+    events: list[tuple] = []
+    snapshots: list[tuple] = []
+    prev: dict = {}
+    with GitSource(obo_repo) as src:
+        for v in src.iter_file_history(OBO):
+            current = parse_terms(src.read_blob(v.blob_oid))
+            for term_id, term in current.items():
+                before = prev.get(term_id)
+                if before is not None and before.content_hash == term.content_hash:
+                    continue
+                snapshots.append((term_id, v.commit.seq, term.content_hash))
+                added, removed = clause_delta(
+                    before.clauses if before else (), term.clauses
+                )
+                events += [(term_id, v.commit.seq, "add", c.predicate, c.value)
+                           for c in added]
+                events += [(term_id, v.commit.seq, "remove", c.predicate, c.value)
+                           for c in removed]
+            for term_id in prev.keys() - current.keys():
+                events += [(term_id, v.commit.seq, "remove", c.predicate, c.value)
+                           for c in prev[term_id].clauses]
+            prev = current
+
+    db = HistoryDB(out)
+    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    assert sorted(events) == _multiset(db, "events", ev_cols)
+    assert sorted(snapshots) == _multiset(
+        db, "term_snapshots", "term_id, commit_seq, content_hash"
+    )
+    db.close()
+
+
 def _extend_repo(repo: Path) -> None:
     """Two more upstream commits + a tag, landing after an initial build.
 
@@ -153,12 +199,7 @@ def test_incremental_after_serial_build(obo_repo: Path, tmp_path: Path):
 
     fresh = tmp_path / "fresh"
     build_parallel(str(obo_repo), OBO, fresh, jobs=2)
-    # skipped exists only on the incremental artifact; compare the rest.
-    da, db = HistoryDB(inc), HistoryDB(fresh)
-    cols = "term_id, commit_seq, operation, predicate, value"
-    assert _multiset(da, "events", cols) == _multiset(db, "events", cols)
-    da.close()
-    db.close()
+    _assert_same_artifact(inc, fresh)
 
 
 def test_incremental_up_to_date_still_refreshes_releases(obo_repo: Path, tmp_path: Path):

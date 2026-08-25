@@ -1,6 +1,7 @@
 """Tests for OBO normalization, hashing, and clause diffing."""
 
 from obohog.obo import (
+    DocumentState,
     clause_delta,
     hash_clauses,
     parse_stanzas,
@@ -126,3 +127,32 @@ def test_comment_clause_decomposition_has_no_phantom_comment():
     assert comment_clause.parsed.body == "check NCIT; see notes"
     assert comment_clause.parsed.comment is None
     assert comment_clause.parsed.qualifiers == ()
+
+
+def test_document_state_apply_reports_creation_change_and_removal():
+    v1 = _doc(TERM_A, TERM_B)
+    v2 = _doc(TERM_A_SYN)  # A gains a synonym, B disappears
+
+    state = DocumentState()
+    d1 = state.apply(v1)
+    assert {t.term.term_id for t in d1.changed} == {"MONDO:0000001", "MONDO:0000002"}
+    assert d1.removed == [] and d1.failed == []
+    # Creation is ∅ → full clause set: everything arrives as additions.
+    assert all(t.removed == [] for t in d1.changed)
+
+    # Byte-identical re-apply is a no-op (the diff-scoped shortcut).
+    d_same = state.apply(v1)
+    assert d_same.changed == [] and d_same.removed == []
+
+    d2 = state.apply(v2)
+    assert [t.term.term_id for t in d2.changed] == ["MONDO:0000001"]
+    (a_delta,) = d2.changed
+    assert [c.predicate for c in a_delta.added] == ["synonym"]
+    assert [t.term_id for t in d2.removed] == ["MONDO:0000002"]
+
+
+def test_document_state_from_blob_seeds_a_no_op():
+    v1 = _doc(TERM_A, TERM_B)
+    seeded = DocumentState.from_blob(v1)
+    d = seeded.apply(v1)
+    assert d.changed == [] and d.removed == [] and d.failed == []

@@ -1,16 +1,17 @@
 """Turn a stream of file versions into the history artifact.
 
-Walks one file's versions oldest-first, parses each into per-term state, and:
+Walks one file's versions oldest-first, applies each to a
+:class:`~obohog.obo.DocumentState` (which parses only the stanzas whose bytes
+changed), and:
 
 * writes a ``term_snapshots`` row for every term that changed at that commit;
 * writes ``events`` rows for the clause-level adds/removes that changed it.
 
-The first version in the stream is a **baseline**: every term is snapshotted but
-no events are emitted, because a term's clauses were added *before* the window and
-dating those additions to the window's start would be a lie. Terms that first
-appear *after* the baseline are diffed against nothing, so their creation shows up
-as clause additions. Term creation/removal times are recoverable from snapshot
-presence, so they need no dedicated event kind.
+The first version is diffed against nothing, so every term's creation appears
+as clause additions — a change from ∅ to its full clause set — and a removed
+term emits removal events for its last known clauses; creation and removal
+are therefore recoverable from the events alone. (For a window-bounded build
+this dates pre-window content to the window's first commit.)
 """
 
 import enum
@@ -29,15 +30,7 @@ import pyarrow.parquet as pq
 
 from . import model
 from .gitsource import CommitInfo, FileVersion, GitError, GitSource, TagRef
-from .obo import (
-    Clause,
-    TermState,
-    clause_delta,
-    parse_stanzas,
-    parse_terms,
-    split_document,
-    stanza_hash,
-)
+from .obo import Clause, CommitDelta, DocumentState, TermState
 
 # Flush a worker's accumulated rows to a part-file every this many processed
 # commits, so peak memory stays bounded regardless of history length.
@@ -56,7 +49,6 @@ _PR_SQUASH = re.compile(r"\(#(\d+)\)")
 # in the commit message body ("Release URL: <url>"). Parsed out here so the
 # render layer can link back without needing per-source-type wiring.
 _SNAPSHOT_URL = re.compile(r"^Release URL: (\S+)", re.MULTILINE)
-_EMPTY: tuple[Clause, ...] = ()
 
 
 class BuildMode(enum.StrEnum):
@@ -99,8 +91,8 @@ def extract(
 ) -> BuildReport:
     """Build an artifact under ``out_dir`` from ``path``'s history in ``src``.
 
-    ``limit`` keeps only the most recent ``limit`` versions (the oldest kept one
-    becomes the baseline) — useful for iterating on a recent slice.
+    ``limit`` keeps only the most recent ``limit`` versions — useful for
+    iterating on a recent slice.
     """
     versions = list(src.iter_file_history(path))
     if limit is not None:
@@ -116,40 +108,25 @@ def build(
     source_path: str,
     tags: Iterable[TagRef] = (),
 ) -> BuildReport:
+    """Serial in-process build: the parallel path minus chunking and workers."""
     commits: list[dict] = []
     snapshots: list[dict] = []
     events: list[dict] = []
+    skipped: list[dict] = []
 
-    prev: dict[str, TermState] = {}
+    state = DocumentState()
     seqs: list[int] = []
     seq_dates: list[tuple[int, object]] = []  # (seq, naive-UTC date) for tag mapping
-    for i, version in enumerate(versions):
-        current = parse_terms(read_blob(version.blob_oid))
+    for version in versions:
         row = _commit_row(version.commit)
         commits.append(row)
         seqs.append(version.commit.seq)
         seq_dates.append((version.commit.seq, row["committed_date"]))
-
-        # At the first commit `prev` is empty, so every term's `before` is
-        # None and the delta falls out as "all clauses added". That's the
-        # right story — a term's creation is a change from ∅ to its full
-        # clause set, and we want that visible in the events table so the
-        # timeline is complete.
-        for term_id, term in current.items():
-            before = prev.get(term_id)
-            if before is not None and before.content_hash == term.content_hash:
-                continue
-            snapshots.append(_snapshot_row(version, term))
-            added, removed = clause_delta(
-                before.clauses if before else _EMPTY, term.clauses
-            )
-            events.extend(_event_rows(version, term_id, added, model.Operation.ADD))
-            events.extend(_event_rows(version, term_id, removed, model.Operation.REMOVE))
-        for term_id in prev.keys() - current.keys():
-            events.extend(
-                _event_rows(version, term_id, prev[term_id].clauses, model.Operation.REMOVE)
-            )
-        prev = current
+        delta = state.apply(read_blob(version.blob_oid))
+        snap_rows, event_rows, skip_rows = _delta_rows(version, delta)
+        snapshots.extend(snap_rows)
+        events.extend(event_rows)
+        skipped.extend(skip_rows)
 
     meta = [
         {
@@ -168,6 +145,7 @@ def build(
     model.write_table(snapshots, model.TERM_SNAPSHOTS, out_dir, "term_snapshots")
     model.write_table(events, model.EVENTS, out_dir, "events")
     model.write_table(releases, model.RELEASES, out_dir, "releases")
+    model.write_table(skipped, model.SKIPPED, out_dir, "skipped")
     model.write_table(meta, model.BUILD_META, out_dir, "build_meta")
 
     return BuildReport(
@@ -176,7 +154,35 @@ def build(
         total_commits=len(commits),
         snapshots=len(snapshots),
         events=len(events),
+        skipped=len(skipped),
     )
+
+
+def _delta_rows(
+    version: FileVersion, delta: CommitDelta
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Shape one commit's delta into (snapshot, event, skipped) row dicts."""
+    snapshots = [_snapshot_row(version, d.term) for d in delta.changed]
+    events: list[dict] = []
+    for d in delta.changed:
+        events.extend(_event_rows(version, d.term.term_id, d.added, model.Operation.ADD))
+        events.extend(
+            _event_rows(version, d.term.term_id, d.removed, model.Operation.REMOVE)
+        )
+    for term in delta.removed:
+        events.extend(
+            _event_rows(version, term.term_id, term.clauses, model.Operation.REMOVE)
+        )
+    skipped = [
+        {
+            "commit_seq": version.commit.seq,
+            "sha": version.commit.sha,
+            "term_id": term_id,
+            "error": error,
+        }
+        for term_id, error in delta.failed
+    ]
+    return snapshots, events, skipped
 
 
 def _release_rows(
@@ -691,7 +697,7 @@ def _build_chunk(
     ticks=None,
     prefix: str = "",
 ) -> dict:
-    """Worker: parse+diff ``windowed[start:end]`` and stream part-files.
+    """Worker: apply ``windowed[start:end]`` to the document state, stream part-files.
 
     ``windowed`` is the pre-computed versions list from the parent process,
     so this worker doesn't re-walk `git log --follow` (which would repeat
@@ -705,7 +711,7 @@ def _build_chunk(
     out = Path(out_dir)
     src = GitSource(clone_path)
 
-    state, raw = _seed_state(src, windowed, start)
+    state = _seed_state(src, windowed, start)
     snap_rows: list[dict] = []
     event_rows: list[dict] = []
     skipped: list[dict] = []
@@ -739,59 +745,12 @@ def _build_chunk(
                  "term_id": None, "error": "BlobMissing"}
             )
             continue
-        # Split the file into stanzas by text (cheap) and hash each; only the
-        # stanzas whose bytes changed are handed to fastobo.
-        context, stanzas = split_document(blob)
-        cur_hash = {mid: stanza_hash(s) for mid, s in stanzas.items()}
-
-        # At the chunk-0 first commit `state` and `raw` are empty (the seed
-        # returns empty when start == 0), so `changed` covers every term and
-        # `before` falls out as None → every clause becomes an add event.
-        # That's the right story: a term's creation is a change from ∅ to
-        # its full clause set, and we want it visible in the events table.
-        changed = [mid for mid in stanzas if cur_hash[mid] != raw.get(mid)]
-        removed = raw.keys() - stanzas.keys()
-        parsed, failed = parse_stanzas(context, {mid: stanzas[mid] for mid in changed})
-        failed_set = set(failed)
-        _record_skips(skipped, version, failed)
-        for term_id in failed:
-            # Mark the failing bytes as seen: keep the last good state and only
-            # re-attempt if this stanza's content changes again (avoids
-            # re-bisecting the same unparseable term at every later commit).
-            raw[term_id] = cur_hash[term_id]
-        for term_id in changed:
-            if term_id in failed_set:
-                continue
-            term = parsed.get(term_id)
-            if term is None:
-                # Stanza parsed, but fastobo keyed it under a different id than
-                # our text-level scan did; record and skip rather than crash.
-                skipped.append(
-                    {"commit_seq": version.commit.seq, "sha": version.commit.sha,
-                     "term_id": term_id, "error": "IdMismatch"}
-                )
-                raw[term_id] = cur_hash[term_id]
-                continue
-            before = state.get(term_id)
-            raw[term_id] = cur_hash[term_id]
-            if before is not None and before.content_hash == term.content_hash:
-                continue  # bytes changed but canonical content did not
-            snap_rows.append(_snapshot_row(version, term))
-            n_snap += 1
-            added, gone = clause_delta(before.clauses if before else _EMPTY, term.clauses)
-            event_rows.extend(_event_rows(version, term_id, added, model.Operation.ADD))
-            event_rows.extend(_event_rows(version, term_id, gone, model.Operation.REMOVE))
-            n_evt += len(added) + len(gone)
-            state[term_id] = term
-        for term_id in removed:
-            del raw[term_id]
-            term = state.pop(term_id, None)
-            if term is None:
-                continue  # only ever failed to parse; nothing was emitted to remove
-            event_rows.extend(
-                _event_rows(version, term_id, term.clauses, model.Operation.REMOVE)
-            )
-            n_evt += len(term.clauses)
+        snaps, events, skips = _delta_rows(version, state.apply(blob))
+        snap_rows.extend(snaps)
+        event_rows.extend(events)
+        skipped.extend(skips)
+        n_snap += len(snaps)
+        n_evt += len(events)
 
         since_flush += 1
         if since_flush >= _FLUSH_EVERY:
@@ -805,36 +764,16 @@ def _build_chunk(
 
 def _seed_state(
     src: GitSource, windowed: list[FileVersion], start: int
-) -> tuple[dict[str, TermState], dict[str, bytes]]:
-    """Full state at the version before ``start``: parsed clauses + stanza hashes.
+) -> DocumentState:
+    """Document state as of the version before ``start``.
 
-    Empty for the first chunk (``start == 0``), whose first version is the
-    baseline. Per-stanza parse failures are isolated and simply omitted from the
-    seed (they surface as skips when that term next changes).
+    Empty for the first chunk (``start == 0``): its first version diffs
+    against nothing, so every term appears as created.
     """
-    state: dict[str, TermState] = {}
-    raw: dict[str, bytes] = {}
     if start == 0:
-        return state, raw
+        return DocumentState()
     try:
         blob = src.read_blob(windowed[start - 1].blob_oid)
     except GitError:
-        return state, raw  # missing seed blob → empty seed (first diff treats new)
-    context, stanzas = split_document(blob)
-    parsed, _failed = parse_stanzas(context, stanzas)
-    for term_id, term in parsed.items():
-        state[term_id] = term
-        raw[term_id] = stanza_hash(stanzas[term_id])
-    return state, raw
-
-
-def _record_skips(skipped: list[dict], version: FileVersion, failed: list[str]) -> None:
-    for term_id in failed:
-        skipped.append(
-            {
-                "commit_seq": version.commit.seq,
-                "sha": version.commit.sha,
-                "term_id": term_id,
-                "error": "ParseError",
-            }
-        )
+        return DocumentState()  # missing seed blob → first diff treats all as new
+    return DocumentState.from_blob(blob)

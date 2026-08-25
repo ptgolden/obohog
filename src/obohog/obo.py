@@ -219,6 +219,116 @@ def _parse_batch(
             parsed[term_id] = TermState(term_id, clauses, hash_clauses(clauses))
 
 
+@dataclass(frozen=True)
+class TermDelta:
+    """One term's change at a document version: new state + clause-level diff."""
+
+    term: TermState
+    added: list[Clause]
+    removed: list[Clause]
+
+
+@dataclass(frozen=True)
+class CommitDelta:
+    """The semantic result of advancing a :class:`DocumentState` by one version.
+
+    ``changed`` holds terms whose canonical content changed — including
+    brand-new terms, whose delta is ∅ → full clause set. ``removed`` holds
+    the last known state of terms that disappeared. ``failed`` records
+    stanzas that couldn't be handled at this version, as ``(term_id, kind)``
+    with kind ``"ParseError"`` or ``"IdMismatch"``.
+    """
+
+    changed: list[TermDelta]
+    removed: list[TermState]
+    failed: list[tuple[str, str]]
+
+
+class DocumentState:
+    """Evolving parsed state of an OBO document along a version walk.
+
+    Owns the two maps that make diff-scoped parsing work:
+
+    * ``_terms`` — term_id → last successfully parsed :class:`TermState`;
+    * ``_raw`` — term_id → hash of the stanza bytes already *seen* (parsed
+      **or** failed), so :meth:`apply` re-parses a stanza only when its
+      bytes change. A failing stanza lands in ``_raw`` but never in
+      ``_terms``: it keeps its last good state and isn't re-attempted until
+      its content changes again.
+    """
+
+    def __init__(self) -> None:
+        self._terms: dict[str, TermState] = {}
+        self._raw: dict[str, bytes] = {}
+
+    @classmethod
+    def from_blob(cls, blob: bytes) -> "DocumentState":
+        """Full state of one document version, for seeding a mid-walk start.
+
+        Per-stanza parse failures are isolated and simply omitted — not
+        recorded in ``_raw`` — so a still-failing stanza is re-attempted
+        (and re-reported) once at the start of each seeded walk rather
+        than silently carried.
+        """
+        state = cls()
+        context, stanzas = split_document(blob)
+        parsed, _failed = parse_stanzas(context, stanzas)
+        for term_id, term in parsed.items():
+            state._terms[term_id] = term
+            state._raw[term_id] = stanza_hash(stanzas[term_id])
+        return state
+
+    def apply(self, blob: bytes) -> CommitDelta:
+        """Advance to this document version; return what changed.
+
+        Only stanzas whose raw bytes differ from the last version are handed
+        to fastobo; byte-identical stanzas keep their carried-forward state.
+        Applying to an empty state reports every term as created — a change
+        from ∅ to its full clause set — which is the story we want in the
+        events table.
+        """
+        context, stanzas = split_document(blob)
+        cur_hash = {mid: stanza_hash(s) for mid, s in stanzas.items()}
+        changed_ids = [mid for mid in stanzas if cur_hash[mid] != self._raw.get(mid)]
+        removed_ids = self._raw.keys() - stanzas.keys()
+        parsed, failed_ids = parse_stanzas(
+            context, {mid: stanzas[mid] for mid in changed_ids}
+        )
+        failed = [(term_id, "ParseError") for term_id in failed_ids]
+        for term_id in failed_ids:
+            self._raw[term_id] = cur_hash[term_id]
+        failed_set = set(failed_ids)
+
+        changed: list[TermDelta] = []
+        for term_id in changed_ids:
+            if term_id in failed_set:
+                continue
+            term = parsed.get(term_id)
+            if term is None:
+                # Stanza parsed, but fastobo keyed it under a different id
+                # than our text-level scan did; report and move on.
+                failed.append((term_id, "IdMismatch"))
+                self._raw[term_id] = cur_hash[term_id]
+                continue
+            before = self._terms.get(term_id)
+            self._raw[term_id] = cur_hash[term_id]
+            if before is not None and before.content_hash == term.content_hash:
+                continue  # bytes changed but canonical content did not
+            added, removed = clause_delta(
+                before.clauses if before else (), term.clauses
+            )
+            changed.append(TermDelta(term=term, added=added, removed=removed))
+            self._terms[term_id] = term
+
+        removed_terms: list[TermState] = []
+        for term_id in removed_ids:
+            del self._raw[term_id]
+            term = self._terms.pop(term_id, None)
+            if term is not None:  # else it only ever failed; nothing to remove
+                removed_terms.append(term)
+        return CommitDelta(changed=changed, removed=removed_terms, failed=failed)
+
+
 def parse_terms(data: bytes, threads: int = 1) -> dict[str, TermState]:
     """Parse one OBO document into ``{term_id: TermState}`` for its term frames.
 
