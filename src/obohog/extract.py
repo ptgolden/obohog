@@ -153,7 +153,7 @@ def build(
 
 def _delta_rows(
     version: FileVersion, delta: CommitDelta
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[model.SnapshotRow], list[model.EventRow], list[model.SkipRow]]:
     """Shape one commit's delta into (snapshot, event, skipped) row dicts."""
     snapshots = [_snapshot_row(version, d.term) for d in delta.changed]
     events: list[dict] = []
@@ -180,7 +180,7 @@ def _delta_rows(
 
 def _release_rows(
     tags: Iterable[TagRef], seq_dates: list[tuple[int, object]]
-) -> list[dict]:
+) -> list[model.ReleaseRow]:
     """Map each tag to the latest file-history commit at or before its date.
 
     A release's file state is whatever the last commit touching the file left it
@@ -203,7 +203,7 @@ def _release_rows(
     return rows
 
 
-def _commit_row(commit: CommitInfo) -> dict:
+def _commit_row(commit: CommitInfo) -> model.CommitRow:
     snapshot_url = _extract_snapshot_url(commit.message)
     # Release-based commits carry the release page URL as their identity;
     # any `(#N)` or `Merge pull request #N` in the release body is just an
@@ -233,7 +233,7 @@ def _commit_row(commit: CommitInfo) -> dict:
     }
 
 
-def _snapshot_row(version: FileVersion, term: TermState) -> dict:
+def _snapshot_row(version: FileVersion, term: TermState) -> model.SnapshotRow:
     name = next((c.value for c in term.clauses if c.predicate == "name"), None)
     is_obsolete = any(
         c.predicate == "is_obsolete" and c.value == "true" for c in term.clauses
@@ -254,7 +254,7 @@ def _event_rows(
     term_id: str,
     clauses: Iterable[Clause],
     operation: model.Operation,
-) -> list[dict]:
+) -> list[model.EventRow]:
     return [
         {
             "term_id": term_id,
