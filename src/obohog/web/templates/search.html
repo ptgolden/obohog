@@ -4,8 +4,19 @@
 {% block content %}
 <h1>Search {{ src }}</h1>
 <form class="search" method="get" action="/{{ src }}/search">
-  <input type="search" name="q" value="{{ params.q if params else '' }}"
-         placeholder="search clause values" autofocus>
+  <div class="query">
+    <input type="search" name="q" value="{{ params.q if params else '' }}"
+           placeholder="search clause values" autofocus>
+    <label>match
+      <select name="match">
+        <option value="substring" {% if not params or params.match == 'substring' %}selected{% endif %}>substring</option>
+        <option value="exact" {% if params and params.match == 'exact' %}selected{% endif %}>exact</option>
+        <option value="regex" {% if params and params.match == 'regex' %}selected{% endif %}>regex</option>
+      </select>
+    </label>
+    <label><input type="checkbox" name="ignore_case" value="true"
+      {% if params and params.ignore_case %}checked{% endif %}> ignore case</label>
+  </div>
   <div class="filters">
     {% set picked_tag = params.tag if params else none %}
     <label>tag
@@ -40,15 +51,6 @@
         <option value="oldest" {% if params and params.order == 'date' and params.reverse %}selected{% endif %}>oldest first</option>
       </select>
     </label>
-    <label>match
-      <select name="match">
-        <option value="substring" {% if not params or params.match == 'substring' %}selected{% endif %}>substring</option>
-        <option value="exact" {% if params and params.match == 'exact' %}selected{% endif %}>exact</option>
-        <option value="regex" {% if params and params.match == 'regex' %}selected{% endif %}>regex</option>
-      </select>
-    </label>
-    <label><input type="checkbox" name="ignore_case" value="true"
-      {% if params and params.ignore_case %}checked{% endif %}> ignore case</label>
     <button type="submit">search</button>
   </div>
 </form>
