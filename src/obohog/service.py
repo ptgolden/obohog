@@ -20,7 +20,13 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import model, render
 from .config import AnySource, Config
-from .query import Change, HistoryDB, RangeFilters, SearchFilters
+from .query import (
+    Change,
+    HistoryDB,
+    RangeFilters,
+    SearchFilters,
+    parse_has_clause,
+)
 from .views import SourceStyle, pr_title_from_merge
 
 # Bounded-by-default paging: a page holds at most this many *sections*
@@ -35,6 +41,10 @@ SECTION_TERM_CAP = 50
 
 class InvalidCursor(ValueError):
     """Raised when an ``after`` cursor doesn't fit the requested order."""
+
+
+class UnsupportedCombination(ValueError):
+    """Raised when request params contradict each other (e.g. ``q``+``has``)."""
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +251,10 @@ class SearchParams(BaseModel):
     limit: int = Field(default=DEFAULT_PAGE, ge=1, le=MAX_PAGE)
     after: str | None = None
     full: bool = False
+    # Term-set predicates: any non-empty list switches search to
+    # term-histories mode (see :func:`_search_term_sets`). Each entry is
+    # a ``[quantifier:]tag OP value`` clause; repeats AND-compose.
+    has: list[str] = Field(default_factory=list)
 
     @field_validator(
         "q", "term", "tag", "namespace", "since", "until", "after", mode="before"
@@ -250,6 +264,18 @@ class SearchParams(BaseModel):
         """HTML forms submit untouched fields as empty strings; an empty
         filter means "no filter", not "match the empty string"."""
         return None if value == "" else value
+
+    @field_validator("has", mode="before")
+    @classmethod
+    def _has_blanks_dropped(cls, value):
+        """The list analog of ``_blank_is_absent``: blank clauses (an
+        untouched form field, a stray ``has=``) are absent, and a bare
+        string is a one-clause list."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        return [v for v in value if v.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +549,12 @@ def search(
     clause-aware delta filter on edits → section cutoff. ``counts`` are
     the SQL candidates — an upper bound (``approximate=True``) when a
     query ran the delta filter, exact when browsing without one.
+
+    Any ``has`` clause switches to term-histories mode instead — see
+    :func:`_search_term_sets`.
     """
+    if params.has:
+        return _search_term_sets(db, style, params)
     filters = SearchFilters(
         term_id=params.term,
         tag=params.tag,
@@ -579,6 +610,64 @@ def search(
         ),
         next_cursor=next_cursor,
         counts=counts_out,
+    )
+
+
+def _search_term_sets(
+    db: HistoryDB, style: SourceStyle, params: SearchParams
+) -> PageOut[TermSectionOut]:
+    """One page of term-histories results: ``has`` clauses pick the term
+    set, then every member's *full* timeline renders, term-major.
+
+    The filters that remain meaningful (``term``, ``namespace``,
+    ``since``/``until``, ``ignore_case``) narrow *membership* only —
+    which terms qualify — never what renders. No delta filter runs, so
+    ``counts`` are exact: all events of all matching terms.
+    """
+    if params.q is not None:
+        raise UnsupportedCombination(
+            "q cannot combine with has=…; write the text as a clause"
+            " (e.g. has=~diabetes)"
+        )
+    if params.tag is not None:
+        raise UnsupportedCombination(
+            "tag cannot combine with has=…; put the tag in the clause"
+            " (e.g. has=xref~DOID)"
+        )
+    if params.order == "date":
+        raise UnsupportedCombination(
+            "term-set results are term-ordered; order=date is not"
+            " supported with has=…"
+        )
+    clauses = [parse_has_clause(h) for h in params.has]
+    filters = SearchFilters(
+        term_id=params.term,
+        since_seq=db.resolve_bound(params.since) if params.since else None,
+        until_seq=(
+            db.resolve_bound(params.until, end=True) if params.until else None
+        ),
+        ignore_case=params.ignore_case,
+        namespace=params.namespace,
+    )
+    # Surfaces an invalid clause regex here, before the stream starts.
+    counts = db.term_set_counts(clauses, filters)
+    events = db.iter_term_set_events(
+        clauses,
+        filters,
+        reverse=params.reverse,
+        after=_parse_after(params.after, "term"),
+    )
+    groups = render.pair_by_term_and_commit(events)
+    taken, next_cursor = _take_page(groups, "term", params.limit)
+    return PageOut(
+        sections=_term_sections(taken, style, params.full),
+        next_cursor=next_cursor,
+        counts=CountsOut(
+            events=counts.events,
+            terms=counts.terms,
+            commits=counts.commits,
+            approximate=False,
+        ),
     )
 
 
