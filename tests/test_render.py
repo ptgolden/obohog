@@ -525,8 +525,30 @@ def test_edit_delta_matches_regex_ignore_case():
     before = 'MONDO:0020076 {source="A"}'
     after = 'MONDO:0020076 {source="A", source="ONCOTREE:CML"}'
     assert edit_delta_matches(
-        _edit(before, after), r"\bcml\b", regex=True, ignore_case=True
+        _edit(before, after), r"\bcml\b", match="regex", ignore_case=True
     ) is True
+
+
+def test_edit_delta_matches_exact_body_change():
+    # Exact mode compares whole bodies: the query must equal one side's
+    # body, and the body itself must have changed.
+    e = _edit("MONDO:0000001 {source=\"A\"}", "MONDO:0000002 {source=\"A\"}")
+    assert edit_delta_matches(e, "MONDO:0000001", match="exact") is True
+    assert edit_delta_matches(e, "MONDO:0000002", match="exact") is True
+    assert edit_delta_matches(e, "MONDO:00000", match="exact") is False
+    assert edit_delta_matches(
+        e, "mondo:0000001", match="exact", ignore_case=True
+    ) is True
+
+
+def test_edit_delta_matches_exact_qualifier_only_edit_returns_false():
+    # The queried body is kept-unchanged context; only its trailing
+    # modifiers changed — not a match, same rule as kept tokens/qualifiers.
+    before = 'MONDO:0020076 {source="A"}'
+    after = 'MONDO:0020076 {source="A", source="B"}'
+    assert edit_delta_matches(
+        _edit(before, after), "MONDO:0020076", match="exact"
+    ) is False
 
 
 def test_edit_delta_matches_unparseable_falls_through_to_true():

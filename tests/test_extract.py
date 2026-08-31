@@ -544,8 +544,8 @@ def test_search_events_ignore_case_substring(artifact: Path):
 def test_search_events_regex_matches(artifact: Path):
     # The DOID:4 xref matches ^DOID:\d+$; the OMIM-style patterns don't.
     db = HistoryDB(artifact)
-    doid_hits = db.search_events(r"^DOID:\d+$", SearchFilters(regex=True))
-    omim_hits = db.search_events(r"^OMIM:\d+$", SearchFilters(regex=True))
+    doid_hits = db.search_events(r"^DOID:\d+$", SearchFilters(match="regex"))
+    omim_hits = db.search_events(r"^OMIM:\d+$", SearchFilters(match="regex"))
     db.close()
     assert len(doid_hits) == 1
     assert doid_hits[0].change.tag == "xref"
@@ -553,14 +553,27 @@ def test_search_events_regex_matches(artifact: Path):
     assert omim_hits == []
 
 
+def test_search_events_exact_matches_body_only(artifact: Path):
+    # Exact mode compares against `body` (value minus trailing modifiers),
+    # so a whole clause body hits and a prefix of it does not.
+    db = HistoryDB(artifact)
+    assert len(db.search_events("DOID:4", SearchFilters(match="exact"))) == 1
+    assert db.search_events("DOID", SearchFilters(match="exact")) == []
+    assert (
+        len(db.search_events("doid:4", SearchFilters(match="exact", ignore_case=True)))
+        == 1
+    )
+    db.close()
+
+
 def test_search_events_regex_ignore_case_combined(artifact: Path):
     # Regex + --ignore-case: DOID uppercase pattern still matches even if the
     # regex uses lowercase. Both flags combine via the 'i' option to
     # regexp_matches.
     db = HistoryDB(artifact)
-    sensitive = db.search_events(r"^doid:\d+$", SearchFilters(regex=True))
+    sensitive = db.search_events(r"^doid:\d+$", SearchFilters(match="regex"))
     insensitive = db.search_events(
-        r"^doid:\d+$", SearchFilters(regex=True, ignore_case=True)
+        r"^doid:\d+$", SearchFilters(match="regex", ignore_case=True)
     )
     db.close()
     assert sensitive == []

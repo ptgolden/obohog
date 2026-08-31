@@ -186,11 +186,15 @@ def _truncate(s: str, cap: int | None) -> str:
     return s[: cap - 1] + ELLIPSIS
 
 
-def _matches(text: str, query: str, regex: bool, ignore_case: bool) -> bool:
-    """Substring or regex match, honoring ``ignore_case`` — mirrors SQL layer."""
-    if regex:
+def _matches(text: str, query: str, match: str, ignore_case: bool) -> bool:
+    """Substring/exact/regex match, honoring ``ignore_case`` — mirrors SQL layer."""
+    if match == "regex":
         flags = re.IGNORECASE if ignore_case else 0
         return re.search(query, text, flags) is not None
+    if match == "exact":
+        if ignore_case:
+            return query.lower() == text.lower()
+        return query == text
     if ignore_case:
         return query.lower() in text.lower()
     return query in text
@@ -199,7 +203,7 @@ def _matches(text: str, query: str, regex: bool, ignore_case: bool) -> bool:
 def edit_delta_matches(
     edit: Edit,
     query: str,
-    regex: bool = False,
+    match: str = "substring",
     ignore_case: bool = False,
 ) -> bool:
     """Whether ``query`` appears in the portion of the clause that changed.
@@ -225,6 +229,11 @@ def edit_delta_matches(
     the query only appears there, the edit's delta doesn't actually
     involve the query.
 
+    ``match="exact"`` compares whole bodies, not tokens: the edit counts
+    only if the body itself changed and one side's body is exactly the
+    query. A qualifier- or comment-only edit of the queried body is a
+    kept-unchanged body — not a match, same philosophy as above.
+
     Fallback: if either side couldn't be parsed via fastobo, return ``True``
     (safe default; preserves current behavior on the historical malformed
     clauses fastobo rejects).
@@ -235,13 +244,18 @@ def edit_delta_matches(
         return True
 
     def check_text(text: str | None) -> bool:
-        return text is not None and _matches(text, query, regex, ignore_case)
+        return text is not None and _matches(text, query, match, ignore_case)
+
+    if match == "exact":
+        if before.body == after.body:
+            return False
+        return check_text(before.body) or check_text(after.body)
 
     if before.body != after.body:
         b_tokens = Counter(_tokenize(before.body))
         a_tokens = Counter(_tokenize(after.body))
         for token in list((b_tokens - a_tokens)) + list((a_tokens - b_tokens)):
-            if _matches(token, query, regex, ignore_case):
+            if _matches(token, query, match, ignore_case):
                 return True
     if before.comment != after.comment:
         if check_text(before.comment) or check_text(after.comment):
@@ -252,7 +266,7 @@ def edit_delta_matches(
     only_before = b_counts - a_counts
     only_after = a_counts - b_counts
     for qualifier in list(only_before) + list(only_after):
-        if _matches(qualifier, query, regex, ignore_case):
+        if _matches(qualifier, query, match, ignore_case):
             return True
     return False
 
@@ -299,13 +313,13 @@ def pair_by_term_and_commit(
 
 
 def filter_ops_by_delta_match(
-    ops: list[Op], query: str, regex: bool, ignore_case: bool
+    ops: list[Op], query: str, match: str, ignore_case: bool
 ) -> list[Op]:
     """Keep adds/removes; keep edits only if their delta contains the query."""
     return [
         op for op in ops
         if not isinstance(op, Edit)
-        or edit_delta_matches(op, query, regex, ignore_case)
+        or edit_delta_matches(op, query, match, ignore_case)
     ]
 
 

@@ -407,7 +407,7 @@ def diff(
 
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="Substring (or regex, with --regex) to match in event values."),
+    query: str = typer.Argument(..., help="Text to match in event values: substring by default, --exact or --regex to change the mode."),
     source: str = typer.Option(..., "--source", help="Configured source name."),
     config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
@@ -421,6 +421,11 @@ def search(
         None, help="Show events at/after this ref (short sha, tag, or commit_seq)."
     ),
     regex: bool = typer.Option(False, "--regex", help="Treat QUERY as a regular expression."),
+    exact: bool = typer.Option(
+        False, "--exact",
+        help="Match QUERY exactly against clause bodies (the value minus "
+             "trailing {...} modifiers and ! comments).",
+    ),
     ignore_case: bool = typer.Option(
         False, "--ignore-case", "-i", help="Case-insensitive match."
     ),
@@ -447,12 +452,15 @@ def search(
     ),
 ):
     """Find commits that added or removed a clause matching QUERY."""
+    if regex and exact:
+        raise typer.BadParameter("--regex and --exact are mutually exclusive")
+    match = "regex" if regex else "exact" if exact else "substring"
     db, style = _open_source(source, config)
     with _query_errors():
         since_seq = db.resolve_ref(since) if since is not None else None
         filters = SearchFilters(
             term_id=term, tag=tag, since_seq=since_seq,
-            regex=regex, ignore_case=ignore_case, namespace=namespace,
+            match=match, ignore_case=ignore_case, namespace=namespace,
         )
         # An invalid --regex pattern surfaces here, on the first query
         # that reaches regexp_matches; the later stream reuses the same
@@ -477,7 +485,7 @@ def search(
     )
     filtered = (
         g for g in
-        (g._replace(ops=render.filter_ops_by_delta_match(g.ops, query, regex, ignore_case))
+        (g._replace(ops=render.filter_ops_by_delta_match(g.ops, query, match, ignore_case))
          for g in groups)
         if g.ops
     )

@@ -121,9 +121,29 @@ def test_search_pages_roundtrip(client):
 
 def test_search_bad_regex_is_400(client):
     r = client.get(
-        "/api/v1/sources/onto/search", params={"q": "[", "regex": "true"}
+        "/api/v1/sources/onto/search", params={"q": "[", "match": "regex"}
     )
     assert r.status_code == 400
+
+
+def test_search_exact_matches_body(client):
+    # The fixture's xref bodies are SHARED:1..4 — an exact body hits one
+    # term, a substring of it hits none.
+    hit = client.get(
+        "/api/v1/sources/onto/search", params={"q": "SHARED:1", "match": "exact"}
+    ).json()
+    assert [s["term_id"] for s in hit["sections"]] == ["MONDO:0000001"]
+    miss = client.get(
+        "/api/v1/sources/onto/search", params={"q": "SHARED", "match": "exact"}
+    ).json()
+    assert miss["sections"] == []
+
+
+def test_search_bad_match_mode_is_422(client):
+    r = client.get(
+        "/api/v1/sources/onto/search", params={"q": "x", "match": "fuzzy"}
+    )
+    assert r.status_code == 422
 
 
 def test_search_bad_date_cursor_is_400(client):

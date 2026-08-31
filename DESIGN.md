@@ -379,7 +379,7 @@ data/                         # gitignored per-source working state
   `(commit_seq, term_id)` sort spines, and pre-counts.
 - `cli` — typer commands only: `source sync` (with `--jobs`), `term` (with
   `--limit`, `--since`, `--full`, `--only`, `--at` accepting sha/tag/seq),
-  `commit`, `pr`, `diff`, `search` (with `--regex`, `--ignore-case`,
+  `commit`, `pr`, `diff`, `search` (with `--exact`, `--regex`, `--ignore-case`,
   `--namespace`, `--tag`), `releases`. All query commands are scoped
   by `--source`.
 - `views` — the console presentation layer: the process console (with a

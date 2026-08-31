@@ -110,6 +110,7 @@ uv run obohog diff     --source mondo v2026-06-02 HEAD --term MONDO:0001213
 uv run obohog search   --source mondo "OMIM:609814"
 uv run obohog search   --source mondo "GARD:18551" --tag xref
 uv run obohog search   --source mondo "\bCML\b" --regex
+uv run obohog search   --source mondo "Huntington disease" --tag name --exact
 uv run obohog search   --source mondo "CML" --namespace MONDO
 uv run obohog search   --source mondo "MONDO:MalaCards" --term MONDO:0012350
 

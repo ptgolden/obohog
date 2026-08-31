@@ -64,7 +64,7 @@ class SearchFilters:
     term_id: str | None = None
     tag: str | None = None
     since_seq: int | None = None
-    regex: bool = False
+    match: str = "substring"  # "substring" | "exact" | "regex"
     ignore_case: bool = False
     namespace: str | None = None
 
@@ -413,15 +413,21 @@ class HistoryDB:
 
     @staticmethod
     def _search_where(query: str, f: SearchFilters) -> tuple[str, list[object]]:
-        """WHERE clause + params for events whose ``value`` matches ``query``.
+        """WHERE clause + params for events whose value matches ``query``.
 
-        * ``regex=False`` (default): substring match via DuckDB's
-          ``contains()`` — no LIKE wildcard escape logic to write.
-        * ``regex=True``: full regex match via DuckDB's
+        Three match modes (``f.match``):
+
+        * ``"substring"`` (default): substring of the full ``value`` via
+          DuckDB's ``contains()`` — no LIKE wildcard escape logic to write.
+        * ``"exact"``: equality against ``body`` — the value minus its
+          trailing ``{...}`` modifiers and ``!`` comment — so an exact
+          clause body matches regardless of qualifiers.
+        * ``"regex"``: full regex over ``value`` via DuckDB's
           ``regexp_matches()``. Invalid regex raises DuckDB's parse error
           up to the caller.
-        * ``ignore_case=True``: applies to both modes — via ``LOWER()`` on
-          both sides for substring, via the ``'i'`` option flag for regex.
+
+        ``ignore_case=True`` applies to every mode — ``LOWER()`` on both
+        sides for substring/exact, the ``'i'`` option flag for regex.
 
         Optional narrowings (all AND'd together): ``term_id`` restricts to
         one term, ``tag`` restricts to one clause kind (``xref``,
@@ -430,11 +436,16 @@ class HistoryDB:
         :meth:`resolve_ref` in the caller), ``namespace`` restricts to
         term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
         """
-        if f.regex:
+        if f.match == "regex":
             if f.ignore_case:
                 where = "regexp_matches(e.value, ?, 'i')"
             else:
                 where = "regexp_matches(e.value, ?)"
+        elif f.match == "exact":
+            if f.ignore_case:
+                where = "LOWER(e.body) = LOWER(?)"
+            else:
+                where = "e.body = ?"
         else:
             if f.ignore_case:
                 where = "contains(LOWER(e.value), LOWER(?))"
@@ -588,7 +599,7 @@ class HistoryDB:
 
         "Which commits added or removed a clause matching this?" —
         analogous to ``git log -S<string>`` (default substring mode) or
-        ``git log -G<pattern>`` (``regex=True``) at the file-line level,
+        ``git log -G<pattern>`` (``match="regex"``) at the file-line level,
         but on our clause-event granularity. Match semantics and filters
         as in :meth:`_search_where`; ``order``/``reverse``/``after`` as
         in :meth:`_iter_term_changes`.

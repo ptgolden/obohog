@@ -211,7 +211,7 @@ class SearchParams(BaseModel):
     tag: str | None = None
     namespace: str | None = None
     since: str | None = None
-    regex: bool = False
+    match: Literal["substring", "exact", "regex"] = "substring"
     ignore_case: bool = False
     order: Literal["term", "date"] = "term"
     reverse: bool = False
@@ -501,7 +501,7 @@ def search(
         term_id=params.term,
         tag=params.tag,
         since_seq=since_seq,
-        regex=params.regex,
+        match=params.match,
         ignore_case=params.ignore_case,
         namespace=params.namespace,
     )
@@ -520,7 +520,7 @@ def search(
         for g in (
             g._replace(
                 ops=render.filter_ops_by_delta_match(
-                    g.ops, params.q, params.regex, params.ignore_case
+                    g.ops, params.q, params.match, params.ignore_case
                 )
             )
             for g in groups
