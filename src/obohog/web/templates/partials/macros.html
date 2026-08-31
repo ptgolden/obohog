@@ -32,7 +32,7 @@
 <a class="state-link dim"
    href="/{{ src }}/terms/{{ term_id }}/state?at={{ c.sha[:7] if not c.hide_sha else c.commit_seq }}"
    hx-get="/{{ src }}/terms/{{ term_id }}/state?at={{ c.sha[:7] if not c.hide_sha else c.commit_seq }}"
-   hx-target="closest {{ target }}" hx-swap="afterend"
+   hx-target="closest {{ target }}" hx-swap="afterend" hx-sync="this:drop"
 >term @ {{ c.sha[:7] if not c.hide_sha else (c.committed_date | dateonly) }}</a>
 {%- endmacro -%}
 
