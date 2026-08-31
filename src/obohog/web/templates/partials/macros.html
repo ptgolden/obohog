@@ -53,8 +53,8 @@
     <button class="cnav" data-dir="-1" title="previous on this page">↑</button>
     <button class="cnav" data-dir="1" title="next on this page">↓</button>
     {%- endif %}
-    {%- if prev_url %}<a class="cnav" href="{{ prev_url }}" title="older">↑</a>{% endif %}
-    {%- if next_url %}<a class="cnav" href="{{ next_url }}" title="newer">↓</a>{% endif %}
+    {%- if prev_url %}<a class="cnav" href="{{ prev_url }}">older</a>{% endif %}
+    {%- if next_url %}<a class="cnav" href="{{ next_url }}">newer</a>{% endif %}
   </span>
   {%- endif %}
   {%- if not c.hide_sha %}
