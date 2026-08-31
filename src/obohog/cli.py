@@ -18,11 +18,13 @@ from .extract import BuildMode, build_parallel
 from .gitsource import GitSource
 from .query import (
     ArtifactNotFound,
+    ClauseSyntaxError,
     HistoryDB,
     RangeFilters,
     RefNotFound,
     SchemaMismatch,
     SearchFilters,
+    parse_has_clause,
 )
 from .views import (
     SourceStyle,
@@ -86,12 +88,14 @@ def _query_errors():
     """Turn expected bad-input failures into clean CLI errors.
 
     Covers a ref that resolves to nothing (``--at``, ``--since``, diff
-    refs) and a ``--regex`` pattern DuckDB rejects — user input, not
-    bugs, so no traceback.
+    refs), a ``--regex`` pattern DuckDB rejects, and a malformed
+    ``--has`` clause — user input, not bugs, so no traceback.
     """
     try:
         yield
-    except (RefNotFound, duckdb.InvalidInputException) as err:
+    except (
+        RefNotFound, duckdb.InvalidInputException, ClauseSyntaxError
+    ) as err:
         console.print(f"[red]{err}[/]")
         raise typer.Exit(1)
 
@@ -408,6 +412,74 @@ def diff(
     db.close()
 
 
+def _search_term_sets(
+    db: HistoryDB,
+    style: SourceStyle,
+    has: list[str],
+    *,
+    term: Optional[str],
+    namespace: Optional[str],
+    since: Optional[str],
+    until: Optional[str],
+    ignore_case: bool,
+    full: bool,
+    commits: bool,
+    limit: Optional[int],
+    reverse: bool,
+) -> None:
+    """The ``--has`` pipeline: membership once, then full term histories.
+
+    No delta filter runs in this mode (there is no query to delta-match),
+    so the scope line's counts are exact, not candidates.
+    """
+    with _query_errors():
+        clauses = [parse_has_clause(h) for h in has]
+        filters = SearchFilters(
+            term_id=term,
+            since_seq=db.resolve_bound(since) if since is not None else None,
+            until_seq=(
+                db.resolve_bound(until, end=True) if until is not None else None
+            ),
+            ignore_case=ignore_case,
+            namespace=namespace,
+        )
+        # An invalid clause regex surfaces here, before the stream starts.
+        counts = db.term_set_counts(clauses, filters)
+    if counts.terms == 0:
+        console.print("[yellow]No terms match those clauses[/]")
+        db.close()
+        return
+    console.print(counts_phrase(
+        counts.events, counts.terms, counts.commits,
+        tail=" — full histories of matching terms",
+    ))
+    groups = render.pair_by_term_and_commit(
+        db.iter_term_set_events(clauses, filters, reverse=reverse)
+    )
+    truncated = [False]
+    if limit is not None:
+        groups = render.take_sections(
+            groups, limit, lambda g: g.term_id, truncated
+        )
+    stats = render_paired_groups(groups, style, full=full, show_commits=commits)
+    verb = "Showed" if truncated[0] else "Found"
+    footer = Text("\n")
+    footer.append(f"{verb} {stats.terms}", style="bold")
+    footer.append(" terms (full histories): ", style="dim")
+    footer.append(f"{stats.events}", style="bold")
+    footer.append(" events across ", style="dim")
+    footer.append(f"{stats.commits}", style="bold")
+    footer.append(" commits", style="dim")
+    console.print(footer)
+    if truncated[0]:
+        console.print(Text(
+            f"(limited to {limit} terms; up to {counts.terms} total — "
+            "drop --limit for everything)",
+            style="dim",
+        ))
+    db.close()
+
+
 @app.command()
 def search(
     query: Optional[str] = typer.Argument(
@@ -444,6 +516,16 @@ def search(
     ignore_case: bool = typer.Option(
         False, "--ignore-case", "-i", help="Case-insensitive match."
     ),
+    has: Optional[list[str]] = typer.Option(
+        None, "--has",
+        help="Term-set predicate [quantifier:]tag OP value — ~ contains, "
+             "= exact, ~/re/ regex; quantifier ever (default) or now "
+             "(present at HEAD, or as of --until). Repeat to AND. Selects "
+             "terms, then shows each one's FULL history; --since/--until/"
+             "--namespace/--term narrow which terms qualify, never what "
+             "renders. (A substring that itself starts and ends with '/' "
+             "parses as a regex — use = or escape it.)",
+    ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
     commits: bool = typer.Option(
         False, "--commits",
@@ -469,8 +551,36 @@ def search(
     """Find commits that added or removed a clause matching QUERY."""
     if regex and exact:
         raise typer.BadParameter("--regex and --exact are mutually exclusive")
+    if has:
+        if query is not None:
+            raise typer.BadParameter(
+                "--has and QUERY are mutually exclusive; write the text as"
+                " a clause, e.g. --has '~diabetes'"
+            )
+        if tag is not None:
+            raise typer.BadParameter(
+                "--has and --tag are mutually exclusive; put the tag in the"
+                " clause, e.g. --has 'xref~DOID'"
+            )
+        if regex or exact:
+            raise typer.BadParameter(
+                "--regex/--exact apply to QUERY; clauses carry their own"
+                " mode (~ contains, = exact, ~/re/ regex)"
+            )
+        if order is SearchOrder.date:
+            raise typer.BadParameter(
+                "--has results are term-ordered; --order date is unsupported"
+            )
     match = "regex" if regex else "exact" if exact else "substring"
     db, style = _open_source(source, config)
+    if has:
+        _search_term_sets(
+            db, style, has,
+            term=term, namespace=namespace, since=since, until=until,
+            ignore_case=ignore_case, full=full, commits=commits,
+            limit=limit, reverse=reverse,
+        )
+        return
     with _query_errors():
         filters = SearchFilters(
             term_id=term, tag=tag,

@@ -65,9 +65,11 @@ def parse_has_clause(raw: str) -> HasClause:
         raise ClauseSyntaxError("empty clause")
     positions = [i for i in (clause.find("~"), clause.find("=")) if i != -1]
     if not positions:
+        # No square brackets in the message: the CLI prints it through
+        # Rich, which would eat them as markup.
         raise ClauseSyntaxError(
-            f"clause {clause!r} needs '~' (contains) or '=' (exact):"
-            " [quantifier:]tag~value"
+            f"clause {clause!r} needs '~' (contains) or '=' (exact),"
+            " e.g. name~diabetes"
         )
     at = min(positions)
     head, op, value = clause[:at].strip(), clause[at], clause[at + 1:]
