@@ -36,12 +36,17 @@
 >term @ {{ c.sha[:7] if not c.hide_sha else (c.committed_date | dateonly) }}</a>
 {%- endmacro -%}
 
+{#- Git sources lead with the sha link; synthetic histories (releases,
+    BioPortal) have no meaningful sha, so the date itself becomes the
+    identifier — a version chip linking to the change set by seq. -#}
 {%- macro commit_header(c, src, term_id=none) -%}
 <div class="commit-header">
   {%- if not c.hide_sha %}
   <a class="sha" href="/{{ src }}/commits/{{ c.sha[:7] }}">{{ c.sha[:7] }}</a>
-  {%- endif %}
   <span class="date">{{ c.committed_date | dateonly }}</span>
+  {%- else %}
+  <a class="version" href="/{{ src }}/commits/{{ c.commit_seq }}">{{ c.committed_date | dateonly }}</a>
+  {%- endif %}
   <span class="author">{{ c.author_name }}</span>
   <span class="subject">{{ c.subject }}</span>
   {%- if c.pr_url %}

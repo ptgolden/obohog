@@ -297,9 +297,13 @@ class HistoryDB:
         return [(c["predicate"], c["value"]) for c in row[0]]
 
     def commit_events(
-        self, sha_prefix: str, namespace: str | None = None
+        self, ref: str, namespace: str | None = None
     ) -> tuple[Change | None, list[TermChange]]:
         """Full events for one commit, plus a Change-shaped commit header row.
+
+        ``ref`` is anything :meth:`resolve_ref` accepts — a sha prefix, a
+        release tag, a commit_seq, or HEAD; synthetic-history sources
+        (whose shas reference nothing) are addressed by seq.
 
         Returns ``(head, events)``. ``head`` is a ``Change`` whose commit-level
         fields describe the matched commit (its operation/predicate/value are
@@ -309,13 +313,17 @@ class HistoryDB:
         consumable by :func:`obohog.render.pair_events`. Optionally
         restricted to term IDs with a given CURIE prefix via ``namespace``.
 
-        Returns ``(None, [])`` when no commit matches the sha prefix.
+        Returns ``(None, [])`` when the ref matches no commit.
         """
+        try:
+            seq = self.resolve_ref(ref)
+        except RefNotFound:
+            return None, []
         row = self.con.execute(
             """SELECT commit_seq, sha, author_name, committed_date, pr_number,
                       message, branch_commits, snapshot_url
-               FROM commits WHERE sha LIKE ? || '%' ORDER BY commit_seq LIMIT 1""",
-            [sha_prefix],
+               FROM commits WHERE commit_seq = ?""",
+            [seq],
         ).fetchone()
         if row is None:
             return None, []
@@ -384,7 +392,13 @@ class HistoryDB:
         if row is not None:
             return row[0]
         if ref.isdigit():
-            return int(ref)
+            row = self.con.execute(
+                "SELECT commit_seq FROM commits WHERE commit_seq = ?",
+                [int(ref)],
+            ).fetchone()
+            if row is not None:
+                return int(ref)
+            # No such seq — an all-digit sha prefix falls through.
         row = self.con.execute(
             "SELECT commit_seq FROM commits WHERE sha LIKE ? || '%' ORDER BY commit_seq LIMIT 1",
             [ref],

@@ -169,7 +169,7 @@ def test_commit_view_groups_terms(db):
 
 
 def test_commit_view_unknown_sha_is_none(db):
-    assert service.get_commit(db, STYLE, "0000000") is None
+    assert service.get_commit(db, STYLE, "abcdef9") is None
 
 
 def test_pr_without_history_is_none(db):

@@ -27,6 +27,12 @@ _STYLE = Path(__file__).parent / "static" / "style.css"
 templates.env.globals["style_v"] = lambda: int(_STYLE.stat().st_mtime)
 
 
+def _commit_noun(style) -> str:
+    """What one history point is called in copy: synthetic histories
+    (releases, BioPortal) have versions, git sources have commits."""
+    return "version" if style.hide_sha else "commit"
+
+
 def render_error(request: Request, status: int, detail: str) -> HTMLResponse:
     """Error content-negotiated for the HTML side: a bare fragment for
     HTMX requests (swapped into the page), a full page otherwise."""
@@ -68,7 +74,9 @@ def term_page(
     if timeline is None:
         raise HTTPException(status_code=404, detail=f"no history for {term_id!r}")
     return templates.TemplateResponse(
-        request, "term.html", {"src": src, "timeline": timeline}
+        request,
+        "term.html",
+        {"src": src, "timeline": timeline, "commit_noun": _commit_noun(style)},
     )
 
 
@@ -137,6 +145,7 @@ def search_page(
         "params": None,
         "page": None,
         "facets": request.app.state.registry.facets(src),
+        "commit_noun": _commit_noun(style),
     }
     # A bare URL shows the quiet form; any submitted params — even all
     # blank — run the search (a blank form browses everything, paged).

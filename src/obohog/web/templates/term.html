@@ -12,7 +12,7 @@
   showing {{ timeline.shown_events }} of {{ timeline.total_events }} events
   {%- else -%}
   {{ timeline.total_events }} event{{ 's' if timeline.total_events != 1 }}
-  {%- endif %} across {{ timeline.commits | length }} commit{{ 's' if timeline.commits | length != 1 }}
+  {%- endif %} across {{ timeline.commits | length }} {{ commit_noun }}{{ 's' if timeline.commits | length != 1 }}
   · first {{ timeline.header.first_date | dateonly }}
   · last {{ timeline.header.last_date | dateonly }}
 </p>

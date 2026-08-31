@@ -145,16 +145,34 @@ section h3 .state-link, section h4 .state-link {
 }
 .term-state .state-disclaimer { font-size: 0.8rem; margin: 0; }
 
-/* Sections */
-section.term-section, section.commit-section { margin: 1.25rem 0; }
+/* Sections — one per term (term order) or per commit (date order),
+   separated by hairline rules so groups read at a glance. */
+section.term-section, section.commit-section {
+  margin: 0;
+  padding: 0.9rem 0 0.4rem;
+}
+section.term-section + section.term-section,
+section.commit-section + section.commit-section {
+  border-top: 1px solid var(--line);
+}
+section.term-section > :first-child,
+section.commit-section > :first-child { margin-top: 0; }
 section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
 
 .commit-header {
-  margin: 0.6rem 0 0.15rem;
+  margin: 0.9rem 0 0.15rem;
   color: var(--dim);
   font-size: 0.85rem;
 }
 .commit-header .sha { font-family: ui-monospace, monospace; }
+/* Synthetic-history identifier: the date-as-version chip, visibly not a
+   git sha. */
+.commit-header a.version {
+  font-family: ui-monospace, monospace;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+}
 .commit-header .subject { color: var(--fg); }
 .raw-subject { font-style: italic; margin: 0.1rem 0; font-size: 0.85rem; }
 

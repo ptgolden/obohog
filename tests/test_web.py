@@ -187,9 +187,19 @@ def test_commit_view_by_sha_prefix(client):
     assert [t["term_id"] for t in r.json()["terms"]] == ["MONDO:0000002"]
 
 
+def test_commit_view_by_seq(client):
+    # Synthetic-history sources address versions by commit_seq (their shas
+    # are meaningless); the ref resolver takes seqs for git sources too.
+    timeline = client.get("/api/v1/sources/onto/terms/MONDO:0000002").json()
+    commit = timeline["commits"][0]["commit"]
+    r = client.get(f"/api/v1/sources/onto/commits/{commit['commit_seq']}")
+    assert r.status_code == 200
+    assert r.json()["commit"]["sha"] == commit["sha"]
+
+
 def test_unknown_commit_is_404(client):
     assert (
-        client.get("/api/v1/sources/onto/commits/0000000").status_code == 404
+        client.get("/api/v1/sources/onto/commits/abcdef9").status_code == 404
     )
 
 

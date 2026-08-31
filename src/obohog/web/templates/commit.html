@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% import 'partials/macros.html' as m %}
-{% block title %}commit {{ view.commit.sha[:7] }} — {{ src }} — obohog{% endblock %}
+{% block title %}{% if view.commit.hide_sha %}version {{ view.commit.committed_date | dateonly }}{% else %}commit {{ view.commit.sha[:7] }}{% endif %} — {{ src }} — obohog{% endblock %}
 {% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
 {% block content %}
-<h1>Commit</h1>
+<h1>{{ 'Version' if view.commit.hide_sha else 'Commit' }}</h1>
 {{ m.commit_header(view.commit, src) }}
 {% if view.commit.raw_subject %}<p class="dim raw-subject">{{ view.commit.raw_subject }}</p>{% endif %}
 <p class="dim">{{ view.terms | length }} terms changed</p>
