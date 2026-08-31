@@ -256,5 +256,6 @@ main > .commit-header {
 .op .qual-edit > .marker { color: var(--edit); }
 
 .load-more { padding: 1rem 0; text-align: center; }
+.more-terms { font-size: 0.85rem; }
 
 ul.pr-terms { padding-left: 1.25rem; }

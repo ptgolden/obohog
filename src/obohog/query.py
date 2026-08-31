@@ -302,7 +302,10 @@ class HistoryDB:
         return [(c["predicate"], c["value"]) for c in row[0]]
 
     def commit_events(
-        self, ref: str, namespace: str | None = None
+        self,
+        ref: str,
+        namespace: str | None = None,
+        after: str | None = None,
     ) -> tuple[Change | None, list[TermChange]]:
         """Full events for one commit, plus a Change-shaped commit header row.
 
@@ -316,7 +319,10 @@ class HistoryDB:
         header). ``events`` is ordered by ``(term_id, operation, predicate, value)``
         so ``groupby(events, key=term_id)`` gives per-term event lists directly
         consumable by :func:`obohog.render.pair_events`. Optionally
-        restricted to term IDs with a given CURIE prefix via ``namespace``.
+        restricted to term IDs with a given CURIE prefix via ``namespace``;
+        ``after`` is a term_id keyset cursor — only events for strictly
+        later term IDs are returned (paged consumers resume with the last
+        term they rendered).
 
         Returns ``(None, [])`` when the ref matches no commit.
         """
@@ -345,6 +351,9 @@ class HistoryDB:
         if namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
             params.append(namespace)
+        if after is not None:
+            where += " AND e.term_id > ?"
+            params.append(after)
         rows = self.con.execute(
             f"""
             SELECT e.term_id, s.name, e.operation, e.predicate, e.value,

@@ -201,8 +201,44 @@ def commit_page(
         {
             "src": src,
             "view": view,
+            "ref": sha,
+            "namespace": namespace,
+            "full": full,
             "prev_url": f"/{src}/commits/{seq - 1}" if seq > 0 else None,
             "next_url": f"/{src}/commits/{seq + 1}" if seq < last else None,
+        },
+    )
+
+
+@router.get("/{src}/commits/{sha}/terms", response_class=HTMLResponse)
+def commit_terms(
+    request: Request,
+    handle: Handle,
+    src: str,
+    sha: str,
+    after: str,
+    namespace: str | None = None,
+    full: bool = False,
+):
+    """The commit page's load-more fragment: the next window of term
+    sections plus a fresh sentinel while more remain."""
+    db, style = handle
+    view = service.get_commit(
+        db, style, sha, namespace=namespace, full=full, after=after
+    )
+    if view is None:
+        raise HTTPException(
+            status_code=404, detail=f"no indexed changes for commit {sha!r}"
+        )
+    return templates.TemplateResponse(
+        request,
+        "partials/commit_terms.html",
+        {
+            "src": src,
+            "view": view,
+            "ref": sha,
+            "namespace": namespace,
+            "full": full,
         },
     )
 

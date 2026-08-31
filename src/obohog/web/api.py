@@ -115,12 +115,24 @@ def diff(
 
 @router.get("/sources/{src}/commits/{sha}")
 def commit(
-    handle: Handle, sha: str, namespace: str | None = None, full: bool = False
+    handle: Handle,
+    sha: str,
+    namespace: str | None = None,
+    full: bool = False,
+    limit: int = Query(service.DEFAULT_PAGE, ge=1, le=service.MAX_PAGE),
+    after: str | None = None,
 ) -> service.CommitViewOut:
-    """One commit's changes (sha prefix ok), grouped by term."""
+    """One commit's changes (sha prefix, tag, or seq), grouped by term.
+
+    Term-paged: ``limit`` term groups per response, resume with
+    ``after=<next_cursor>``; ``counts`` always covers the whole commit.
+    """
     db, style = handle
     return _or_404(
-        service.get_commit(db, style, sha, namespace=namespace, full=full),
+        service.get_commit(
+            db, style, sha,
+            namespace=namespace, full=full, limit=limit, after=after,
+        ),
         f"no indexed changes for commit {sha!r}",
     )
 

@@ -27,6 +27,10 @@ from .views import SourceStyle, pr_title_from_merge
 # (a term for term-ordered streams, a commit for date-ordered ones).
 DEFAULT_PAGE = 50
 MAX_PAGE = 500
+# Date-ordered search sections render at most this many terms per commit;
+# a monster commit (20k+ terms) would otherwise dominate its whole page.
+# The rest are a count plus a link to the paged commit view.
+SECTION_TERM_CAP = 50
 
 
 class InvalidCursor(ValueError):
@@ -111,10 +115,16 @@ class TermSectionOut(BaseModel):
 
 
 class CommitSectionOut(BaseModel):
-    """A date-major page section: one commit, its affected terms."""
+    """A date-major page section: one commit, its affected terms.
+
+    ``more_terms`` counts term groups beyond :data:`SECTION_TERM_CAP`
+    that this section left unrendered — the full set lives on the
+    commit's own (paged) view.
+    """
 
     commit: CommitOut
     terms: list[TermGroupOut]
+    more_terms: int = 0
 
 
 class CountsOut(BaseModel):
@@ -165,8 +175,13 @@ class StateOut(BaseModel):
 
 
 class CommitViewOut(BaseModel):
+    """One commit's changes, term-paged: ``counts`` covers the whole
+    commit, ``terms`` is the current window, ``next_cursor`` resumes it."""
+
     commit: CommitOut
+    counts: CountsOut
     terms: list[TermGroupOut]
+    next_cursor: str | None = None
 
 
 class PrTermOut(BaseModel):
@@ -329,21 +344,26 @@ def _term_sections(
 
 
 def _commit_sections(
-    groups: list[render.PairedCommit], style: SourceStyle, full: bool
+    groups: list[render.PairedCommit],
+    style: SourceStyle,
+    full: bool,
+    term_cap: int | None = None,
 ) -> list[CommitSectionOut]:
     sections = []
     for _, run in groupby(groups, key=lambda g: g.head.commit_seq):
         entries = list(run)
+        shown = entries if term_cap is None else entries[:term_cap]
         sections.append(
             CommitSectionOut(
                 commit=_commit_out(entries[0].head, style),
+                more_terms=len(entries) - len(shown),
                 terms=[
                     TermGroupOut(
                         term_id=e.term_id,
                         name=e.name,
                         ops=_ops_out(e.ops, full),
                     )
-                    for e in entries
+                    for e in shown
                 ],
             )
         )
@@ -554,7 +574,9 @@ def search(
             counts=counts_out,
         )
     return PageOut(
-        sections=_commit_sections(taken, style, params.full),
+        sections=_commit_sections(
+            taken, style, params.full, term_cap=SECTION_TERM_CAP
+        ),
         next_cursor=next_cursor,
         counts=counts_out,
     )
@@ -590,27 +612,57 @@ def diff(
 def get_commit(
     db: HistoryDB,
     style: SourceStyle,
-    sha: str,
+    ref: str,
     *,
     namespace: str | None = None,
     full: bool = False,
+    limit: int | None = DEFAULT_PAGE,
+    after: str | None = None,
 ) -> CommitViewOut | None:
-    """One commit's changes, grouped by term. None if the sha matches nothing."""
-    head, events = db.commit_events(sha, namespace=namespace)
+    """One commit's changes grouped by term, paged by term_id.
+
+    ``terms`` is a window of at most ``limit`` term groups (giant commits
+    touch tens of thousands); ``next_cursor`` is the last rendered
+    term_id when more remain, fed back as ``after``. ``counts`` always
+    covers the whole commit (within ``namespace``), so headers can say
+    "N terms changed" regardless of the window. None if the ref matches
+    nothing.
+    """
+    head, events = db.commit_events(ref, namespace=namespace, after=after)
     if head is None:
         return None
-    terms = [
-        TermGroupOut(
-            term_id=term_id,
-            name=rows[0].name,
-            ops=_ops_out(
-                render.pair_events([tc.change for tc in rows]), full
-            ),
+    counts = db.search_counts(
+        None,
+        SearchFilters(
+            since_seq=head.commit_seq,
+            until_seq=head.commit_seq,
+            namespace=namespace,
+        ),
+    )
+    terms: list[TermGroupOut] = []
+    next_cursor: str | None = None
+    for term_id, group in groupby(events, key=lambda tc: tc.term_id):
+        if limit is not None and len(terms) == limit:
+            next_cursor = terms[-1].term_id
+            break
+        rows = list(group)
+        terms.append(
+            TermGroupOut(
+                term_id=term_id,
+                name=rows[0].name,
+                ops=_ops_out(
+                    render.pair_events([tc.change for tc in rows]), full
+                ),
+            )
         )
-        for term_id, group in groupby(events, key=lambda tc: tc.term_id)
-        if (rows := list(group))
-    ]
-    return CommitViewOut(commit=_commit_out(head, style), terms=terms)
+    return CommitViewOut(
+        commit=_commit_out(head, style),
+        counts=CountsOut(
+            events=counts.events, terms=counts.terms, commits=counts.commits
+        ),
+        terms=terms,
+        next_cursor=next_cursor,
+    )
 
 
 def get_pr(db: HistoryDB, style: SourceStyle, number: int) -> PrOut | None:

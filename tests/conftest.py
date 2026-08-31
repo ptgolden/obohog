@@ -148,3 +148,34 @@ def bad_then_removed_repo(tmp_path: Path) -> Path:
     _git(repo, "commit", "-qm", "c1 remove bad", date="2021-02-02T00:00:00+00:00")
 
     return repo
+
+
+@pytest.fixture(scope="session")
+def wide_commit_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A built artifact whose single commit touches three terms.
+
+    Exercises the per-commit term caps: date-ordered search sections
+    truncating to SECTION_TERM_CAP, and the commit view's term paging.
+    """
+    from obohog.extract import extract
+    from obohog.gitsource import GitSource
+
+    base = tmp_path_factory.mktemp("wide")
+    repo = base / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _write(
+        repo,
+        "onto.obo",
+        HEADER
+        + "\n".join(
+            _term(f"MONDO:000000{i}", f"name: term {i}") for i in (1, 2, 3)
+        ),
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c0 wide", date="2021-03-01T00:00:00+00:00")
+
+    out = base / "artifact"
+    with GitSource(repo) as src:
+        extract(src, "onto.obo", out)
+    return out

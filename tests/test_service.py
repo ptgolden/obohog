@@ -212,3 +212,32 @@ def test_list_sources_status(paged_artifact: Path, tmp_path: Path):
     assert built.n_commits == 4
     assert missing.status == "not built"
     assert missing.n_commits is None
+
+
+@pytest.fixture(scope="module")
+def wide_db(wide_commit_artifact: Path):
+    db = HistoryDB(wide_commit_artifact)
+    yield db
+    db.close()
+
+
+def test_commit_view_pages_by_term(wide_db):
+    page1 = service.get_commit(wide_db, STYLE, "0", limit=2)
+    assert [t.term_id for t in page1.terms] == ["MONDO:0000001", "MONDO:0000002"]
+    assert page1.counts.terms == 3  # whole-commit scope, not the window
+    assert page1.next_cursor == "MONDO:0000002"
+    page2 = service.get_commit(
+        wide_db, STYLE, "0", limit=2, after=page1.next_cursor
+    )
+    assert [t.term_id for t in page2.terms] == ["MONDO:0000003"]
+    assert page2.next_cursor is None
+
+
+def test_date_order_sections_cap_terms(wide_db, monkeypatch):
+    monkeypatch.setattr(service, "SECTION_TERM_CAP", 2)
+    page = service.search(wide_db, STYLE, SearchParams(order="date"))
+    (section,) = page.sections
+    assert [t.term_id for t in section.terms] == [
+        "MONDO:0000001", "MONDO:0000002",
+    ]
+    assert section.more_terms == 1

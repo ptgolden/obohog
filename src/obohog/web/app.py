@@ -7,6 +7,7 @@ from pathlib import Path
 import duckdb
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -48,6 +49,8 @@ def create_app(cfg: Config) -> FastAPI:
         openapi_url="/api/openapi.json",
         lifespan=lifespan,
     )
+    # Ops-heavy pages compress ~10:1; commit views especially.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.state.config = cfg
     app.state.registry = registry
     app.include_router(api.router, prefix="/api/v1")
