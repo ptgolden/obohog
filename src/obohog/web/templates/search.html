@@ -56,8 +56,9 @@
 </form>
 
 {% if page %}
-<p class="dim">Scanning {{ page.counts.events }} candidate events across
-  {{ page.counts.terms }} terms and {{ page.counts.commits }} commits …</p>
+<p class="dim">Scanning {{ page.counts.events }} candidate event{{ 's' if page.counts.events != 1 }} across
+  {{ page.counts.terms }} term{{ 's' if page.counts.terms != 1 }} and
+  {{ page.counts.commits }} commit{{ 's' if page.counts.commits != 1 }} …</p>
 <div id="results">
   {% include 'partials/search_results.html' %}
 </div>
