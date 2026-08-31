@@ -72,6 +72,27 @@ def term_page(
     )
 
 
+@router.get("/{src}/terms/{term_id}/state", response_class=HTMLResponse)
+def state_page(
+    request: Request, handle: Handle, src: str, term_id: str, at: str
+):
+    """The reconstructed term stanza as of a ref — full page normally, a
+    bare fragment for the HTMX inline expand on commit headers."""
+    db, _ = handle
+    state = service.get_state(db, term_id, at)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{term_id!r} has no snapshot at or before {at!r}",
+        )
+    fragment = bool(request.headers.get("HX-Request"))
+    return templates.TemplateResponse(
+        request,
+        "partials/term_state.html" if fragment else "state.html",
+        {"src": src, "state": state, "fragment": fragment},
+    )
+
+
 def _fragment_query_string(params: service.SearchParams) -> str:
     """The current search restated as a query string, minus the cursor —
     the load-more sentinel appends its own ``after``."""

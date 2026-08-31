@@ -104,6 +104,40 @@ form.search button {
 }
 form.search button:hover { border-color: var(--accent); color: var(--accent); }
 
+/* Reconstructed term stanza (state page + inline expand) */
+.state-link { font-size: 0.85rem; }
+.term-state {
+  margin: 0.5rem 0 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+}
+.term-state .state-head {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  font-size: 0.85rem;
+}
+.term-state .state-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0;
+}
+.term-state .state-close:hover { color: var(--accent); }
+.term-state pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.term-state .state-disclaimer { font-size: 0.8rem; margin: 0; }
+
 /* Sections */
 section.term-section, section.commit-section { margin: 1.25rem 0; }
 section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }

@@ -11,8 +11,8 @@
   {% if timeline.shown_events != timeline.total_events -%}
   showing {{ timeline.shown_events }} of {{ timeline.total_events }} events
   {%- else -%}
-  {{ timeline.total_events }} events
-  {%- endif %} across {{ timeline.commits | length }} commits
+  {{ timeline.total_events }} event{{ 's' if timeline.total_events != 1 }}
+  {%- endif %} across {{ timeline.commits | length }} commit{{ 's' if timeline.commits | length != 1 }}
   · first {{ timeline.header.first_date | dateonly }}
   · last {{ timeline.header.last_date | dateonly }}
 </p>
@@ -25,7 +25,7 @@
 
 {% for g in timeline.commits %}
 <section class="commit-section">
-  {{ m.commit_header(g.commit, src) }}
+  {{ m.commit_header(g.commit, src, term_id=timeline.term_id) }}
   {% for o in g.ops %}{{ m.op(o) }}{% endfor %}
 </section>
 {% endfor %}

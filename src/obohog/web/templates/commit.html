@@ -9,7 +9,8 @@
 <p class="dim">{{ view.terms | length }} terms changed</p>
 {% for t in view.terms %}
 <section class="term-section">
-  <h3>{{ m.term_link(src, t.term_id) }}{% if t.name %} <span class="name">— {{ t.name }}</span>{% endif %}</h3>
+  <h3>{{ m.term_link(src, t.term_id) }}{% if t.name %} <span class="name">— {{ t.name }}</span>{% endif %}
+    {{ m.state_link(view.commit, src, t.term_id, 'h3') }}</h3>
   {% for o in t.ops %}{{ m.op(o) }}{% endfor %}
 </section>
 {% endfor %}

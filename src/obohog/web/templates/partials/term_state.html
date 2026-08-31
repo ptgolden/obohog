@@ -1,0 +1,20 @@
+{#- The reconstructed term stanza. Shared by the standalone state page and
+    the HTMX inline expand (`fragment=True` adds a close button). -#}
+<div class="term-state">
+  <div class="state-head">
+    <span class="dim">{{ state.term_id }} after {{ state.ref }}</span>
+    {%- if fragment %}
+    <a class="dim" href="/{{ src }}/terms/{{ state.term_id }}/state?at={{ state.ref }}">permalink</a>
+    <button type="button" class="state-close"
+            onclick="this.closest('.term-state').remove()">close</button>
+    {%- endif %}
+  </div>
+{#- .term-state pre is whitespace-sensitive: keep the stanza lines flush left. -#}
+<pre>[Term]
+id: {{ state.term_id }}
+{% for c in state.clauses %}{{ c.tag }}: {{ c.value }}
+{% endfor %}</pre>
+  <p class="dim state-disclaimer">This stanza is reconstructed from normalized
+  snapshots — clause order, comments, and whitespace may differ from the
+  text that was in the OBO file.</p>
+</div>

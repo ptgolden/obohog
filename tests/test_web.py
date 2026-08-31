@@ -235,6 +235,41 @@ def test_term_page_unknown_term_is_html_404(client):
     assert "no history" in r.text
 
 
+def test_state_page_renders_stanza(client):
+    r = client.get("/onto/terms/MONDO:0000001/state", params={"at": "v1.0"})
+    assert r.status_code == 200
+    assert "[Term]" in r.text
+    assert "id: MONDO:0000001" in r.text
+    assert "name: alpha" in r.text
+    assert "reconstructed from normalized" in r.text
+    assert "<html" in r.text  # full page without HX-Request
+
+
+def test_state_fragment_for_htmx(client):
+    r = client.get(
+        "/onto/terms/MONDO:0000001/state",
+        params={"at": "v1.0"},
+        headers={"HX-Request": "true"},
+    )
+    assert r.status_code == 200
+    assert "<html" not in r.text  # bare fragment
+    assert "state-close" in r.text  # inline expand gets a close button
+    assert "permalink" in r.text
+
+
+def test_state_page_bad_ref_is_404(client):
+    r = client.get(
+        "/onto/terms/MONDO:0000001/state", params={"at": "not-a-ref"}
+    )
+    assert r.status_code == 404
+
+
+def test_commit_headers_carry_state_links(client):
+    r = client.get("/onto/terms/MONDO:0000001")
+    assert 'class="state-link' in r.text
+    assert "/state?at=" in r.text
+
+
 def test_search_page_without_query_shows_form_only(client):
     r = client.get("/onto/search")
     assert r.status_code == 200
