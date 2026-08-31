@@ -12,7 +12,7 @@
   --del-bg: #ffebe9;
   --edit: #9a6700;
   --accent: #0969da;
-  --band: #f4f5f7;
+  --band: #e7f0fa;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -26,7 +26,7 @@
     --del-bg: #2d1a1c;
     --edit: #c69026;
     --accent: #539bf5;
-    --band: #1c1f26;
+    --band: #1a2534;
   }
 }
 
@@ -150,10 +150,8 @@ section h3 .state-link, section h4 .state-link {
 /* Sections — one per term (term order) or per commit (date order).
    Commit sections open with the header band below, which delimits them
    on its own; term sections open with an h3, so they get a rule. */
-section.term-section, section.commit-section {
-  margin: 0;
-  padding: 0.6rem 0 0.4rem;
-}
+section.term-section { margin: 0; padding: 0.6rem 0 0.4rem; }
+section.commit-section { margin: 0; padding: 0.9rem 0 0.6rem; }
 section.term-section + section.term-section {
   border-top: 1px solid var(--line);
 }
@@ -164,14 +162,21 @@ section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
 /* The commit/version header is a tinted band — the visual anchor that
    marks where one change set ends and the next begins. */
 .commit-header {
-  margin: 0.9rem 0 0.4rem;
-  padding: 0.3rem 0.6rem;
+  margin: 1.1rem 0 0.55rem;
+  padding: 0.45rem 0.75rem;
   background: var(--band);
   border-radius: 6px;
-  color: var(--dim);
+  /* a notch darker than --dim: plain gray sinks into the tint */
+  color: color-mix(in srgb, var(--dim) 55%, var(--fg));
   font-size: 0.85rem;
 }
 .commit-header .state-link { float: right; margin-left: 1ch; }
+/* Interpuncts between whichever parts this header has. */
+.commit-header > :not(.state-link) + :not(.state-link)::before {
+  content: "·";
+  color: var(--dim);
+  margin-right: 0.45rem;
+}
 .commit-header .sha { font-family: ui-monospace, monospace; }
 /* Synthetic-history identifier: the date-as-version chip, visibly not a
    git sha. */
@@ -180,6 +185,7 @@ section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 0.05rem 0.4rem;
+  background: var(--bg);
 }
 .commit-header .subject { color: var(--fg); }
 .raw-subject { font-style: italic; margin: 0.1rem 0; font-size: 0.85rem; }
