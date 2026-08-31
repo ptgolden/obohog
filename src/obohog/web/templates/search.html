@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ src }} — search — obohog{% endblock %}
-{% block nav %}<span class="dim">{{ src }}</span>{% endblock %}
+{% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
 {% block content %}
 <h1>Search {{ src }}</h1>
 <form class="search" method="get" action="/{{ src }}/search">

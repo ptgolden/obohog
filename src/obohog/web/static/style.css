@@ -66,21 +66,16 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Search form */
 form.search { margin: 0.75rem 0 1.5rem; }
-form.search .query {
+form.search .query, form.search .filters {
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
   align-items: center;
   color: var(--dim);
+  font-size: 0.85rem;
 }
+form.search .filters { margin-top: 0.5rem; }
 form.search .query label { white-space: nowrap; }
-form.search .query select {
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 0.15rem 0.3rem;
-  background: var(--bg);
-  color: var(--fg);
-}
 form.search input[type="search"] {
   flex: 1;
   min-width: 14rem;
@@ -91,16 +86,7 @@ form.search input[type="search"] {
   background: var(--bg);
   color: var(--fg);
 }
-form.search .filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-top: 0.5rem;
-  align-items: center;
-  color: var(--dim);
-  font-size: 0.85rem;
-}
-form.search .filters input, form.search .filters select {
+form.search input:not([type="search"]), form.search select {
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 0.15rem 0.3rem;
