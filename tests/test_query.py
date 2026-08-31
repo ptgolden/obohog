@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from obohog.query import HistoryDB, RangeFilters, SearchFilters
+from obohog.query import (
+    ClauseSyntaxError,
+    HasClause,
+    HistoryDB,
+    RangeFilters,
+    SearchFilters,
+    parse_has_clause,
+)
 
 
 @pytest.fixture(scope="module")
@@ -166,3 +173,131 @@ def test_search_since_until_seq_window(db):
         )
     )
     assert {tc.change.commit_seq for tc in rows} == {1, 2}
+
+
+# ---------------------------------------------------------------------------
+# Term-set predicates: ``has`` clause parsing and membership.
+# Lifecycle fixture membership cheat sheet (see conftest):
+#   ~diabetes   ever {T1, T3, T4, EX}   now {T1, T4, EX}
+#   xref~DOID   ever {T2, T3, T4}       now {T2, T3}
+
+T1, T2, T3, T4 = (f"MONDO:000000{i}" for i in (1, 2, 3, 4))
+EX = "EX:0000001"
+
+
+@pytest.fixture(scope="module")
+def ldb(lifecycle_artifact: Path):
+    db = HistoryDB(lifecycle_artifact)
+    yield db
+    db.close()
+
+
+def _members(db, *raw_clauses, f=SearchFilters(), **kw) -> set[str]:
+    clauses = [parse_has_clause(r) for r in raw_clauses]
+    return {tc.term_id for tc in db.iter_term_set_events(clauses, f, **kw)}
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("name~diabetes", HasClause("ever", "name", "substring", "diabetes")),
+    ("~diabetes", HasClause("ever", None, "substring", "diabetes")),
+    ("=diabetes mellitus", HasClause("ever", None, "exact", "diabetes mellitus")),
+    ("now:xref=XXX:1234567", HasClause("now", "xref", "exact", "XXX:1234567")),
+    ("ever:~/dia.*/", HasClause("ever", None, "regex", "dia.*")),
+    ("synonym~a=b", HasClause("ever", "synonym", "substring", "a=b")),
+    ("def=x~y", HasClause("ever", "def", "exact", "x~y")),
+    ("~/", HasClause("ever", None, "substring", "/")),
+    ("synonym~", HasClause("ever", "synonym", "substring", "")),
+    ("now:name~x", HasClause("now", "name", "substring", "x")),
+])
+def test_parse_has_clause_forms(raw, expected):
+    assert parse_has_clause(raw) == expected
+
+
+@pytest.mark.parametrize("raw, hint", [
+    ("~//", "empty regex"),
+    ("=", "needs a value"),
+    ("diabetes", "needs '~'"),
+    ("during:name~x", "reserved"),
+    ("foo:name~x", "unknown quantifier"),
+    ("", "empty clause"),
+])
+def test_parse_has_clause_errors(raw, hint):
+    with pytest.raises(ClauseSyntaxError, match=hint):
+        parse_has_clause(raw)
+
+
+def test_ever_vs_now_membership(ldb):
+    # T3's matching synonym was removed and never re-added: ever only.
+    # T1's was removed then re-added: present now.
+    assert _members(ldb, "~diabetes") == {T1, T3, T4, EX}
+    assert _members(ldb, "now:~diabetes") == {T1, T4, EX}
+
+
+def test_now_until_shifts_the_asof_point(ldb):
+    # As of c1: T1's synonym is removed (though present at HEAD), T3's is
+    # live (though gone at HEAD); T4/EX don't exist yet.
+    f = SearchFilters(until_seq=1)
+    assert _members(ldb, "now:~diabetes", f=f) == {T3}
+
+
+def test_since_is_inert_for_now_clauses(ldb):
+    f = SearchFilters(since_seq=3)
+    assert _members(ldb, "now:~diabetes", f=f) == {T1, T4, EX}
+
+
+def test_windowed_ever(ldb):
+    # Only c3's matching events count: T1's re-add and EX's name.
+    f = SearchFilters(since_seq=3)
+    assert _members(ldb, "~diabetes", f=f) == {T1, EX}
+
+
+def test_clauses_intersect(ldb):
+    assert _members(ldb, "~diabetes", "xref~DOID") == {T3, T4}
+    assert _members(ldb, "~diabetes", "now:xref~DOID") == {T3}
+
+
+def test_membership_narrowings(ldb):
+    assert _members(ldb, "~diabetes", f=SearchFilters(namespace="MONDO")) == {
+        T1, T3, T4,
+    }
+    assert _members(ldb, "~diabetes", f=SearchFilters(term_id=T3)) == {T3}
+
+
+def test_exact_regex_and_ignore_case_clauses(ldb):
+    # Exact matches the body: only EX's name is exactly "diabetes".
+    assert _members(ldb, "name=diabetes") == {EX}
+    assert _members(ldb, "~/dia.*mell.*/") == {T1}
+    assert _members(ldb, "~DIABETES") == set()
+    f = SearchFilters(ignore_case=True)
+    assert _members(ldb, "~DIABETES", f=f) == {T1, T3, T4, EX}
+
+
+def test_full_timelines_stream_nonmatching_events(ldb):
+    rows = list(ldb.iter_term_set_events([parse_has_clause("~diabetes")]))
+    # T3 qualifies via its synonym; its xref events ride along anyway.
+    assert any(tc.term_id == T3 and tc.change.tag == "xref" for tc in rows)
+    # T1's name never matched the clause but its add event is present.
+    assert any(tc.term_id == T1 and tc.change.tag == "name" for tc in rows)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_term_set_after_resumes_and_concatenates(ldb, reverse):
+    clauses = [parse_has_clause("~diabetes")]
+    full = list(ldb.iter_term_set_events(clauses, reverse=reverse))
+    keys = _section_keys(full, "term")
+    assert len(keys) >= 3
+    for i, key in enumerate(keys):
+        later = set(keys[i + 1 :])
+        rest = list(
+            ldb.iter_term_set_events(clauses, reverse=reverse, after=key)
+        )
+        assert rest == [tc for tc in full if tc.term_id in later]
+
+
+def test_term_set_counts_are_exact(ldb):
+    clauses = [parse_has_clause("~diabetes")]
+    counts = ldb.term_set_counts(clauses)
+    rows = list(ldb.iter_term_set_events(clauses))
+    assert counts.terms == 4
+    assert counts.events == len(rows)
+    assert counts.commits == len({tc.change.commit_seq for tc in rows})

@@ -8,7 +8,7 @@ can point at local paths or HTTP URLs, so a hosted artifact needs no server.
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import Iterator, NamedTuple, Sequence
 
 import duckdb
 
@@ -17,6 +17,86 @@ from .obo import ParsedValue
 
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+_QUANTIFIERS = ("ever", "now")  # "during" (as-of) is reserved, unimplemented
+
+
+class ClauseSyntaxError(ValueError):
+    """Raised when a ``has`` clause doesn't parse."""
+
+
+@dataclass(frozen=True)
+class HasClause:
+    """One parsed term-set predicate: ``[quantifier:]tag OP value``.
+
+    ``quantifier`` is ``"ever"`` (the term has at some point carried a
+    matching clause) or ``"now"`` (a matching clause is present at HEAD
+    — or as of the ``until`` bound, when one is given). ``tag=None``
+    means any tag; ``value=""`` (substring mode only) means any value.
+    """
+
+    quantifier: str  # "ever" | "now"
+    tag: str | None
+    match: str  # "substring" | "exact" | "regex"
+    value: str
+
+
+def parse_has_clause(raw: str) -> HasClause:
+    """Parse ``[quantifier:]tag OP value`` into a :class:`HasClause`.
+
+    The clause splits at its *first* ``~`` (contains) or ``=`` (exact
+    body match), so values may freely contain ``~``, ``=``, ``:``, and
+    ``/`` — OBO tags contain none of these. A ``~`` value wrapped in
+    slashes (``~/pat/``) is a regex over the full value; a substring
+    that itself starts and ends with ``/`` therefore needs ``=`` or a
+    regex spelling. Examples::
+
+        name~diabetes          ever: name contains "diabetes"
+        ~diabetes              ever: any tag contains "diabetes"
+        now:xref=XXX:1234567   present now: exact xref body
+        synonym~               ever had any synonym clause
+        ever:~/dia.*/          any tag matches the regex
+
+    Regex *validity* is not checked here — a bad pattern surfaces as
+    DuckDB's parse error on the first query that runs it.
+    """
+    clause = raw.strip()
+    if not clause:
+        raise ClauseSyntaxError("empty clause")
+    positions = [i for i in (clause.find("~"), clause.find("=")) if i != -1]
+    if not positions:
+        raise ClauseSyntaxError(
+            f"clause {clause!r} needs '~' (contains) or '=' (exact):"
+            " [quantifier:]tag~value"
+        )
+    at = min(positions)
+    head, op, value = clause[:at].strip(), clause[at], clause[at + 1:]
+    if ":" in head:
+        quantifier, _, tag = head.partition(":")
+        quantifier, tag = quantifier.strip(), tag.strip()
+        if quantifier == "during":
+            raise ClauseSyntaxError(
+                "'during:' is reserved for as-of filtering; not supported yet"
+            )
+        if quantifier not in _QUANTIFIERS:
+            raise ClauseSyntaxError(
+                f"unknown quantifier {quantifier!r} (expected 'ever:' or 'now:')"
+            )
+    else:
+        quantifier, tag = "ever", head
+    if op == "=":
+        if not value:
+            raise ClauseSyntaxError(f"exact clause {clause!r} needs a value")
+        match = "exact"
+    elif len(value) >= 2 and value.startswith("/") and value.endswith("/"):
+        match, value = "regex", value[1:-1]
+        if not value:
+            raise ClauseSyntaxError(f"empty regex in clause {clause!r}")
+    else:
+        match = "substring"
+    return HasClause(
+        quantifier=quantifier, tag=tag or None, match=match, value=value
+    )
 
 
 class EventCounts(NamedTuple):
@@ -697,6 +777,79 @@ class HistoryDB:
         can size result sets.
         """
         return self._count_events(*self._search_where(query, filters))
+
+    def _term_set_subquery(
+        self, clauses: Sequence[HasClause], f: SearchFilters
+    ) -> tuple[str, list[object]]:
+        """A ``SELECT term_id`` subquery for terms satisfying every clause.
+
+        ``f`` carries the narrowings shared by all clauses — ``term_id``,
+        ``namespace``, ``ignore_case``, and the membership window
+        (``since_seq``/``until_seq``); its ``tag``/``match`` fields go
+        unused (each clause brings its own). Per clause the WHERE comes
+        from :meth:`_search_where`; clauses combine by INTERSECT, so a
+        term must satisfy all of them (AND).
+
+        ``ever`` clauses match any event in the window. ``now`` clauses
+        keep a term when some matching ``(term, tag, value)`` group's
+        last operation at ``commit_seq <= until_seq`` (HEAD when unset)
+        is an add — the clause is present in the state as of that point.
+        ``since_seq`` does not apply to ``now`` clauses: presence is a
+        fact about one moment, not a window. The arg_max can't tie
+        because extraction diffs snapshots and so never emits an add and
+        a remove of the identical ``(term, predicate, value)`` in one
+        commit.
+        """
+        parts: list[str] = []
+        params: list[object] = []
+        for clause in clauses:
+            per = SearchFilters(
+                term_id=f.term_id,
+                tag=clause.tag,
+                since_seq=None if clause.quantifier == "now" else f.since_seq,
+                until_seq=f.until_seq,
+                match=clause.match,
+                ignore_case=f.ignore_case,
+                namespace=f.namespace,
+            )
+            where, p = self._search_where(clause.value or None, per)
+            select = f"SELECT e.term_id FROM events e WHERE {where}"
+            if clause.quantifier == "now":
+                select += (
+                    " GROUP BY e.term_id, e.predicate, e.value"
+                    " HAVING arg_max(e.operation, e.commit_seq) = 'add'"
+                )
+            parts.append(select)
+            params.extend(p)
+        return "(" + "\nINTERSECT\n".join(parts) + ")", params
+
+    def iter_term_set_events(
+        self,
+        clauses: Sequence[HasClause],
+        f: SearchFilters = SearchFilters(),
+        *,
+        reverse: bool = False,
+        after: str | None = None,
+    ) -> Iterator[TermChange]:
+        """Stream the *full* histories of terms satisfying every clause.
+
+        Stage one selects the term set (:meth:`_term_set_subquery`);
+        stage two streams every event of every member — the WHERE is
+        membership alone, so nothing trims the timelines. Term-ordered
+        only (sections are terms); ``reverse``/``after`` as in
+        :meth:`_iter_term_changes`.
+        """
+        sub, params = self._term_set_subquery(clauses, f)
+        return self._iter_term_changes(
+            f"e.term_id IN {sub}", params, reverse=reverse, after=after
+        )
+
+    def term_set_counts(
+        self, clauses: Sequence[HasClause], f: SearchFilters = SearchFilters()
+    ) -> EventCounts:
+        """Exact scope of a term-set query: all events of matching terms."""
+        sub, params = self._term_set_subquery(clauses, f)
+        return self._count_events(f"e.term_id IN {sub}", params)
 
     def facets(self) -> tuple[list[str], list[str]]:
         """Distinct ``(tags, namespaces)`` present in the events.
