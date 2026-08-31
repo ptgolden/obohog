@@ -1,5 +1,6 @@
 """The ASGI app factory: routers, registry, and error mapping."""
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import service
-from ..config import Config, ConfigError
+from ..config import Config, ConfigError, load_config
 from ..query import ArtifactNotFound, RefNotFound, SchemaMismatch
 from . import api, pages
 from .deps import SourceRegistry
@@ -62,6 +63,18 @@ def create_app(cfg: Config) -> FastAPI:
     app.add_exception_handler(StarletteHTTPException, _http_exception)
 
     return app
+
+
+def dev_app() -> FastAPI:
+    """No-arg factory for ``obohog serve --reload``.
+
+    uvicorn's reloader re-imports the app in a fresh subprocess on every
+    code change, so it takes an import string, not an app object — and no
+    arguments. The config path rides in via ``OBOHOG_CONFIG`` (unset →
+    the default ``./obohog.toml`` lookup, cwd is inherited).
+    """
+    path = os.environ.get("OBOHOG_CONFIG")
+    return create_app(load_config(Path(path) if path else None))
 
 
 def _handler(status: int):

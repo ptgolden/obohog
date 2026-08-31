@@ -1,6 +1,7 @@
 """Command-line interface for building and querying the history artifact."""
 
 import enum
+import os
 import signal
 from contextlib import contextmanager
 from pathlib import Path
@@ -552,6 +553,11 @@ def serve(
     config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     port: int = typer.Option(8009, "--port", help="Bind port."),
+    reload: bool = typer.Option(
+        False, "--reload",
+        help="Dev mode: restart on Python changes (templates and static "
+             "files are always served live).",
+    ),
 ):
     """Serve the JSON API and web UI over the configured sources."""
     try:
@@ -570,7 +576,17 @@ def serve(
     except ConfigError as err:
         console.print(f"[red]{err}[/]")
         raise typer.Exit(1)
-    uvicorn.run(create_app(cfg), host=host, port=port)
+    if reload:
+        # The reloader forks fresh subprocesses, so it needs an import
+        # string + factory; the config path travels via the environment.
+        if config is not None:
+            os.environ["OBOHOG_CONFIG"] = str(config)
+        uvicorn.run(
+            "obohog.web.app:dev_app",
+            factory=True, reload=True, host=host, port=port,
+        )
+    else:
+        uvicorn.run(create_app(cfg), host=host, port=port)
 
 
 if __name__ == "__main__":

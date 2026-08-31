@@ -21,6 +21,11 @@ router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 templates.env.filters["dateonly"] = lambda value: str(value)[:10]
 
+_STYLE = Path(__file__).parent / "static" / "style.css"
+# Cache-buster for the stylesheet link: the URL changes whenever the file
+# does, so browsers can cache hard yet never serve a stale sheet.
+templates.env.globals["style_v"] = lambda: int(_STYLE.stat().st_mtime)
+
 
 def render_error(request: Request, status: int, detail: str) -> HTMLResponse:
     """Error content-negotiated for the HTML side: a bare fragment for
