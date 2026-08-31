@@ -542,10 +542,9 @@ def test_api_has_composes_with_event_filter(lclient):
     assert by_date.status_code == 200
 
 
-def test_terms_scope_page_translates_form_to_clause(lclient):
+def test_term_axis_form_translates_to_clause(lclient):
     r = lclient.get(
-        "/life/search",
-        params={"scope": "terms", "q": "diabetes", "match": "substring"},
+        "/life/search", params={"tq": "diabetes", "order": "term"}
     )
     assert r.status_code == 200
     assert "(full histories)" in r.text
@@ -554,27 +553,40 @@ def test_terms_scope_page_translates_form_to_clause(lclient):
                 "MONDO:0000004"):
         assert tid in r.text
     assert "MONDO:0000002" not in r.text
-    # The form re-renders from the raw dialect: scope stays selected and
-    # the query text survives translation.
-    assert '<option value="terms" selected>' in r.text
-    assert 'value="diabetes"' in r.text
+    # The form re-renders from the raw dialect: the term-axis text
+    # survives translation into the has clause.
+    assert 'name="tq" value="diabetes"' in r.text
 
 
-def test_terms_scope_quantifier_now(lclient):
+def test_term_axis_quantifier_now(lclient):
     r = lclient.get(
         "/life/search",
-        params={"scope": "terms", "q": "diabetes", "quantifier": "now"},
+        params={"tq": "diabetes", "quantifier": "now", "order": "term"},
     )
     assert '<option value="now" selected>' in r.text
     assert "MONDO:0000003" not in r.text  # removed, never re-added
     assert "MONDO:0000001" in r.text  # removed then re-added
 
 
-def test_terms_scope_compound_url_ands(lclient):
+def test_both_axes_compose_in_the_form(lclient):
+    # "changes to xrefs containing DOID among terms that ever had
+    # 'diabetes'" — the canonical two-axis query, straight from the form.
+    r = lclient.get(
+        "/life/search",
+        params={"q": "DOID", "tag": "xref", "tq": "diabetes",
+                "order": "term"},
+    )
+    assert "MONDO:0000003" in r.text
+    assert "MONDO:0000004" in r.text
+    assert "MONDO:0000002" not in r.text  # has DOID:9 but never diabetes
+    assert "(full histories)" not in r.text  # q set: ordinary counts line
+
+
+def test_term_axis_compound_url_ands(lclient):
     r = lclient.get(
         "/life/search",
         params=[
-            ("scope", "terms"), ("q", "diabetes"), ("has", "xref~DOID"),
+            ("tq", "diabetes"), ("has", "xref~DOID"), ("order", "term"),
         ],
     )
     assert "MONDO:0000003" in r.text
@@ -582,11 +594,11 @@ def test_terms_scope_compound_url_ands(lclient):
     assert "EX:0000001" not in r.text  # no xref: intersected away
 
 
-def test_terms_scope_load_more_repeats_has_params(lclient):
+def test_term_axis_load_more_repeats_has_params(lclient):
     r = lclient.get(
         "/life/search",
         params=[
-            ("scope", "terms"), ("q", "diabetes"), ("has", "xref~DOID"),
+            ("tq", "diabetes"), ("has", "xref~DOID"), ("order", "term"),
             ("limit", "1"),
         ],
     )
@@ -606,6 +618,6 @@ def test_terms_scope_load_more_repeats_has_params(lclient):
 
 
 def test_has_error_page_is_html_400(lclient):
-    r = lclient.get("/life/search", params={"scope": "terms", "has": "="})
+    r = lclient.get("/life/search", params={"has": "="})
     assert r.status_code == 400
     assert "needs a value" in r.text

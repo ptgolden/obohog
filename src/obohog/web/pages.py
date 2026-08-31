@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import field_validator
 
 from .. import service
 from .api import Handle
@@ -137,30 +138,32 @@ class _FormParams(service.SearchParams):
     newest-first — the git-log shape — where the API defaults to term
     order.
 
-    ``scope`` and ``quantifier`` are the term-histories controls: in
-    ``scope=terms`` the q/match/tag fields *are* the term-set predicate,
-    translated into a ``has`` clause (extra hand-written ``has=`` params
-    AND-compose with it). The blank terms-scope form translates to the
-    match-anything clause ``~`` — browse every term's full history,
-    paged — mirroring the changes-scope blank-form browse.
+    The form's two text axes: the inherited q/match/tag describe the
+    *event filter* (which changes show), while ``tq``/``tmatch``/
+    ``ttag`` + ``quantifier`` describe the *term selector* (whose
+    changes are eligible), translated into a leading ``has`` clause.
+    Hand-written ``has=`` params AND-compose after it.
     """
 
     order: Literal["term", "date", "newest", "oldest"] = "newest"
-    scope: Literal["changes", "terms"] = "changes"
     quantifier: Literal["ever", "now"] = "ever"
+    tq: str | None = None
+    tmatch: Literal["substring", "exact", "regex"] = "substring"
+    ttag: str | None = None
+
+    @field_validator("tq", "ttag", mode="before")
+    @classmethod
+    def _blank_is_absent_here_too(cls, value):
+        return None if value == "" else value
 
     def to_search_params(self) -> service.SearchParams:
-        data = self.model_dump(exclude={"scope", "quantifier"})
-        if self.scope == "terms" or self.has:
-            if self.scope == "terms":
-                data["has"] = [
-                    _form_clause(self.quantifier, self.tag, self.match, self.q),
-                    *data["has"],
-                ]
-            data["q"] = None
-            data["tag"] = None
-            data["order"], data["reverse"] = "term", False
-        elif data["order"] == "newest":
+        data = self.model_dump(exclude={"quantifier", "tq", "tmatch", "ttag"})
+        if self.tq is not None or self.ttag is not None:
+            data["has"] = [
+                _form_clause(self.quantifier, self.ttag, self.tmatch, self.tq),
+                *data["has"],
+            ]
+        if data["order"] == "newest":
             data["order"], data["reverse"] = "date", False
         elif data["order"] == "oldest":
             data["order"], data["reverse"] = "date", True

@@ -3,45 +3,56 @@
 {% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
 {% block content %}
 <h1>Search {{ src }}</h1>
+{% macro match_select(name, current) -%}
+<select name="{{ name }}">
+  <option value="substring" {% if current == 'substring' %}selected{% endif %}>substring</option>
+  <option value="exact" {% if current == 'exact' %}selected{% endif %}>exact</option>
+  <option value="regex" {% if current == 'regex' %}selected{% endif %}>regex</option>
+</select>
+{%- endmacro %}
+{% macro tag_select(name, picked) -%}
+<select name="{{ name }}">
+  <option value="">any</option>
+  {% for p in facets.tags %}
+  <option value="{{ p }}"{% if picked == p %} selected{% endif %}>{{ p }}</option>
+  {% endfor %}
+  {% if picked and picked not in facets.tags %}
+  <option value="{{ picked }}" selected>{{ picked }}</option>
+  {% endif %}
+</select>
+{%- endmacro %}
 <form class="search" method="get" action="/{{ src }}/search">
-  <div class="query">
-    <label>scope
-      <select name="scope">
-        <option value="changes" {% if not form or form.scope == 'changes' %}selected{% endif %}>changes</option>
-        <option value="terms" {% if form and form.scope == 'terms' %}selected{% endif %}>term histories</option>
-      </select>
-    </label>
-    <label>when
-      <select name="quantifier">
-        <option value="ever" {% if not form or form.quantifier == 'ever' %}selected{% endif %}>ever had</option>
-        <option value="now" {% if form and form.quantifier == 'now' %}selected{% endif %}>currently has</option>
-      </select>
-    </label>
-    <input type="search" name="q" value="{{ form.q or '' if form else '' }}"
-           placeholder="search clause values" autofocus>
-    <label>match
-      <select name="match">
-        <option value="substring" {% if not form or form.match == 'substring' %}selected{% endif %}>substring</option>
-        <option value="exact" {% if form and form.match == 'exact' %}selected{% endif %}>exact</option>
-        <option value="regex" {% if form and form.match == 'regex' %}selected{% endif %}>regex</option>
-      </select>
-    </label>
-    <label><input type="checkbox" name="ignore_case" value="true"
-      {% if form and form.ignore_case %}checked{% endif %}> ignore case</label>
+  {# Two independent axes: the event filter picks which changes show;
+     the term selector picks whose changes are eligible. Both blank in a
+     group means "no constraint on this axis". #}
+  <div class="axes">
+    <fieldset class="axis">
+      <legend>changes matching</legend>
+      <input type="search" name="q" value="{{ form.q or '' if form else '' }}"
+             placeholder="text in the changed value" autofocus>
+      <div class="knobs">
+        <label>match {{ match_select('match', form.match if form else 'substring') }}</label>
+        <label>tag {{ tag_select('tag', form.tag if form else none) }}</label>
+      </div>
+    </fieldset>
+    <fieldset class="axis">
+      <legend>among terms that
+        <select name="quantifier">
+          <option value="ever" {% if not form or form.quantifier == 'ever' %}selected{% endif %}>ever had</option>
+          <option value="now" {% if form and form.quantifier == 'now' %}selected{% endif %}>currently have</option>
+        </select>
+      </legend>
+      <input type="search" name="tq" value="{{ form.tq or '' if form else '' }}"
+             placeholder="text in any matching value">
+      <div class="knobs">
+        <label>match {{ match_select('tmatch', form.tmatch if form else 'substring') }}</label>
+        <label>tag {{ tag_select('ttag', form.ttag if form else none) }}</label>
+        <label>term <input name="term" size="14"
+          value="{{ form.term or '' if form else '' }}"></label>
+      </div>
+    </fieldset>
   </div>
   <div class="filters">
-    {% set picked_tag = form.tag if form else none %}
-    <label>tag
-      <select name="tag">
-        <option value="">any</option>
-        {% for p in facets.tags %}
-        <option value="{{ p }}"{% if picked_tag == p %} selected{% endif %}>{{ p }}</option>
-        {% endfor %}
-        {% if picked_tag and picked_tag not in facets.tags %}
-        <option value="{{ picked_tag }}" selected>{{ picked_tag }}</option>
-        {% endif %}
-      </select>
-    </label>
     {% set picked_namespace = form.namespace if form else none %}
     <label>namespace
       <select name="namespace">
@@ -54,8 +65,6 @@
         {% endif %}
       </select>
     </label>
-    <label>term <input name="term" size="14"
-      value="{{ form.term or '' if form else '' }}"></label>
     <label>from <input type="date" name="since"
       value="{{ form.since or '' if form else '' }}"></label>
     <label>to <input type="date" name="until"
@@ -69,26 +78,14 @@
         <option value="oldest" {% if form and (form.order == 'oldest' or (form.order == 'date' and form.reverse)) %}selected{% endif %}>oldest first</option>
       </select>
     </label>
+    <label><input type="checkbox" name="ignore_case" value="true"
+      {% if form and form.ignore_case %}checked{% endif %}> ignore case</label>
     <button type="submit">search</button>
   </div>
 </form>
-<script>
-  (() => {
-    const f = document.querySelector("form.search");
-    const sync = () => {
-      const terms = f.elements.scope.value === "terms";
-      // Server-enforced either way; disabling just keeps the form honest:
-      // term histories are always term-ordered, "when" only picks terms.
-      f.elements.order.disabled = terms;
-      f.elements.quantifier.disabled = !terms;
-    };
-    f.elements.scope.addEventListener("change", sync);
-    sync();
-  })();
-</script>
 
 {% if page %}
-{% if params.has %}
+{% if params.has and not params.q and params.order == 'term' %}
 <p class="dim">{{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} (full histories) —
   {{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
   {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
