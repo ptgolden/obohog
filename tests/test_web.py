@@ -177,6 +177,11 @@ def test_unknown_pr_is_404(client):
     assert client.get("/api/v1/sources/onto/prs/12345").status_code == 404
 
 
+def test_facets_lists_distinct_filter_values(client):
+    body = client.get("/api/v1/sources/onto/facets").json()
+    assert body == {"predicates": ["name", "xref"], "namespaces": ["MONDO"]}
+
+
 def test_openapi_document_serves(client):
     r = client.get("/api/openapi.json")
     assert r.status_code == 200
@@ -242,6 +247,23 @@ def test_search_form_blank_filters_do_not_filter(client):
     assert len(api["sections"]) == 4
 
 
+def test_search_form_offers_derived_filter_choices(client):
+    r = client.get("/onto/search")
+    assert '<select name="predicate">' in r.text
+    assert '<option value="xref">xref</option>' in r.text
+    assert '<select name="namespace">' in r.text
+    assert '<option value="MONDO">MONDO</option>' in r.text
+
+
+def test_search_form_keeps_selected_filter_value(client):
+    r = client.get("/onto/search", params={"q": "SHARED", "predicate": "xref"})
+    assert '<option value="xref" selected>xref</option>' in r.text
+    # A hand-edited URL value outside the derived list must still show as
+    # selected (the filter is applied), not silently display "any".
+    r = client.get("/onto/search", params={"q": "SHARED", "predicate": "bogus"})
+    assert '<option value="bogus" selected>bogus</option>' in r.text
+
+
 def test_search_results_fragment_pages(client):
     r = client.get(
         "/onto/search/results",
@@ -300,4 +322,20 @@ def test_registry_reopens_when_build_meta_changes(
     db3, _ = registry.acquire("onto")
     assert registry._entries["onto"].db is not entry1  # stat change → reopened
     db3.close()
+    registry.close()
+
+
+def test_registry_facets_cached_until_artifact_changes(
+    paged_artifact: Path, tmp_path: Path
+):
+    registry = SourceRegistry(_config(tmp_path, paged_artifact))
+    f1 = registry.facets("onto")
+    assert f1.predicates == ["name", "xref"]
+    assert f1.namespaces == ["MONDO"]
+    assert registry.facets("onto") is f1  # unchanged artifact → cached
+
+    meta = paged_artifact / "build_meta.parquet"
+    st = meta.stat()
+    os.utime(meta, ns=(st.st_atime_ns, st.st_mtime_ns + 1))
+    assert registry.facets("onto") is not f1  # stat change → recomputed
     registry.close()

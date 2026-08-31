@@ -49,6 +49,12 @@ def releases(handle: Handle) -> list[service.ReleaseOut]:
     return service.list_releases(db)
 
 
+@router.get("/sources/{src}/facets")
+def facets(src: str, request: Request) -> service.FacetsOut:
+    """Distinct predicate/namespace values in the source, for filter UIs."""
+    return request.app.state.registry.facets(src)
+
+
 @router.get("/sources/{src}/terms/{term_id}")
 def term_timeline(
     handle: Handle,

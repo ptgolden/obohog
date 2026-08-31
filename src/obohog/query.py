@@ -620,6 +620,31 @@ class HistoryDB:
         """
         return self._count_events(*self._search_where(query, filters))
 
+    def facets(self) -> tuple[list[str], list[str]]:
+        """Distinct ``(predicates, namespaces)`` present in the events.
+
+        Both are low-cardinality (a dozen-odd values even on millions of
+        events) and ordered most-frequent first, so filter UIs can offer
+        them as controlled choices instead of free text. Namespace is the
+        CURIE prefix of ``term_id``, matching the ``namespace`` filters'
+        ``starts_with(term_id, ns || ':')`` semantics.
+        """
+        predicates = [
+            row[0]
+            for row in self.con.execute(
+                "SELECT predicate FROM events"
+                " GROUP BY predicate ORDER BY count(*) DESC, predicate"
+            ).fetchall()
+        ]
+        namespaces = [
+            row[0]
+            for row in self.con.execute(
+                "SELECT split_part(term_id, ':', 1) AS ns FROM events"
+                " GROUP BY ns ORDER BY count(*) DESC, ns"
+            ).fetchall()
+        ]
+        return predicates, namespaces
+
     def releases(self) -> list[tuple[str, int, object]]:
         if not self._has_releases():
             return []

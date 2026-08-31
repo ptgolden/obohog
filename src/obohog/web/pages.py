@@ -90,7 +90,12 @@ def search_page(
     params: Annotated[_FormParams, Query()] = None,
 ):
     db, style = handle
-    context: dict = {"src": src, "params": None, "page": None}
+    context: dict = {
+        "src": src,
+        "params": None,
+        "page": None,
+        "facets": request.app.state.registry.facets(src),
+    }
     if params is not None and params.q:
         sp = service.SearchParams(**params.model_dump())
         context["params"] = sp

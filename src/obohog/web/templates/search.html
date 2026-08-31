@@ -7,10 +7,30 @@
   <input type="search" name="q" value="{{ params.q if params else '' }}"
          placeholder="substring or regex over clause values" autofocus>
   <div class="filters">
-    <label>predicate <input name="predicate" size="10"
-      value="{{ params.predicate or '' if params else '' }}"></label>
-    <label>namespace <input name="namespace" size="8"
-      value="{{ params.namespace or '' if params else '' }}"></label>
+    {% set picked_predicate = params.predicate if params else none %}
+    <label>predicate
+      <select name="predicate">
+        <option value="">any</option>
+        {% for p in facets.predicates %}
+        <option value="{{ p }}"{% if picked_predicate == p %} selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+        {% if picked_predicate and picked_predicate not in facets.predicates %}
+        <option value="{{ picked_predicate }}" selected>{{ picked_predicate }}</option>
+        {% endif %}
+      </select>
+    </label>
+    {% set picked_namespace = params.namespace if params else none %}
+    <label>namespace
+      <select name="namespace">
+        <option value="">any</option>
+        {% for ns in facets.namespaces %}
+        <option value="{{ ns }}"{% if picked_namespace == ns %} selected{% endif %}>{{ ns }}</option>
+        {% endfor %}
+        {% if picked_namespace and picked_namespace not in facets.namespaces %}
+        <option value="{{ picked_namespace }}" selected>{{ picked_namespace }}</option>
+        {% endif %}
+      </select>
+    </label>
     <label>term <input name="term" size="14"
       value="{{ params.term or '' if params else '' }}"></label>
     <label>order

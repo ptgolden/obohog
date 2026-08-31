@@ -8,6 +8,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import service
 from ..config import AnySource, Config
 from ..query import HistoryDB
 from ..views import SourceStyle, style_for
@@ -18,6 +19,7 @@ class _Entry:
     db: HistoryDB
     style: SourceStyle
     stat_key: tuple[int, int]
+    facets: service.FacetsOut | None = None
 
 
 class SourceRegistry:
@@ -44,16 +46,35 @@ class SourceRegistry:
         :class:`~obohog.query.SchemaMismatch` for unusable artifacts —
         the web layer maps those to responses.
         """
+        with self._lock:
+            entry = self._current_entry(name)
+            return entry.db.fork(), entry.style
+
+    def facets(self, name: str) -> service.FacetsOut:
+        """Distinct filter values for the source, cached per artifact.
+
+        Computed on the parent handle (exclusive under the lock) the
+        first time it's asked for after an open or refresh — a few tens
+        of milliseconds even on millions of events, so holding the lock
+        for it is fine.
+        """
+        with self._lock:
+            entry = self._current_entry(name)
+            if entry.facets is None:
+                entry.facets = service.get_facets(entry.db)
+            return entry.facets
+
+    def _current_entry(self, name: str) -> _Entry:
+        """The cached entry, (re)opened if absent or stale. Lock held by caller."""
         source = self._cfg.get_source(name)
         key = _stat_key(source)
-        with self._lock:
-            entry = self._entries.get(name)
-            if entry is None or entry.stat_key != key:
-                if entry is not None:
-                    entry.db.close()
-                entry = _Entry(HistoryDB(source.db_dir), style_for(source), key)
-                self._entries[name] = entry
-            return entry.db.fork(), entry.style
+        entry = self._entries.get(name)
+        if entry is None or entry.stat_key != key:
+            if entry is not None:
+                entry.db.close()
+            entry = _Entry(HistoryDB(source.db_dir), style_for(source), key)
+            self._entries[name] = entry
+        return entry
 
     def close(self) -> None:
         with self._lock:

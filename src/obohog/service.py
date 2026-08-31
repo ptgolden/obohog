@@ -196,6 +196,13 @@ class SourceInfo(BaseModel):
     n_commits: int | None
 
 
+class FacetsOut(BaseModel):
+    """Distinct filter values present in a source, most frequent first."""
+
+    predicates: list[str]
+    namespaces: list[str]
+
+
 class SearchParams(BaseModel):
     """Everything a search request can say, validated once at the edge."""
 
@@ -611,3 +618,8 @@ def list_releases(db: HistoryDB) -> list[ReleaseOut]:
         ReleaseOut(tag=tag, commit_seq=seq, date=date)
         for tag, seq, date in db.releases()
     ]
+
+
+def get_facets(db: HistoryDB) -> FacetsOut:
+    predicates, namespaces = db.facets()
+    return FacetsOut(predicates=predicates, namespaces=namespaces)
