@@ -103,11 +103,28 @@ def state_page(
 
 def _fragment_query_string(params: service.SearchParams) -> str:
     """The current search restated as a query string, minus the cursor —
-    the load-more sentinel appends its own ``after``."""
+    the load-more sentinel appends its own ``after``. ``doseq`` so the
+    repeatable ``has`` param survives as ``has=…&has=…``."""
     fields = params.model_dump(exclude_defaults=True, exclude={"after"})
+    enc = lambda v: str(v).lower() if isinstance(v, bool) else v  # noqa: E731
     return urlencode(
-        {k: (str(v).lower() if isinstance(v, bool) else v) for k, v in fields.items()}
+        {
+            k: [enc(x) for x in v] if isinstance(v, list) else enc(v)
+            for k, v in fields.items()
+        },
+        doseq=True,
     )
+
+
+def _form_clause(quantifier: str, tag: str | None, match: str, q: str | None) -> str:
+    """The form's single predicate, spelled as a ``has`` clause."""
+    prefix = "now:" if quantifier == "now" else ""
+    value = q or ""
+    if match == "exact":
+        return f"{prefix}{tag or ''}={value}"
+    if match == "regex":
+        return f"{prefix}{tag or ''}~/{value}/"
+    return f"{prefix}{tag or ''}~{value}"
 
 
 class _FormParams(service.SearchParams):
@@ -119,13 +136,31 @@ class _FormParams(service.SearchParams):
     by default, ``reverse`` makes it oldest-first). The form defaults to
     newest-first — the git-log shape — where the API defaults to term
     order.
+
+    ``scope`` and ``quantifier`` are the term-histories controls: in
+    ``scope=terms`` the q/match/tag fields *are* the term-set predicate,
+    translated into a ``has`` clause (extra hand-written ``has=`` params
+    AND-compose with it). The blank terms-scope form translates to the
+    match-anything clause ``~`` — browse every term's full history,
+    paged — mirroring the changes-scope blank-form browse.
     """
 
     order: Literal["term", "date", "newest", "oldest"] = "newest"
+    scope: Literal["changes", "terms"] = "changes"
+    quantifier: Literal["ever", "now"] = "ever"
 
     def to_search_params(self) -> service.SearchParams:
-        data = self.model_dump()
-        if data["order"] == "newest":
+        data = self.model_dump(exclude={"scope", "quantifier"})
+        if self.scope == "terms" or self.has:
+            if self.scope == "terms":
+                data["has"] = [
+                    _form_clause(self.quantifier, self.tag, self.match, self.q),
+                    *data["has"],
+                ]
+            data["q"] = None
+            data["tag"] = None
+            data["order"], data["reverse"] = "term", False
+        elif data["order"] == "newest":
             data["order"], data["reverse"] = "date", False
         elif data["order"] == "oldest":
             data["order"], data["reverse"] = "date", True
@@ -143,6 +178,7 @@ def search_page(
     context: dict = {
         "src": src,
         "params": None,
+        "form": None,
         "page": None,
         "facets": request.app.state.registry.facets(src),
         "commit_noun": _commit_noun(style),
@@ -151,6 +187,9 @@ def search_page(
     # blank — run the search (a blank form browses everything, paged).
     if params is not None and request.url.query:
         sp = params.to_search_params()
+        # The form re-renders from the raw dialect (`form`): translation
+        # nulls q/tag in terms scope, so `sp` can't refill the inputs.
+        context["form"] = params
         context["params"] = sp
         context["page"] = service.search(db, style, sp)
         context["qs"] = _fragment_query_string(sp)

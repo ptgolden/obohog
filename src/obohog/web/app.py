@@ -14,7 +14,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import service
 from ..config import Config, ConfigError, load_config
-from ..query import ArtifactNotFound, RefNotFound, SchemaMismatch
+from ..query import (
+    ArtifactNotFound,
+    ClauseSyntaxError,
+    RefNotFound,
+    SchemaMismatch,
+)
 from . import api, pages
 from .deps import SourceRegistry
 
@@ -27,6 +32,8 @@ _STATUS = {
     ConfigError: 404,
     RefNotFound: 404,
     service.InvalidCursor: 400,
+    service.UnsupportedCombination: 400,
+    ClauseSyntaxError: 400,
     duckdb.InvalidInputException: 400,
     ArtifactNotFound: 503,
     SchemaMismatch: 503,

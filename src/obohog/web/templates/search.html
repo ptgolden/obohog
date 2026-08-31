@@ -5,20 +5,32 @@
 <h1>Search {{ src }}</h1>
 <form class="search" method="get" action="/{{ src }}/search">
   <div class="query">
-    <input type="search" name="q" value="{{ params.q or '' if params else '' }}"
+    <label>scope
+      <select name="scope">
+        <option value="changes" {% if not form or form.scope == 'changes' %}selected{% endif %}>changes</option>
+        <option value="terms" {% if form and form.scope == 'terms' %}selected{% endif %}>term histories</option>
+      </select>
+    </label>
+    <label>when
+      <select name="quantifier">
+        <option value="ever" {% if not form or form.quantifier == 'ever' %}selected{% endif %}>ever had</option>
+        <option value="now" {% if form and form.quantifier == 'now' %}selected{% endif %}>currently has</option>
+      </select>
+    </label>
+    <input type="search" name="q" value="{{ form.q or '' if form else '' }}"
            placeholder="search clause values" autofocus>
     <label>match
       <select name="match">
-        <option value="substring" {% if not params or params.match == 'substring' %}selected{% endif %}>substring</option>
-        <option value="exact" {% if params and params.match == 'exact' %}selected{% endif %}>exact</option>
-        <option value="regex" {% if params and params.match == 'regex' %}selected{% endif %}>regex</option>
+        <option value="substring" {% if not form or form.match == 'substring' %}selected{% endif %}>substring</option>
+        <option value="exact" {% if form and form.match == 'exact' %}selected{% endif %}>exact</option>
+        <option value="regex" {% if form and form.match == 'regex' %}selected{% endif %}>regex</option>
       </select>
     </label>
     <label><input type="checkbox" name="ignore_case" value="true"
-      {% if params and params.ignore_case %}checked{% endif %}> ignore case</label>
+      {% if form and form.ignore_case %}checked{% endif %}> ignore case</label>
   </div>
   <div class="filters">
-    {% set picked_tag = params.tag if params else none %}
+    {% set picked_tag = form.tag if form else none %}
     <label>tag
       <select name="tag">
         <option value="">any</option>
@@ -30,7 +42,7 @@
         {% endif %}
       </select>
     </label>
-    {% set picked_namespace = params.namespace if params else none %}
+    {% set picked_namespace = form.namespace if form else none %}
     <label>namespace
       <select name="namespace">
         <option value="">any</option>
@@ -43,29 +55,51 @@
       </select>
     </label>
     <label>term <input name="term" size="14"
-      value="{{ params.term or '' if params else '' }}"></label>
+      value="{{ form.term or '' if form else '' }}"></label>
     <label>from <input type="date" name="since"
-      value="{{ params.since or '' if params else '' }}"></label>
+      value="{{ form.since or '' if form else '' }}"></label>
     <label>to <input type="date" name="until"
-      value="{{ params.until or '' if params else '' }}"></label>
+      value="{{ form.until or '' if form else '' }}"></label>
     <label>order
       <select name="order">
-        <option value="term" {% if params and params.order == 'term' %}selected{% endif %}>by term</option>
-        <option value="newest" {% if not params or (params.order == 'date' and not params.reverse) %}selected{% endif %}>newest first</option>
-        <option value="oldest" {% if params and params.order == 'date' and params.reverse %}selected{% endif %}>oldest first</option>
+        {# raw API-dialect links (order=date&reverse=…) map back onto the
+           form's combined newest/oldest values #}
+        <option value="term" {% if form and form.order == 'term' %}selected{% endif %}>by term</option>
+        <option value="newest" {% if not form or form.order == 'newest' or (form.order == 'date' and not form.reverse) %}selected{% endif %}>newest first</option>
+        <option value="oldest" {% if form and (form.order == 'oldest' or (form.order == 'date' and form.reverse)) %}selected{% endif %}>oldest first</option>
       </select>
     </label>
     <button type="submit">search</button>
   </div>
 </form>
+<script>
+  (() => {
+    const f = document.querySelector("form.search");
+    const sync = () => {
+      const terms = f.elements.scope.value === "terms";
+      // Server-enforced either way; disabling just keeps the form honest:
+      // term histories are always term-ordered, "when" only picks terms.
+      f.elements.order.disabled = terms;
+      f.elements.quantifier.disabled = !terms;
+    };
+    f.elements.scope.addEventListener("change", sync);
+    sync();
+  })();
+</script>
 
 {% if page %}
+{% if params.has %}
+<p class="dim">{{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} (full histories) —
+  {{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
+  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
+{% else %}
 {# counts are the SQL scan's upper bound (paired edits whose delta doesn't
    involve the query render nothing) — shown as a plain scale summary,
    deliberately unqualified #}
 <p class="dim">{{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
   {{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} and
   {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
+{% endif %}
 <div id="results">
   {% include 'partials/search_results.html' %}
 </div>
