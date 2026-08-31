@@ -412,74 +412,6 @@ def diff(
     db.close()
 
 
-def _search_term_sets(
-    db: HistoryDB,
-    style: SourceStyle,
-    has: list[str],
-    *,
-    term: Optional[str],
-    namespace: Optional[str],
-    since: Optional[str],
-    until: Optional[str],
-    ignore_case: bool,
-    full: bool,
-    commits: bool,
-    limit: Optional[int],
-    reverse: bool,
-) -> None:
-    """The ``--has`` pipeline: membership once, then full term histories.
-
-    No delta filter runs in this mode (there is no query to delta-match),
-    so the scope line's counts are exact, not candidates.
-    """
-    with _query_errors():
-        clauses = [parse_has_clause(h) for h in has]
-        filters = SearchFilters(
-            term_id=term,
-            since_seq=db.resolve_bound(since) if since is not None else None,
-            until_seq=(
-                db.resolve_bound(until, end=True) if until is not None else None
-            ),
-            ignore_case=ignore_case,
-            namespace=namespace,
-        )
-        # An invalid clause regex surfaces here, before the stream starts.
-        counts = db.term_set_counts(clauses, filters)
-    if counts.terms == 0:
-        console.print("[yellow]No terms match those clauses[/]")
-        db.close()
-        return
-    console.print(counts_phrase(
-        counts.events, counts.terms, counts.commits,
-        tail=" — full histories of matching terms",
-    ))
-    groups = render.pair_by_term_and_commit(
-        db.iter_term_set_events(clauses, filters, reverse=reverse)
-    )
-    truncated = [False]
-    if limit is not None:
-        groups = render.take_sections(
-            groups, limit, lambda g: g.term_id, truncated
-        )
-    stats = render_paired_groups(groups, style, full=full, show_commits=commits)
-    verb = "Showed" if truncated[0] else "Found"
-    footer = Text("\n")
-    footer.append(f"{verb} {stats.terms}", style="bold")
-    footer.append(" terms (full histories): ", style="dim")
-    footer.append(f"{stats.events}", style="bold")
-    footer.append(" events across ", style="dim")
-    footer.append(f"{stats.commits}", style="bold")
-    footer.append(" commits", style="dim")
-    console.print(footer)
-    if truncated[0]:
-        console.print(Text(
-            f"(limited to {limit} terms; up to {counts.terms} total — "
-            "drop --limit for everything)",
-            style="dim",
-        ))
-    db.close()
-
-
 @app.command()
 def search(
     query: Optional[str] = typer.Argument(
@@ -518,13 +450,14 @@ def search(
     ),
     has: Optional[list[str]] = typer.Option(
         None, "--has",
-        help="Term-set predicate [quantifier:]tag OP value — ~ contains, "
-             "= exact, ~/re/ regex; quantifier ever (default) or now "
-             "(present at HEAD, or as of --until). Repeat to AND. Selects "
-             "terms, then shows each one's FULL history; --since/--until/"
-             "--namespace/--term narrow which terms qualify, never what "
-             "renders. (A substring that itself starts and ends with '/' "
-             "parses as a regex — use = or escape it.)",
+        help="Term-axis predicate [quantifier:]tag OP value — ~ contains, "
+             "= exact, ~/re/ regex; quantifier ever (default, anywhere in "
+             "history) or now (present at HEAD). Repeat to AND. Restricts "
+             "results to terms satisfying every clause; QUERY and the "
+             "other filters pick which of those terms' events show — "
+             "without QUERY, their whole histories. (A substring that "
+             "itself starts and ends with '/' parses as a regex — use = "
+             "or escape it.)",
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
     commits: bool = typer.Option(
@@ -551,36 +484,8 @@ def search(
     """Find commits that added or removed a clause matching QUERY."""
     if regex and exact:
         raise typer.BadParameter("--regex and --exact are mutually exclusive")
-    if has:
-        if query is not None:
-            raise typer.BadParameter(
-                "--has and QUERY are mutually exclusive; write the text as"
-                " a clause, e.g. --has '~diabetes'"
-            )
-        if tag is not None:
-            raise typer.BadParameter(
-                "--has and --tag are mutually exclusive; put the tag in the"
-                " clause, e.g. --has 'xref~DOID'"
-            )
-        if regex or exact:
-            raise typer.BadParameter(
-                "--regex/--exact apply to QUERY; clauses carry their own"
-                " mode (~ contains, = exact, ~/re/ regex)"
-            )
-        if order is SearchOrder.date:
-            raise typer.BadParameter(
-                "--has results are term-ordered; --order date is unsupported"
-            )
     match = "regex" if regex else "exact" if exact else "substring"
     db, style = _open_source(source, config)
-    if has:
-        _search_term_sets(
-            db, style, has,
-            term=term, namespace=namespace, since=since, until=until,
-            ignore_case=ignore_case, full=full, commits=commits,
-            limit=limit, reverse=reverse,
-        )
-        return
     with _query_errors():
         filters = SearchFilters(
             term_id=term, tag=tag,
@@ -589,27 +494,39 @@ def search(
                 db.resolve_bound(until, end=True) if until is not None else None
             ),
             match=match, ignore_case=ignore_case, namespace=namespace,
+            has=tuple(parse_has_clause(h) for h in (has or ())),
         )
-        # An invalid --regex pattern surfaces here, on the first query
-        # that reaches regexp_matches; the later stream reuses the same
-        # pattern, so success here means the stream won't hit it.
+        # An invalid --regex pattern (in QUERY or a clause) surfaces here,
+        # on the first query that reaches regexp_matches; the later stream
+        # reuses the same pattern, so success here means the stream won't
+        # hit it.
         counts = db.search_counts(query, filters)
     if counts.events == 0:
-        if query is None:
-            console.print("[yellow]No events match those filters[/]")
-        else:
+        if query is not None:
             console.print(f'[yellow]No events matching[/] "{query}"')
+        elif has:
+            console.print("[yellow]No events from terms matching those clauses[/]")
+        else:
+            console.print("[yellow]No events match those filters[/]")
         db.close()
         return
-    # Provisional scope, printed before results start streaming. These are
-    # SQL-level candidate counts — an upper bound on what survives the
-    # clause-aware delta filter; the exact totals land in the footer.
-    scope = Text("Scanning ", style="dim")
-    scope.append_text(counts_phrase(
-        counts.events, counts.terms, counts.commits,
-        noun="candidate events", tail=" …",
-    ))
-    console.print(scope)
+    if query is None:
+        # No delta filter will run, so these counts are exact.
+        console.print(counts_phrase(
+            counts.events, counts.terms, counts.commits,
+            tail=" — full histories of matching terms" if has else "",
+        ))
+    else:
+        # Provisional scope, printed before results start streaming. These
+        # are SQL-level candidate counts — an upper bound on what survives
+        # the clause-aware delta filter; the exact totals land in the
+        # footer.
+        scope = Text("Scanning ", style="dim")
+        scope.append_text(counts_phrase(
+            counts.events, counts.terms, counts.commits,
+            noun="candidate events", tail=" …",
+        ))
+        console.print(scope)
     groups = render.pair_by_term_and_commit(
         db.iter_search_events(query, filters, order=order.value, reverse=reverse),
         order=order.value,
