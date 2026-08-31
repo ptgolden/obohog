@@ -44,6 +44,10 @@
     </label>
     <label>term <input name="term" size="14"
       value="{{ params.term or '' if params else '' }}"></label>
+    <label>from <input type="date" name="since"
+      value="{{ params.since or '' if params else '' }}"></label>
+    <label>to <input type="date" name="until"
+      value="{{ params.until or '' if params else '' }}"></label>
     <label>order
       <select name="order">
         <option value="term" {% if params and params.order == 'term' %}selected{% endif %}>by term</option>

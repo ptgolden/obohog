@@ -461,3 +461,18 @@ def test_registry_facets_cached_until_artifact_changes(
     os.utime(meta, ns=(st.st_atime_ns, st.st_mtime_ns + 1))
     assert registry.facets("onto") is not f1  # stat change → recomputed
     registry.close()
+
+
+def test_search_date_range(client):
+    # fixture commits land one per day, 2021-01-01..04
+    body = client.get(
+        "/api/v1/sources/onto/search"
+        "?q=SHARED&since=2021-01-02&until=2021-01-03"
+    ).json()
+    assert body["counts"]["commits"] == 2
+
+
+def test_search_form_has_date_inputs(client):
+    html = client.get("/onto/search").text
+    assert 'type="date" name="since"' in html
+    assert 'type="date" name="until"' in html

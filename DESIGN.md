@@ -380,7 +380,8 @@ data/                         # gitignored per-source working state
 - `cli` — typer commands only: `source sync` (with `--jobs`), `term` (with
   `--limit`, `--since`, `--full`, `--only`, `--at` accepting sha/tag/seq),
   `commit`, `pr`, `diff`, `search` (with `--exact`, `--regex`, `--ignore-case`,
-  `--namespace`, `--tag`), `releases`. All query commands are scoped
+  `--namespace`, `--tag`, and `--since`/`--until` taking a ref or a
+  `YYYY-MM-DD` date), `releases`. All query commands are scoped
   by `--source`.
 - `views` — the console presentation layer: the process console (with a
   fast plain-text path for pipes), per-source `SourceStyle` knobs threaded

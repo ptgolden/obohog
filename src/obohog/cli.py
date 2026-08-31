@@ -299,7 +299,9 @@ def term(
         None, help="Show only the most recent N commits' events."
     ),
     since: Optional[str] = typer.Option(
-        None, help="Show only events at/after this ref (short sha, tag, or commit_seq)."
+        None,
+        help="Show only events at/after this ref (short sha, tag, "
+             "commit_seq) or YYYY-MM-DD date.",
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
     commits: bool = typer.Option(
@@ -317,7 +319,7 @@ def term(
         header = db.term_header(term_id)
         changes = db.term_timeline(term_id, tag=only)
         with _query_errors():
-            since_seq = db.resolve_ref(since) if since is not None else None
+            since_seq = db.resolve_bound(since) if since is not None else None
         render_timeline(
             term_id, header, changes, style,
             limit=limit, since_seq=since_seq, full=full, show_commits=commits,
@@ -424,7 +426,14 @@ def search(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     since: Optional[str] = typer.Option(
-        None, help="Show events at/after this ref (short sha, tag, or commit_seq)."
+        None,
+        help="Show events at/after this ref (short sha, tag, commit_seq) "
+             "or YYYY-MM-DD date.",
+    ),
+    until: Optional[str] = typer.Option(
+        None,
+        help="Show events at/before this ref or YYYY-MM-DD date "
+             "(inclusive; with --since, both ends inclusive).",
     ),
     regex: bool = typer.Option(False, "--regex", help="Treat QUERY as a regular expression."),
     exact: bool = typer.Option(
@@ -463,9 +472,12 @@ def search(
     match = "regex" if regex else "exact" if exact else "substring"
     db, style = _open_source(source, config)
     with _query_errors():
-        since_seq = db.resolve_ref(since) if since is not None else None
         filters = SearchFilters(
-            term_id=term, tag=tag, since_seq=since_seq,
+            term_id=term, tag=tag,
+            since_seq=db.resolve_bound(since) if since is not None else None,
+            until_seq=(
+                db.resolve_bound(until, end=True) if until is not None else None
+            ),
             match=match, ignore_case=ignore_case, namespace=namespace,
         )
         # An invalid --regex pattern surfaces here, on the first query

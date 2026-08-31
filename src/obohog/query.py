@@ -5,6 +5,7 @@ they all answer from the same Parquet files. DuckDB reads the Parquet lazily and
 can point at local paths or HTTP URLs, so a hosted artifact needs no server.
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, NamedTuple
@@ -13,6 +14,9 @@ import duckdb
 
 from . import model
 from .obo import ParsedValue
+
+
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 class EventCounts(NamedTuple):
@@ -64,6 +68,7 @@ class SearchFilters:
     term_id: str | None = None
     tag: str | None = None
     since_seq: int | None = None
+    until_seq: int | None = None
     match: str = "substring"  # "substring" | "exact" | "regex"
     ignore_case: bool = False
     namespace: str | None = None
@@ -410,6 +415,37 @@ class HistoryDB:
             )
         return row[0]
 
+    def resolve_bound(self, ref: str, *, end: bool = False) -> int:
+        """Resolve a ref *or* a ``YYYY-MM-DD`` date to a commit_seq bound.
+
+        Non-dates go through :meth:`resolve_ref` unchanged. A date is
+        direction-aware: as a start bound it resolves to the first commit
+        on or after that day, as an end bound (``end=True``) to the last
+        commit on or before the end of it — so ``since=2025-03-01`` with
+        ``until=2025-03-31`` means "during March 2025", both ends
+        inclusive. A date beyond the history's edge resolves to a
+        sentinel seq that matches nothing in that direction. (A release
+        tag that happens to look like a date wins — same commit either
+        way in practice.)
+        """
+        if not _DATE_RE.fullmatch(ref):
+            return self.resolve_ref(ref)
+        if self._has_releases():
+            row = self.con.execute(
+                "SELECT commit_seq FROM releases WHERE tag = ?", [ref]
+            ).fetchone()
+            if row is not None:
+                return row[0]
+        agg, cmp = ("max", "<=") if end else ("min", ">=")
+        row = self.con.execute(
+            f"SELECT {agg}(commit_seq) FROM commits"
+            f" WHERE CAST(committed_date AS DATE) {cmp} CAST(? AS DATE)",
+            [ref],
+        ).fetchone()
+        if row[0] is None:
+            return -1 if end else self.resolve_ref("HEAD") + 1
+        return row[0]
+
     def _range_where(
         self, ref_a: str, ref_b: str, f: RangeFilters
     ) -> tuple[str, list[object]]:
@@ -447,9 +483,10 @@ class HistoryDB:
 
         Optional narrowings (all AND'd together): ``term_id`` restricts to
         one term, ``tag`` restricts to one clause kind (``xref``,
-        ``is_a``, ...), ``since_seq`` cuts off commits older than the
-        supplied ``commit_seq`` (resolve external refs via
-        :meth:`resolve_ref` in the caller), ``namespace`` restricts to
+        ``is_a``, ...), ``since_seq``/``until_seq`` cut off commits
+        outside ``[since_seq, until_seq]`` (resolve external refs or
+        dates via :meth:`resolve_bound` in the caller), ``namespace``
+        restricts to
         term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
         """
         if query is None:
@@ -479,6 +516,9 @@ class HistoryDB:
         if f.since_seq is not None:
             where += " AND e.commit_seq >= ?"
             params.append(f.since_seq)
+        if f.until_seq is not None:
+            where += " AND e.commit_seq <= ?"
+            params.append(f.until_seq)
         if f.namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
             params.append(f.namespace)

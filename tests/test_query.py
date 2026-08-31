@@ -146,3 +146,23 @@ def test_facets_lists_distinct_values_alphabetically(db):
     tags, namespaces = db.facets()
     assert tags == ["name", "xref"]
     assert namespaces == ["MONDO"]
+
+
+def test_resolve_bound_dates(db):
+    # paged fixture: four commits, one per day 2021-01-01..04, seqs 0..3
+    assert db.resolve_bound("2021-01-02") == 1
+    assert db.resolve_bound("2021-01-02", end=True) == 1
+    assert db.resolve_bound("2020-06-01") == 0  # before history: first commit
+    assert db.resolve_bound("2020-06-01", end=True) == -1  # matches nothing
+    assert db.resolve_bound("2022-01-01") == db.resolve_ref("HEAD") + 1
+    assert db.resolve_bound("2022-01-01", end=True) == 3
+    assert db.resolve_bound("HEAD") == 3  # non-dates still resolve as refs
+
+
+def test_search_since_until_seq_window(db):
+    rows = list(
+        db.iter_search_events(
+            "SHARED", SearchFilters(since_seq=1, until_seq=2)
+        )
+    )
+    assert {tc.change.commit_seq for tc in rows} == {1, 2}

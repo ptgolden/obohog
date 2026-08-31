@@ -208,7 +208,9 @@ class SearchParams(BaseModel):
 
     ``q`` is optional like every other filter: absent means no text
     constraint, so a request carrying only narrowings (tag, namespace,
-    term, since) browses everything under them.
+    term, since/until) browses everything under them. ``since`` and
+    ``until`` take a ref (sha, release tag, seq, HEAD) or a
+    ``YYYY-MM-DD`` date, both ends inclusive.
     """
 
     q: str | None = None
@@ -216,6 +218,7 @@ class SearchParams(BaseModel):
     tag: str | None = None
     namespace: str | None = None
     since: str | None = None
+    until: str | None = None
     match: Literal["substring", "exact", "regex"] = "substring"
     ignore_case: bool = False
     order: Literal["term", "date"] = "term"
@@ -225,7 +228,7 @@ class SearchParams(BaseModel):
     full: bool = False
 
     @field_validator(
-        "q", "term", "tag", "namespace", "since", "after", mode="before"
+        "q", "term", "tag", "namespace", "since", "until", "after", mode="before"
     )
     @classmethod
     def _blank_is_absent(cls, value):
@@ -439,7 +442,7 @@ def get_timeline(
     header = db.term_header(term_id)
     total = len(changes)
     if since is not None:
-        since_seq = db.resolve_ref(since)
+        since_seq = db.resolve_bound(since)
         changes = [c for c in changes if c.commit_seq >= since_seq]
     if limit is not None:
         seqs = sorted({c.commit_seq for c in changes})
@@ -501,11 +504,13 @@ def search(
     the SQL candidates — an upper bound (``approximate=True``) when a
     query ran the delta filter, exact when browsing without one.
     """
-    since_seq = db.resolve_ref(params.since) if params.since else None
     filters = SearchFilters(
         term_id=params.term,
         tag=params.tag,
-        since_seq=since_seq,
+        since_seq=db.resolve_bound(params.since) if params.since else None,
+        until_seq=(
+            db.resolve_bound(params.until, end=True) if params.until else None
+        ),
         match=params.match,
         ignore_case=params.ignore_case,
         namespace=params.namespace,

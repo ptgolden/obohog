@@ -114,6 +114,10 @@ uv run obohog search   --source mondo "Huntington disease" --tag name --exact
 uv run obohog search   --source mondo "CML" --namespace MONDO
 uv run obohog search   --source mondo "MONDO:MalaCards" --term MONDO:0012350
 
+# --since/--until take a ref (sha, tag, seq, HEAD) or a date, both ends
+# inclusive: definition changes during March 2025.
+uv run obohog search   --source mondo --tag def --since 2025-03-01 --until 2025-03-31
+
 # git-log style: the 10 most recent commits that touched an NCIT xref,
 # newest first (--reverse for oldest first).
 uv run obohog search   --source mondo "NCIT" --order date --limit 10
