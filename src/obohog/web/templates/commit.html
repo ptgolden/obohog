@@ -6,7 +6,7 @@
 <h1>{{ 'Version' if view.commit.hide_sha else 'Commit' }}</h1>
 {{ m.commit_header(view.commit, src) }}
 {% if view.commit.raw_subject %}<p class="dim raw-subject">{{ view.commit.raw_subject }}</p>{% endif %}
-<p class="dim">{{ view.terms | length }} terms changed</p>
+<p class="dim">{{ "{:,}".format(view.terms | length) }} term{{ 's' if view.terms | length != 1 }} changed</p>
 {% for t in view.terms %}
 <section class="term-section">
   <h3>{{ m.term_link(src, t.term_id) }}{% if t.name %} <span class="name">— {{ t.name }}</span>{% endif %}

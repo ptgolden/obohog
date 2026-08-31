@@ -9,10 +9,10 @@
 {% if timeline.header %}
 <p class="dim">
   {% if timeline.shown_events != timeline.total_events -%}
-  showing {{ timeline.shown_events }} of {{ timeline.total_events }} events
+  showing {{ "{:,}".format(timeline.shown_events) }} of {{ "{:,}".format(timeline.total_events) }} events
   {%- else -%}
-  {{ timeline.total_events }} event{{ 's' if timeline.total_events != 1 }}
-  {%- endif %} across {{ timeline.commits | length }} {{ commit_noun }}{{ 's' if timeline.commits | length != 1 }}
+  {{ "{:,}".format(timeline.total_events) }} event{{ 's' if timeline.total_events != 1 }}
+  {%- endif %} across {{ "{:,}".format(timeline.commits | length) }} {{ commit_noun }}{{ 's' if timeline.commits | length != 1 }}
   · first {{ timeline.header.first_date | dateonly }}
   · last {{ timeline.header.last_date | dateonly }}
 </p>

@@ -59,9 +59,9 @@
 {# counts are the SQL scan's upper bound (paired edits whose delta doesn't
    involve the query render nothing) — shown as a plain scale summary,
    deliberately unqualified #}
-<p class="dim">{{ page.counts.events }} event{{ 's' if page.counts.events != 1 }} across
-  {{ page.counts.terms }} term{{ 's' if page.counts.terms != 1 }} and
-  {{ page.counts.commits }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
+<p class="dim">{{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
+  {{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} and
+  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
 <div id="results">
   {% include 'partials/search_results.html' %}
 </div>

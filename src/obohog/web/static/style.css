@@ -12,6 +12,7 @@
   --del-bg: #ffebe9;
   --edit: #9a6700;
   --accent: #0969da;
+  --band: #f4f5f7;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -25,6 +26,7 @@
     --del-bg: #2d1a1c;
     --edit: #c69026;
     --accent: #539bf5;
+    --band: #1c1f26;
   }
 }
 
@@ -145,25 +147,31 @@ section h3 .state-link, section h4 .state-link {
 }
 .term-state .state-disclaimer { font-size: 0.8rem; margin: 0; }
 
-/* Sections — one per term (term order) or per commit (date order),
-   separated by hairline rules so groups read at a glance. */
+/* Sections — one per term (term order) or per commit (date order).
+   Commit sections open with the header band below, which delimits them
+   on its own; term sections open with an h3, so they get a rule. */
 section.term-section, section.commit-section {
   margin: 0;
-  padding: 0.9rem 0 0.4rem;
+  padding: 0.6rem 0 0.4rem;
 }
-section.term-section + section.term-section,
-section.commit-section + section.commit-section {
+section.term-section + section.term-section {
   border-top: 1px solid var(--line);
 }
 section.term-section > :first-child,
 section.commit-section > :first-child { margin-top: 0; }
 section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
 
+/* The commit/version header is a tinted band — the visual anchor that
+   marks where one change set ends and the next begins. */
 .commit-header {
-  margin: 0.9rem 0 0.15rem;
+  margin: 0.9rem 0 0.4rem;
+  padding: 0.3rem 0.6rem;
+  background: var(--band);
+  border-radius: 6px;
   color: var(--dim);
   font-size: 0.85rem;
 }
+.commit-header .state-link { float: right; margin-left: 1ch; }
 .commit-header .sha { font-family: ui-monospace, monospace; }
 /* Synthetic-history identifier: the date-as-version chip, visibly not a
    git sha. */
