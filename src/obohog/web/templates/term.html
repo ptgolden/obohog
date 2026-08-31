@@ -17,9 +17,9 @@
   · last {{ timeline.header.last_date | dateonly }}
 </p>
 {% endif %}
-{% if timeline.by_predicate %}
-<p class="dim">by predicate:
-  {% for pred, n in timeline.by_predicate.items() %}{{ pred }} {{ n }}{{ ", " if not loop.last }}{% endfor %}
+{% if timeline.by_tag %}
+<p class="dim">by tag:
+  {% for t, n in timeline.by_tag.items() %}{{ t }} {{ n }}{{ ", " if not loop.last }}{% endfor %}
 </p>
 {% endif %}
 

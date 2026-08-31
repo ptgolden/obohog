@@ -46,7 +46,7 @@ Chosen stack:
   (change detected by content-hashing each normalized term frame). Reconstructing
   "state of `MONDO:x` at commit `c`" = the latest snapshot with `commit_seq <= seq(c)`.
 - **Change events**, materialized by diffing adjacent snapshots of the same term:
-  `(term_id, commit_seq, predicate, value, operation)` where operation ∈ {add, remove}.
+  `(term_id, commit_seq, tag, value, operation)` where operation ∈ {add, remove}.
   A synonym text edit is naturally a remove+add of that clause. This table is the
   queryable spine for "when did X change".
 - Snapshots are the source of truth; events are a convenience view over them.
@@ -121,6 +121,12 @@ Chosen stack:
   recomposes to `value` byte-for-byte) and lets query/render work without
   running fastobo at all. Semantic events (term_created / term_obsoleted /
   term_merged) are just filtered views over this table.
+
+  Naming: the stored `predicate` columns (here and in `clauses`) predate a
+  vocabulary cleanup — everywhere above the storage layer (code, CLI, API, UI)
+  this field is called **tag**, matching OBO-format terminology (this is not
+  RDF). The column rename itself is deferred to the next schema bump so a pure
+  rename never forces a re-sync.
 - **`build_meta`** — schema version, generator version, source repo URL, source
   sha range (first/last `commit_seq`), obo path. Makes results deterministic and
   reproducible; supports incremental rebuilds.
@@ -158,7 +164,7 @@ if needed.
 
 **Robustness stance:** correctness comes from *types and libraries*, not defensive
 code. Model snapshots/events/operations as typed dataclasses (or Pydantic/attrs) and
-a small enum for `operation`/`predicate`; let fastobo, pyarrow, and DuckDB enforce
+a small enum for `operation`/`tag`; let fastobo, pyarrow, and DuckDB enforce
 their own invariants and raise on violation. Avoid speculative edge-case handling.
 
 ---
@@ -374,7 +380,7 @@ data/                         # gitignored per-source working state
 - `cli` — typer commands only: `source sync` (with `--jobs`), `term` (with
   `--limit`, `--since`, `--full`, `--only`, `--at` accepting sha/tag/seq),
   `commit`, `pr`, `diff`, `search` (with `--regex`, `--ignore-case`,
-  `--namespace`, `--predicate`), `releases`. All query commands are scoped
+  `--namespace`, `--tag`), `releases`. All query commands are scoped
   by `--source`.
 - `views` — the console presentation layer: the process console (with a
   fast plain-text path for pipes), per-source `SourceStyle` knobs threaded
@@ -384,7 +390,7 @@ data/                         # gitignored per-source working state
 - `render` — the console-free presentation *pipeline* (group by (term,
   commit), pair, delta-filter, limit — the spine an HTTP API would page
   over) plus the **structure-aware term timeline**: paired remove/add events on the
-  same predicate render as `~` word-diff edits rather than two adjacent lines.
+  same tag render as `~` word-diff edits rather than two adjacent lines.
   Pairing is two-pass — parsed-body identity first (fastobo-parsed), then greedy
   lexical similarity — so a same-target clause whose qualifiers were reordered
   can't cross-pair with a different-target clause whose qualifier text happens
@@ -433,7 +439,7 @@ single-threaded build (checksum match on a 12-commit slice).
 3. **N-to-M pairing** — detect commits like `1ac4db2^` (two same-target xrefs
    collapsed into one with a merged qualifier list). Now tractable given the
    fastobo-parsed body + qualifier sets; the missing piece is grouping
-   events by body within a predicate bucket before pairing.
+   events by body within a tag bucket before pairing.
 4. **Non-OBO serializations** — OFN, RDF/XML, Turtle. Would require
    abstracting the per-commit stanza scan and per-term parse behind a
    format strategy interface; today's diff-scoped parse depends on OBO's

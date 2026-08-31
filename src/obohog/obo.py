@@ -1,7 +1,7 @@
 """Parse an OBO document into normalized, hashable per-term state.
 
 Normalization leans entirely on fastobo: every clause serializes to its canonical
-OBO line (``predicate: value``) via ``str(clause)``, so we never hand-maintain a
+OBO line (``tag: value``) via ``str(clause)``, so we never hand-maintain a
 mapping of clause classes. A term's state is the *set* of those clauses plus a
 content hash, which is what lets the extractor detect "did this term change?"
 cheaply and diff two versions clause-by-clause.
@@ -41,16 +41,16 @@ class ParsedValue:
 class Clause:
     """One canonical OBO clause of a term, split into tag and remainder.
 
-    ``predicate`` is the OBO tag (``name``, ``synonym``, ``xref``, ``is_a``,
+    ``tag`` is the OBO tag (``name``, ``synonym``, ``xref``, ``is_a``,
     ``relationship``, ``subset``, ``def``, ``is_obsolete``, ``replaced_by``, ...);
     ``value`` is the rest of the serialized line. ``parsed`` is ``value``'s
     structural decomposition, captured from the live fastobo clause object at
-    parse time. It is a pure function of ``(predicate, value)``, so ordering
+    parse time. It is a pure function of ``(tag, value)``, so ordering
     and equality are still decided by those two fields alone — comparisons
     never reach ``parsed`` with unequal values.
     """
 
-    predicate: str
+    tag: str
     value: str
     parsed: ParsedValue
 
@@ -68,8 +68,8 @@ def clauses_of(frame: fastobo.term.TermFrame) -> tuple[Clause, ...]:
     """Canonical, order-independent clause set for a term frame."""
     out = []
     for clause in frame:
-        predicate, _, value = str(clause).partition(": ")
-        out.append(Clause(predicate, value, decompose_clause(clause, value)))
+        tag, _, value = str(clause).partition(": ")
+        out.append(Clause(tag, value, decompose_clause(clause, value)))
     return tuple(sorted(out))
 
 
@@ -111,7 +111,7 @@ def decompose_clause(clause, value: str) -> ParsedValue:
 def hash_clauses(clauses: tuple[Clause, ...]) -> str:
     h = hashlib.sha1()
     for clause in clauses:
-        h.update(clause.predicate.encode())
+        h.update(clause.tag.encode())
         h.update(b"\x00")
         h.update(clause.value.encode())
         h.update(b"\x00")

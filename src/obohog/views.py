@@ -277,7 +277,7 @@ def _render_header(
     since_seq: int | None,
     style: SourceStyle,
 ) -> None:
-    """Print the orientation header: name, span, and predicate counts."""
+    """Print the orientation header: name, span, and tag counts."""
     title = Text()
     title.append(term_id, style="bold cyan")
     if header is not None and header.current_name:
@@ -323,9 +323,9 @@ def _render_header(
             span.append(")", style="dim")
         console.print(span)
 
-    counts = Counter(c.predicate for c in changes)
+    counts = Counter(c.tag for c in changes)
     if counts:
-        by_pred = Text("by predicate: ", style="dim")
+        by_pred = Text("by tag: ", style="dim")
         parts = [f"{p} {n}" for p, n in counts.most_common()]
         by_pred.append(", ".join(parts), style="dim")
         console.print(by_pred)
@@ -451,8 +451,8 @@ def render_state(term_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
         return
     console.print(f"[bold cyan]{term_id}[/] as of {at}:")
     console.print(Text(f"  id: {term_id}"))
-    for predicate, value in clauses:
-        console.print(Text(f"  {predicate}: {value}"))
+    for tag, value in clauses:
+        console.print(Text(f"  {tag}: {value}"))
 
 
 def _date(value: object) -> str:

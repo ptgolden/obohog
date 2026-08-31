@@ -18,7 +18,7 @@
     any template newline or indent inside it would render literally. -#}
 {%- macro op(o) -%}
 <div class="op op-{{ o.kind }}">
-<div class="line"><span class="marker">{{ {'add': '+', 'remove': '-', 'edit': '~'}[o.kind] }}</span><span class="text"><span class="pred">{{ o.predicate }}:</span> {{ spans(o.head) }}</span></div>
+<div class="line"><span class="marker">{{ {'add': '+', 'remove': '-', 'edit': '~'}[o.kind] }}</span><span class="text"><span class="tag">{{ o.tag }}:</span> {{ spans(o.head) }}</span></div>
 {%- for ql in o.quals %}
 <div class="line qual qual-{{ ql.kind }}"><span class="marker">{{ {'del': '-', 'ins': '+', 'edit': '~', 'context': ''}[ql.kind] }}</span><span class="text">{{ spans(ql.spans) }}</span></div>
 {%- endfor %}

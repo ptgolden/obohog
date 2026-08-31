@@ -27,7 +27,7 @@ from obohog.render import (
 _STANZA_TEMPLATE = "format-version: 1.2\n\n[Term]\nid: TMP:0000001\n{tag}: {value}\n"
 
 
-def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
+def parse_clause_value(tag: str, value: str) -> ParsedValue | None:
     """Parse one OBO clause value via fastobo, as the extractor would.
 
     Test-only convenience: production Changes carry their decomposition
@@ -36,7 +36,7 @@ def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
     :func:`obohog.obo.decompose_clause`. Returns ``None`` when fastobo
     can't parse the line (the malformed-historical-clause case).
     """
-    stanza = _STANZA_TEMPLATE.format(tag=predicate, value=value)
+    stanza = _STANZA_TEMPLATE.format(tag=tag, value=value)
     try:
         doc = fastobo.loads(stanza, threads=1)
     except (KeyboardInterrupt, SystemExit):
@@ -54,7 +54,7 @@ def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
     return None
 
 
-def _change(op: str, predicate: str, value: str, seq: int = 1) -> Change:
+def _change(op: str, tag: str, value: str, seq: int = 1) -> Change:
     # Decompose via the same peel the extractor uses, so hand-built Changes
     # look like artifact rows. parse_clause_value returns None for values
     # fastobo can't parse, matching the (test-only) unparseable case.
@@ -66,9 +66,9 @@ def _change(op: str, predicate: str, value: str, seq: int = 1) -> Change:
         pr_number=None,
         message="msg",
         operation=op,
-        predicate=predicate,
+        tag=tag,
         value=value,
-        parsed=parse_clause_value(predicate, value),
+        parsed=parse_clause_value(tag, value),
     )
 
 
@@ -165,7 +165,7 @@ def test_pair_events_case_flip():
 
 
 def test_pair_events_multiple_pair_best_match():
-    # Four adds + four removes on the same predicate: greedy best-first pairs
+    # Four adds + four removes on the same tag: greedy best-first pairs
     # each add with its closest remove.
     changes = [
         _change("remove", "synonym", '"Cfh Deficiency" [OMIM]'),
@@ -197,9 +197,9 @@ def test_pair_events_unrelated_stays_split():
     assert sorted(type(o).__name__ for o in ops) == ["Add", "Remove"]
 
 
-def test_pair_events_scoped_to_predicate():
+def test_pair_events_scoped_to_tag():
     # An add and remove that would pair by content-similarity are NOT paired
-    # if their predicates differ.
+    # if their tags differ.
     changes = [
         _change("add", "synonym", '"foo"'),
         _change("remove", "xref", '"foo"'),
@@ -452,11 +452,11 @@ def test_full_disables_truncate():
 # difference) contains the query. Kept-unchanged qualifiers do not count.
 
 
-def _edit(before_val: str, after_val: str, predicate: str = "is_a") -> Edit:
+def _edit(before_val: str, after_val: str, tag: str = "is_a") -> Edit:
     return Edit(
-        predicate=predicate,
-        before=_change("remove", predicate, before_val),
-        after=_change("add", predicate, after_val),
+        tag=tag,
+        before=_change("remove", tag, before_val),
+        after=_change("add", tag, after_val),
     )
 
 

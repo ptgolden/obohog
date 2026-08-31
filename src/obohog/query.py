@@ -62,7 +62,7 @@ class SearchFilters:
     """
 
     term_id: str | None = None
-    predicate: str | None = None
+    tag: str | None = None
     since_seq: int | None = None
     regex: bool = False
     ignore_case: bool = False
@@ -139,7 +139,7 @@ class Change:
     pr_number: int | None
     message: str
     operation: str
-    predicate: str
+    tag: str
     value: str
     branch_commits: tuple[BranchCommit, ...] = ()
     snapshot_url: str | None = None
@@ -224,13 +224,13 @@ class HistoryDB:
         single = self.dir / f"{name}.parquet"
         return str(single) if single.exists() else None
 
-    def term_timeline(self, term_id: str, predicate: str | None = None) -> list[Change]:
+    def term_timeline(self, term_id: str, tag: str | None = None) -> list[Change]:
         """All changes to a term, oldest first, optionally one clause kind only."""
         where = "e.term_id = ?"
         params: list[object] = [term_id]
-        if predicate is not None:
+        if tag is not None:
             where += " AND e.predicate = ?"
-            params.append(predicate)
+            params.append(tag)
         rows = self.con.execute(
             f"""
             SELECT {_CHANGE_COLUMNS}
@@ -424,7 +424,7 @@ class HistoryDB:
           both sides for substring, via the ``'i'`` option flag for regex.
 
         Optional narrowings (all AND'd together): ``term_id`` restricts to
-        one term, ``predicate`` restricts to one clause kind (``xref``,
+        one term, ``tag`` restricts to one clause kind (``xref``,
         ``is_a``, ...), ``since_seq`` cuts off commits older than the
         supplied ``commit_seq`` (resolve external refs via
         :meth:`resolve_ref` in the caller), ``namespace`` restricts to
@@ -444,9 +444,9 @@ class HistoryDB:
         if f.term_id is not None:
             where += " AND e.term_id = ?"
             params.append(f.term_id)
-        if f.predicate is not None:
+        if f.tag is not None:
             where += " AND e.predicate = ?"
-            params.append(f.predicate)
+            params.append(f.tag)
         if f.since_seq is not None:
             where += " AND e.commit_seq >= ?"
             params.append(f.since_seq)
@@ -621,7 +621,7 @@ class HistoryDB:
         return self._count_events(*self._search_where(query, filters))
 
     def facets(self) -> tuple[list[str], list[str]]:
-        """Distinct ``(predicates, namespaces)`` present in the events.
+        """Distinct ``(tags, namespaces)`` present in the events.
 
         Both are low-cardinality (a dozen-odd values even on millions of
         events) and ordered most-frequent first, so filter UIs can offer
@@ -629,7 +629,7 @@ class HistoryDB:
         CURIE prefix of ``term_id``, matching the ``namespace`` filters'
         ``starts_with(term_id, ns || ':')`` semantics.
         """
-        predicates = [
+        tags = [
             row[0]
             for row in self.con.execute(
                 "SELECT predicate FROM events"
@@ -643,7 +643,7 @@ class HistoryDB:
                 " GROUP BY ns ORDER BY count(*) DESC, ns"
             ).fetchall()
         ]
-        return predicates, namespaces
+        return tags, namespaces
 
     def releases(self) -> list[tuple[str, int, object]]:
         if not self._has_releases():

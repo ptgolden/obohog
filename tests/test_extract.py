@@ -125,12 +125,12 @@ def test_build_matches_naive_full_parse_oracle(obo_repo: Path, tmp_path: Path):
                 added, removed = clause_delta(
                     before.clauses if before else (), term.clauses
                 )
-                events += [(term_id, v.commit.seq, "add", c.predicate, c.value)
+                events += [(term_id, v.commit.seq, "add", c.tag, c.value)
                            for c in added]
-                events += [(term_id, v.commit.seq, "remove", c.predicate, c.value)
+                events += [(term_id, v.commit.seq, "remove", c.tag, c.value)
                            for c in removed]
             for term_id in prev.keys() - current.keys():
-                events += [(term_id, v.commit.seq, "remove", c.predicate, c.value)
+                events += [(term_id, v.commit.seq, "remove", c.tag, c.value)
                            for c in prev[term_id].clauses]
             prev = current
 
@@ -295,7 +295,7 @@ def test_absent_build_meta_raises_schema_mismatch(artifact: Path):
 
 def test_term_events_are_clause_deltas(artifact: Path):
     db = HistoryDB(artifact)
-    kinds = [(c.operation, c.predicate) for c in db.term_timeline("MONDO:0000001")]
+    kinds = [(c.operation, c.tag) for c in db.term_timeline("MONDO:0000001")]
     db.close()
 
     # name added at c0 (birth of the term — ∅ → full clause set is a valid
@@ -326,7 +326,7 @@ def test_reconstruct_state_at_commit(artifact: Path):
 def test_new_term_appears_as_creation(artifact: Path):
     db = HistoryDB(artifact)
     # MONDO:0000002 is created at c4 with just a name.
-    changes = [(c.operation, c.predicate) for c in db.term_timeline("MONDO:0000002")]
+    changes = [(c.operation, c.tag) for c in db.term_timeline("MONDO:0000002")]
     before = db.term_at("MONDO:0000002", 0)
     after = dict(db.term_at("MONDO:0000002", 4))
     db.close()
@@ -426,7 +426,7 @@ def test_diff_between_release_and_head(artifact: Path):
     rows = db.range_events("v1.0", "4")
     db.close()
     assert [
-        (r.term_id, r.change.operation, r.change.predicate) for r in rows
+        (r.term_id, r.change.operation, r.change.tag) for r in rows
     ] == [("MONDO:0000002", "add", "name")]
 
 
@@ -482,7 +482,7 @@ def test_search_events_finds_substring(artifact: Path):
     assert len(events) == 1
     assert events[0].term_id == "MONDO:0000001"
     assert events[0].change.operation == "add"
-    assert events[0].change.predicate == "synonym"
+    assert events[0].change.tag == "synonym"
     assert "illness" in events[0].change.value
 
 
@@ -492,14 +492,14 @@ def test_search_events_empty_when_no_match(artifact: Path):
     db.close()
 
 
-def test_search_events_predicate_filter_narrows(artifact: Path):
-    # DOID:4 was added as an xref on c3. Filtering by predicate=xref keeps it;
-    # filtering by predicate=synonym drops it even though it's the same needle.
+def test_search_events_tag_filter_narrows(artifact: Path):
+    # DOID:4 was added as an xref on c3. Filtering by tag=xref keeps it;
+    # filtering by tag=synonym drops it even though it's the same needle.
     db = HistoryDB(artifact)
-    xrefs = db.search_events("DOID:4", SearchFilters(predicate="xref"))
-    synonyms = db.search_events("DOID:4", SearchFilters(predicate="synonym"))
+    xrefs = db.search_events("DOID:4", SearchFilters(tag="xref"))
+    synonyms = db.search_events("DOID:4", SearchFilters(tag="synonym"))
     db.close()
-    assert len(xrefs) == 1 and xrefs[0].change.predicate == "xref"
+    assert len(xrefs) == 1 and xrefs[0].change.tag == "xref"
     assert synonyms == []
 
 
@@ -514,7 +514,7 @@ def test_search_events_term_filter_narrows(artifact: Path):
     db.close()
     assert len(hits) == 1
     assert hits[0].term_id == "MONDO:0000002"
-    assert hits[0].change.predicate == "name"
+    assert hits[0].change.tag == "name"
     assert off_term == []
 
 
@@ -538,7 +538,7 @@ def test_search_events_ignore_case_substring(artifact: Path):
     db.close()
     assert sensitive == []
     assert len(insensitive) == 1
-    assert insensitive[0].change.predicate == "synonym"
+    assert insensitive[0].change.tag == "synonym"
 
 
 def test_search_events_regex_matches(artifact: Path):
@@ -548,7 +548,7 @@ def test_search_events_regex_matches(artifact: Path):
     omim_hits = db.search_events(r"^OMIM:\d+$", SearchFilters(regex=True))
     db.close()
     assert len(doid_hits) == 1
-    assert doid_hits[0].change.predicate == "xref"
+    assert doid_hits[0].change.tag == "xref"
     assert doid_hits[0].change.value == "DOID:4"
     assert omim_hits == []
 

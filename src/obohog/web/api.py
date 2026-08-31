@@ -51,7 +51,7 @@ def releases(handle: Handle) -> list[service.ReleaseOut]:
 
 @router.get("/sources/{src}/facets")
 def facets(src: str, request: Request) -> service.FacetsOut:
-    """Distinct predicate/namespace values in the source, for filter UIs."""
+    """Distinct tag/namespace values in the source, for filter UIs."""
     return request.app.state.registry.facets(src)
 
 
@@ -59,7 +59,7 @@ def facets(src: str, request: Request) -> service.FacetsOut:
 def term_timeline(
     handle: Handle,
     term_id: str,
-    predicate: str | None = None,
+    tag: str | None = None,
     since: str | None = None,
     limit: int | None = Query(None, ge=1),
     full: bool = False,
@@ -69,7 +69,7 @@ def term_timeline(
     return _or_404(
         service.get_timeline(
             db, style, term_id,
-            predicate=predicate, since=since, limit=limit, full=full,
+            tag=tag, since=since, limit=limit, full=full,
         ),
         f"no history for {term_id!r}",
     )

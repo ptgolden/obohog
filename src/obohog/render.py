@@ -3,7 +3,7 @@
 The events table is authoritative — nothing here changes what is recorded. This
 module decides *how* to present a commit's events: grouping the query layer's
 row stream into (term, commit) units, pairing an ``add`` and a ``remove`` of
-the same predicate that describe an edit to the same clause, filtering paired
+the same tag that describe an edit to the same clause, filtering paired
 edits by whether the query hit their changed portion, and rendering each op as
 an inline ``~`` line with intra-value diff highlighting (git ``--word-diff``
 style). Unpaired events render as ``+`` / ``-`` as before.
@@ -54,8 +54,8 @@ class Add:
     change: Change
 
     @property
-    def predicate(self) -> str:
-        return self.change.predicate
+    def tag(self) -> str:
+        return self.change.tag
 
 
 @dataclass(frozen=True)
@@ -63,13 +63,13 @@ class Remove:
     change: Change
 
     @property
-    def predicate(self) -> str:
-        return self.change.predicate
+    def tag(self) -> str:
+        return self.change.tag
 
 
 @dataclass(frozen=True)
 class Edit:
-    predicate: str
+    tag: str
     before: Change  # the removed value
     after: Change   # the added value
 
@@ -80,7 +80,7 @@ Op = Add | Remove | Edit
 def pair_events(
     changes: Iterable[Change], threshold: float = PAIR_THRESHOLD
 ) -> list[Op]:
-    """Pair adds/removes within one predicate.
+    """Pair adds/removes within one tag.
 
     Two-pass:
 
@@ -100,10 +100,10 @@ def pair_events(
     """
     buckets: dict[str, list[Change]] = defaultdict(list)
     for c in changes:
-        buckets[c.predicate].append(c)
+        buckets[c.tag].append(c)
 
     ops: list[Op] = []
-    for predicate, group in buckets.items():
+    for tag, group in buckets.items():
         adds = [c for c in group if c.operation == "add"]
         removes = [c for c in group if c.operation == "remove"]
 
@@ -139,7 +139,7 @@ def pair_events(
                 )
             used_r.add(i)
             used_a.add(best_j)
-            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[best_j]))
+            ops.append(Edit(tag=tag, before=removes[i], after=adds[best_j]))
 
         # Pass 2: greedy lexical similarity for the leftovers.
         scored: list[tuple[float, int, int]] = []
@@ -158,7 +158,7 @@ def pair_events(
                 continue
             used_r.add(i)
             used_a.add(j)
-            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[j]))
+            ops.append(Edit(tag=tag, before=removes[i], after=adds[j]))
 
         for i, r in enumerate(removes):
             if i not in used_r:
@@ -172,12 +172,12 @@ def pair_events(
 
 
 def _sort_key(op: Op) -> tuple[str, int, str]:
-    """Stable within-commit order: by predicate, then kind, then value."""
+    """Stable within-commit order: by tag, then kind, then value."""
     if isinstance(op, Edit):
-        return (op.predicate, 0, op.before.value)
+        return (op.tag, 0, op.before.value)
     if isinstance(op, Remove):
-        return (op.predicate, 1, op.change.value)
-    return (op.predicate, 2, op.change.value)
+        return (op.tag, 1, op.change.value)
+    return (op.tag, 2, op.change.value)
 
 
 def _truncate(s: str, cap: int | None) -> str:
@@ -359,7 +359,7 @@ class QualLine(NamedTuple):
 class OpView(NamedTuple):
     """A fully-decided rendering of one op, free of any output format.
 
-    ``head`` is the content after ``<marker> <predicate>: `` on the top
+    ``head`` is the content after ``<marker> <tag>: `` on the top
     line; ``quals`` are the indented qualifier sub-lines (empty except for
     qualifier-block edits). Adapters — the rich terminal renderer below,
     HTML templates — only map roles to markup; every presentation decision
@@ -367,7 +367,7 @@ class OpView(NamedTuple):
     """
 
     kind: str  # "add" | "remove" | "edit"
-    predicate: str
+    tag: str
     head: list[Span]
     quals: list[QualLine]
 
@@ -376,12 +376,12 @@ def op_view(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> OpView:
     """Build the structured rendering of one paired-or-unpaired event."""
     if isinstance(op, Add):
         return OpView(
-            "add", op.predicate,
+            "add", op.tag,
             [Span("same", _truncate(op.change.value, truncate))], [],
         )
     if isinstance(op, Remove):
         return OpView(
-            "remove", op.predicate,
+            "remove", op.tag,
             [Span("same", _truncate(op.change.value, truncate))], [],
         )
     if isinstance(op, Edit):
@@ -411,7 +411,7 @@ def _edit_view(edit: Edit, cap: int | None) -> OpView:
     * Everything else (including any case where fastobo couldn't parse
       either side) → the token-level word-diff fallback.
     """
-    predicate = edit.predicate
+    tag = edit.tag
     b = edit.before.parsed
     a = edit.after.parsed
 
@@ -423,14 +423,14 @@ def _edit_view(edit: Edit, cap: int | None) -> OpView:
 
         if body_same and quals_multiset_same:
             if not comment_same:
-                return OpView("edit", predicate, _comment_only_spans(b, a, cap), [])
+                return OpView("edit", tag, _comment_only_spans(b, a, cap), [])
             if not quals_order_same:
-                return OpView("edit", predicate, _reorder_only_spans(a, cap), [])
+                return OpView("edit", tag, _reorder_only_spans(a, cap), [])
         if not quals_multiset_same:
-            return _qualifier_block_view(predicate, b, a, cap)
+            return _qualifier_block_view(tag, b, a, cap)
 
     return OpView(
-        "edit", predicate,
+        "edit", tag,
         _word_diff_spans(edit.before.value, edit.after.value, cap), [],
     )
 
@@ -475,7 +475,7 @@ def _head(pv: ParsedValue) -> str:
 
 
 def _qualifier_block_view(
-    predicate: str, before: ParsedValue, after: ParsedValue, cap: int | None
+    tag: str, before: ParsedValue, after: ParsedValue, cap: int | None
 ) -> OpView:
     """Body + comment on the top line, then the qualifier diff as sub-lines.
 
@@ -490,17 +490,17 @@ def _qualifier_block_view(
 
     quals: list[QualLine] = []
     matcher = SequenceMatcher(None, before.qualifiers, after.qualifiers, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
+    for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
+        if opcode == "equal":
             for q in before.qualifiers[i1:i2]:
                 quals.append(QualLine("context", [Span("same", _truncate(q, cap))]))
-        elif tag == "delete":
+        elif opcode == "delete":
             for q in before.qualifiers[i1:i2]:
                 quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
-        elif tag == "insert":
+        elif opcode == "insert":
             for q in after.qualifiers[j1:j2]:
                 quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
-        elif tag == "replace":
+        elif opcode == "replace":
             removes = list(before.qualifiers[i1:i2])
             adds = list(after.qualifiers[j1:j2])
             pairs, unpaired_r, unpaired_a = _pair_strings(removes, adds)
@@ -510,7 +510,7 @@ def _qualifier_block_view(
                 quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
             for q in unpaired_a:
                 quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
-    return OpView("edit", predicate, head, quals)
+    return OpView("edit", tag, head, quals)
 
 
 def _body_spans(before: str, after: str, cap: int | None) -> list[Span]:
@@ -584,14 +584,14 @@ def _word_diff_spans(before: str, after: str, cap: int | None) -> list[Span]:
     a_tokens = _tokenize(_truncate(after, cap))
     spans: list[Span] = []
     matcher = SequenceMatcher(None, b_tokens, a_tokens, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
+    for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
+        if opcode == "equal":
             spans.append(Span("same", "".join(b_tokens[i1:i2])))
-        elif tag == "delete":
+        elif opcode == "delete":
             spans.append(Span("del", "".join(b_tokens[i1:i2])))
-        elif tag == "insert":
+        elif opcode == "insert":
             spans.append(Span("ins", "".join(a_tokens[j1:j2])))
-        elif tag == "replace":
+        elif opcode == "replace":
             spans.append(Span("del", "".join(b_tokens[i1:i2])))
             spans.append(Span("ins", "".join(a_tokens[j1:j2])))
     return spans
@@ -621,7 +621,7 @@ def render_op_view(view: OpView) -> Text:
     marker, style = _OP_MARKERS[view.kind]
     line = Text("    ")
     line.append(marker, style=style)
-    line.append(f"{view.predicate}: ")
+    line.append(f"{view.tag}: ")
     _append_spans(line, view.head)
     for ql in view.quals:
         if ql.kind == "context":

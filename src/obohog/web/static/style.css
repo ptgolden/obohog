@@ -132,7 +132,7 @@ section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
 .op-add > .line > .marker { color: var(--add); }
 .op-remove > .line > .marker { color: var(--del); }
 .op-edit > .line > .marker { color: var(--edit); }
-.op .pred { color: var(--dim); }
+.op .tag { color: var(--dim); }
 .op del {
   color: var(--del);
   background: var(--del-bg);

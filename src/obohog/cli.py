@@ -314,7 +314,7 @@ def term(
         render_state(term_id, at, db.term_at(term_id, at_seq))
     else:
         header = db.term_header(term_id)
-        changes = db.term_timeline(term_id, predicate=only)
+        changes = db.term_timeline(term_id, tag=only)
         with _query_errors():
             since_seq = db.resolve_ref(since) if since is not None else None
         render_timeline(
@@ -411,7 +411,7 @@ def search(
     source: str = typer.Option(..., "--source", help="Configured source name."),
     config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
-    predicate: Optional[str] = typer.Option(
+    tag: Optional[str] = typer.Option(
         None, help="Restrict to one clause kind, e.g. xref."
     ),
     namespace: Optional[str] = typer.Option(
@@ -451,7 +451,7 @@ def search(
     with _query_errors():
         since_seq = db.resolve_ref(since) if since is not None else None
         filters = SearchFilters(
-            term_id=term, predicate=predicate, since_seq=since_seq,
+            term_id=term, tag=tag, since_seq=since_seq,
             regex=regex, ignore_case=ignore_case, namespace=namespace,
         )
         # An invalid --regex pattern surfaces here, on the first query

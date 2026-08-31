@@ -7,15 +7,15 @@
   <input type="search" name="q" value="{{ params.q if params else '' }}"
          placeholder="substring or regex over clause values" autofocus>
   <div class="filters">
-    {% set picked_predicate = params.predicate if params else none %}
-    <label>predicate
-      <select name="predicate">
+    {% set picked_tag = params.tag if params else none %}
+    <label>tag
+      <select name="tag">
         <option value="">any</option>
-        {% for p in facets.predicates %}
-        <option value="{{ p }}"{% if picked_predicate == p %} selected{% endif %}>{{ p }}</option>
+        {% for p in facets.tags %}
+        <option value="{{ p }}"{% if picked_tag == p %} selected{% endif %}>{{ p }}</option>
         {% endfor %}
-        {% if picked_predicate and picked_predicate not in facets.predicates %}
-        <option value="{{ picked_predicate }}" selected>{{ picked_predicate }}</option>
+        {% if picked_tag and picked_tag not in facets.tags %}
+        <option value="{{ picked_tag }}" selected>{{ picked_tag }}</option>
         {% endif %}
       </select>
     </label>

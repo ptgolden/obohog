@@ -51,7 +51,7 @@ class QualLineOut(BaseModel):
 
 class OpOut(BaseModel):
     kind: str  # "add" | "remove" | "edit"
-    predicate: str
+    tag: str
     before: str | None  # raw removed value (remove/edit)
     after: str | None  # raw added value (add/edit)
     head: list[SpanOut]
@@ -153,7 +153,7 @@ class TimelineOut(BaseModel):
     header: TermHeaderOut | None
     total_events: int
     shown_events: int
-    by_predicate: dict[str, int]
+    by_tag: dict[str, int]
     commits: list[CommitGroupOut]  # oldest first
 
 
@@ -161,7 +161,7 @@ class StateOut(BaseModel):
     term_id: str
     ref: str
     commit_seq: int
-    clauses: list[dict[str, str]]  # {"predicate": ..., "value": ...}
+    clauses: list[dict[str, str]]  # {"tag": ..., "value": ...}
 
 
 class CommitViewOut(BaseModel):
@@ -199,7 +199,7 @@ class SourceInfo(BaseModel):
 class FacetsOut(BaseModel):
     """Distinct filter values present in a source, most frequent first."""
 
-    predicates: list[str]
+    tags: list[str]
     namespaces: list[str]
 
 
@@ -208,7 +208,7 @@ class SearchParams(BaseModel):
 
     q: str
     term: str | None = None
-    predicate: str | None = None
+    tag: str | None = None
     namespace: str | None = None
     since: str | None = None
     regex: bool = False
@@ -220,7 +220,7 @@ class SearchParams(BaseModel):
     full: bool = False
 
     @field_validator(
-        "term", "predicate", "namespace", "since", "after", mode="before"
+        "term", "tag", "namespace", "since", "after", mode="before"
     )
     @classmethod
     def _blank_is_absent(cls, value):
@@ -274,7 +274,7 @@ def _op_out(op: render.Op, cap: int | None) -> OpOut:
         before, after = None, op.change.value
     return OpOut(
         kind=view.kind,
-        predicate=view.predicate,
+        tag=view.tag,
         before=before,
         after=after,
         head=[SpanOut(role=s.role, text=s.text) for s in view.head],
@@ -422,13 +422,13 @@ def get_timeline(
     style: SourceStyle,
     term_id: str,
     *,
-    predicate: str | None = None,
+    tag: str | None = None,
     since: str | None = None,
     limit: int | None = None,
     full: bool = False,
 ) -> TimelineOut | None:
     """A term's full history, commit-grouped and paired. None if unknown."""
-    changes = db.term_timeline(term_id, predicate=predicate)
+    changes = db.term_timeline(term_id, tag=tag)
     if not changes:
         return None
     header = db.term_header(term_id)
@@ -454,7 +454,7 @@ def get_timeline(
         header=_header_out(header) if header else None,
         total_events=total,
         shown_events=len(changes),
-        by_predicate=dict(Counter(c.predicate for c in changes).most_common()),
+        by_tag=dict(Counter(c.tag for c in changes).most_common()),
         commits=commits,
     )
 
@@ -482,7 +482,7 @@ def get_state(db: HistoryDB, term_id: str, at: str) -> StateOut | None:
         term_id=term_id,
         ref=at,
         commit_seq=seq,
-        clauses=[{"predicate": p, "value": v} for p, v in clauses],
+        clauses=[{"tag": p, "value": v} for p, v in clauses],
     )
 
 
@@ -499,7 +499,7 @@ def search(
     since_seq = db.resolve_ref(params.since) if params.since else None
     filters = SearchFilters(
         term_id=params.term,
-        predicate=params.predicate,
+        tag=params.tag,
         since_seq=since_seq,
         regex=params.regex,
         ignore_case=params.ignore_case,
@@ -621,5 +621,5 @@ def list_releases(db: HistoryDB) -> list[ReleaseOut]:
 
 
 def get_facets(db: HistoryDB) -> FacetsOut:
-    predicates, namespaces = db.facets()
-    return FacetsOut(predicates=predicates, namespaces=namespaces)
+    tags, namespaces = db.facets()
+    return FacetsOut(tags=tags, namespaces=namespaces)

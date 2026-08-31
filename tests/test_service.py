@@ -45,7 +45,7 @@ def test_search_unpaged_sections_by_term(db):
     (group,) = section.commits
     (op,) = group.ops
     assert op.kind == "add"
-    assert op.predicate == "xref"
+    assert op.tag == "xref"
     assert op.after == "SHARED:1"
     assert op.before is None
     assert [s.role for s in op.head] == ["same"]
@@ -141,8 +141,8 @@ def test_timeline_groups_by_commit_oldest_first(db):
     assert out.total_events == out.shown_events == 2  # name + xref creation
     (group,) = out.commits
     assert group.commit.commit_seq == 0
-    assert {op.predicate for op in group.ops} == {"name", "xref"}
-    assert out.by_predicate == {"name": 1, "xref": 1}
+    assert {op.tag for op in group.ops} == {"name", "xref"}
+    assert out.by_tag == {"name": 1, "xref": 1}
 
 
 def test_timeline_unknown_term_is_none(db):
@@ -153,7 +153,7 @@ def test_state_at_release(db):
     out = service.get_state(db, "MONDO:0000001", "v1.0")
     assert out is not None
     assert out.commit_seq == 3
-    assert {"predicate": "name", "value": "alpha"} in out.clauses
+    assert {"tag": "name", "value": "alpha"} in out.clauses
 
 
 def test_state_unknown_term_is_none(db):

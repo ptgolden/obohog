@@ -89,7 +89,7 @@ def test_range_after_skips_earlier_terms(db):
 
 def test_search_filters_narrow_with_after(db):
     # Cursor composes with filters: same WHERE, just resumed.
-    filters = SearchFilters(predicate="xref")
+    filters = SearchFilters(tag="xref")
     full = list(db.iter_search_events("SHARED", filters))
     keys = _section_keys(full, "term")
     rest = list(db.iter_search_events("SHARED", filters, after=keys[0]))
@@ -143,6 +143,6 @@ def test_forks_query_concurrently(db):
 
 
 def test_facets_lists_distinct_values_most_frequent_first(db):
-    predicates, namespaces = db.facets()
-    assert predicates == ["name", "xref"]  # tied counts break alphabetically
+    tags, namespaces = db.facets()
+    assert tags == ["name", "xref"]  # tied counts break alphabetically
     assert namespaces == ["MONDO"]

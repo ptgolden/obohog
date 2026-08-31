@@ -50,7 +50,7 @@ def term_page(
     handle: Handle,
     src: str,
     term_id: str,
-    predicate: str | None = None,
+    tag: str | None = None,
     since: str | None = None,
     limit: int | None = Query(None, ge=1),
     full: bool = False,
@@ -58,7 +58,7 @@ def term_page(
     db, style = handle
     timeline = service.get_timeline(
         db, style, term_id,
-        predicate=predicate, since=since, limit=limit, full=full,
+        tag=tag, since=since, limit=limit, full=full,
     )
     if timeline is None:
         raise HTTPException(status_code=404, detail=f"no history for {term_id!r}")

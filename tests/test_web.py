@@ -70,7 +70,7 @@ def test_term_timeline_with_colon_in_path(client):
     assert body["total_events"] == 2
     (group,) = body["commits"]
     assert group["commit"]["commit_seq"] == 0
-    assert {op["predicate"] for op in group["ops"]} == {"name", "xref"}
+    assert {op["tag"] for op in group["ops"]} == {"name", "xref"}
 
 
 def test_unknown_term_is_404(client):
@@ -85,7 +85,7 @@ def test_term_state_at_ref(client):
         "/api/v1/sources/onto/terms/MONDO:0000001/state", params={"at": "v1.0"}
     )
     assert r.status_code == 200
-    assert {"predicate": "name", "value": "alpha"} in r.json()["clauses"]
+    assert {"tag": "name", "value": "alpha"} in r.json()["clauses"]
 
 
 def test_unresolvable_ref_is_404(client):
@@ -179,7 +179,7 @@ def test_unknown_pr_is_404(client):
 
 def test_facets_lists_distinct_filter_values(client):
     body = client.get("/api/v1/sources/onto/facets").json()
-    assert body == {"predicates": ["name", "xref"], "namespaces": ["MONDO"]}
+    assert body == {"tags": ["name", "xref"], "namespaces": ["MONDO"]}
 
 
 def test_openapi_document_serves(client):
@@ -233,34 +233,34 @@ def test_search_page_renders_first_page_with_load_more(client):
 
 def test_search_form_blank_filters_do_not_filter(client):
     # The HTML form submits untouched fields as empty strings
-    # (?q=...&predicate=&namespace=&term=) — they must mean "no filter",
+    # (?q=...&tag=&namespace=&term=) — they must mean "no filter",
     # not "match the empty string".
     r = client.get(
-        "/onto/search?q=SHARED&predicate=&namespace=&term=&order=term"
+        "/onto/search?q=SHARED&tag=&namespace=&term=&order=term"
     )
     assert r.status_code == 200
     assert "MONDO:0000001" in r.text
     api = client.get(
         "/api/v1/sources/onto/search",
-        params={"q": "SHARED", "predicate": "", "namespace": "", "term": ""},
+        params={"q": "SHARED", "tag": "", "namespace": "", "term": ""},
     ).json()
     assert len(api["sections"]) == 4
 
 
 def test_search_form_offers_derived_filter_choices(client):
     r = client.get("/onto/search")
-    assert '<select name="predicate">' in r.text
+    assert '<select name="tag">' in r.text
     assert '<option value="xref">xref</option>' in r.text
     assert '<select name="namespace">' in r.text
     assert '<option value="MONDO">MONDO</option>' in r.text
 
 
 def test_search_form_keeps_selected_filter_value(client):
-    r = client.get("/onto/search", params={"q": "SHARED", "predicate": "xref"})
+    r = client.get("/onto/search", params={"q": "SHARED", "tag": "xref"})
     assert '<option value="xref" selected>xref</option>' in r.text
     # A hand-edited URL value outside the derived list must still show as
     # selected (the filter is applied), not silently display "any".
-    r = client.get("/onto/search", params={"q": "SHARED", "predicate": "bogus"})
+    r = client.get("/onto/search", params={"q": "SHARED", "tag": "bogus"})
     assert '<option value="bogus" selected>bogus</option>' in r.text
 
 
@@ -330,7 +330,7 @@ def test_registry_facets_cached_until_artifact_changes(
 ):
     registry = SourceRegistry(_config(tmp_path, paged_artifact))
     f1 = registry.facets("onto")
-    assert f1.predicates == ["name", "xref"]
+    assert f1.tags == ["name", "xref"]
     assert f1.namespaces == ["MONDO"]
     assert registry.facets("onto") is f1  # unchanged artifact → cached
 
