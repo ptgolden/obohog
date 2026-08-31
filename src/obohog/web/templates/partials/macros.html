@@ -38,9 +38,25 @@
 
 {#- Git sources lead with the sha link; synthetic histories (releases,
     BioPortal) have no meaningful sha, so the date itself becomes the
-    identifier — a version chip linking to the change set by seq. -#}
-{%- macro commit_header(c, src, term_id=none) -%}
+    identifier — a version chip linking to the change set by seq.
+
+    band-tools floats at the band's right edge: the state link, then
+    either page-jump chevrons (nav=true; JS in base.html scrolls to the
+    adjacent band) or older/newer links (prev_url/next_url, used on the
+    single commit/version page). -#}
+{%- macro commit_header(c, src, term_id=none, nav=false, prev_url=none, next_url=none) -%}
 <div class="commit-header">
+  {%- if term_id or nav or prev_url or next_url %}
+  <span class="band-tools">
+    {%- if term_id %}{{ state_link(c, src, term_id, '.commit-header') }}{% endif %}
+    {%- if nav %}
+    <button class="cnav" data-dir="-1" title="previous on this page">↑</button>
+    <button class="cnav" data-dir="1" title="next on this page">↓</button>
+    {%- endif %}
+    {%- if prev_url %}<a class="cnav" href="{{ prev_url }}" title="older">↑</a>{% endif %}
+    {%- if next_url %}<a class="cnav" href="{{ next_url }}" title="newer">↓</a>{% endif %}
+  </span>
+  {%- endif %}
   {%- if not c.hide_sha %}
   <a class="sha" href="/{{ src }}/commits/{{ c.sha[:7] }}">{{ c.sha[:7] }}</a>
   <span class="date">{{ c.committed_date | dateonly }}</span>
@@ -56,9 +72,6 @@
   {%- endif %}
   {%- if c.snapshot_url %}
   <a class="pr" href="{{ c.snapshot_url }}">release</a>
-  {%- endif %}
-  {%- if term_id %}
-  {{ state_link(c, src, term_id, '.commit-header') }}
   {%- endif %}
 </div>
 {%- endmacro -%}
@@ -79,7 +92,7 @@
 
 {%- macro commit_section(s, src) -%}
 <section class="commit-section">
-  {{ commit_header(s.commit, src) }}
+  {{ commit_header(s.commit, src, nav=true) }}
   {%- for t in s.terms %}
   <h4>{{ term_link(src, t.term_id) }}{% if t.name %} <span class="name">— {{ t.name }}</span>{% endif %}
     {{ state_link(s.commit, src, t.term_id, 'h4') }}</h4>

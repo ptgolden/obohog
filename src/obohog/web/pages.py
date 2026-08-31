@@ -193,8 +193,17 @@ def commit_page(
         raise HTTPException(
             status_code=404, detail=f"no indexed changes for commit {sha!r}"
         )
+    # Older/newer chevrons: seqs are dense from 0 through HEAD's.
+    seq, last = view.commit.commit_seq, db.resolve_ref("HEAD")
     return templates.TemplateResponse(
-        request, "commit.html", {"src": src, "view": view}
+        request,
+        "commit.html",
+        {
+            "src": src,
+            "view": view,
+            "prev_url": f"/{src}/commits/{seq - 1}" if seq > 0 else None,
+            "next_url": f"/{src}/commits/{seq + 1}" if seq < last else None,
+        },
     )
 
 

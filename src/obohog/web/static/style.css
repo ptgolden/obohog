@@ -31,6 +31,10 @@
 }
 
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -169,20 +173,35 @@ section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
   color: color-mix(in srgb, var(--dim) 55%, var(--fg));
   font-size: 0.85rem;
 }
-/* In by-commit contexts (timeline, date-ordered search, commit page) the
-   band pins to the viewport top while its commit is in view; the next
-   band pushes it off. Term-major search keeps headers in flow — several
-   share one section there, and same-offset sticky siblings overlap
-   instead of pushing. */
-section.commit-section > .commit-header,
+/* Where one commit's group runs long — date-ordered search results and
+   the single commit page — the band pins to the viewport top while its
+   commit is in view; the next band pushes it off. Term timelines and
+   term-major search keep headers in flow (short groups; pinning is
+   noise there — Patrick). */
+#results section.commit-section > .commit-header,
 main > .commit-header {
   position: sticky;
   top: 0;
   z-index: 2;
 }
-.commit-header .state-link { float: right; margin-left: 1ch; }
+.commit-header .band-tools {
+  float: right;
+  margin-left: 1ch;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.cnav {
+  border: none;
+  background: none;
+  padding: 0 0.1rem;
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+}
+.cnav:hover { color: var(--accent); text-decoration: none; }
 /* Interpuncts between whichever parts this header has. */
-.commit-header > :not(.state-link) + :not(.state-link)::before {
+.commit-header > :not(.band-tools) + :not(.band-tools)::before {
   content: "·";
   color: var(--dim);
   margin-right: 0.45rem;

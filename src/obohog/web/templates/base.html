@@ -11,6 +11,15 @@
     // a second click closes it instead of fetching another copy. htmx has
     // already suppressed the link's navigation; cancelling htmx:confirm
     // cancels the request itself.
+    // Band chevrons: jump to the previous/next commit band on the page.
+    // (The commit page's chevrons are plain links; these are buttons.)
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('button.cnav');
+      if (!btn) return;
+      const bands = [...document.querySelectorAll('.commit-header')];
+      const i = bands.indexOf(btn.closest('.commit-header'));
+      bands[i + Number(btn.dataset.dir)]?.scrollIntoView();
+    });
     document.addEventListener('htmx:confirm', (e) => {
       const link = e.detail.elt.closest('.state-link');
       if (!link) return;

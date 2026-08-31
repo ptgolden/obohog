@@ -197,6 +197,27 @@ def test_commit_view_by_seq(client):
     assert r.json()["commit"]["sha"] == commit["sha"]
 
 
+def test_commit_page_neighbor_links(client):
+    # 4 commits, seqs 0..3: any commit with events has at least one
+    # older/newer chevron, and the hrefs address neighbors by seq.
+    timeline = client.get("/api/v1/sources/onto/terms/MONDO:0000002").json()
+    seq = timeline["commits"][0]["commit"]["commit_seq"]
+    html = client.get(f"/onto/commits/{seq}").text
+    assert 'class="cnav"' in html
+    if seq > 0:
+        assert f'href="/onto/commits/{seq - 1}"' in html
+    if seq < 3:
+        assert f'href="/onto/commits/{seq + 1}"' in html
+
+
+def test_date_order_search_has_band_chevrons(client):
+    html = client.get("/onto/search?q=&order=newest").text
+    assert '<button class="cnav" data-dir="-1"' in html
+    # term-major keeps headers plain: no page-jump buttons
+    html = client.get("/onto/search?q=&order=term").text
+    assert 'button class="cnav"' not in html
+
+
 def test_unknown_commit_is_404(client):
     assert (
         client.get("/api/v1/sources/onto/commits/abcdef9").status_code == 404
