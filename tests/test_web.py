@@ -239,13 +239,13 @@ def test_search_page_without_query_shows_form_only(client):
     r = client.get("/onto/search")
     assert r.status_code == 200
     assert "<form" in r.text
-    assert "candidate events" not in r.text
+    assert "up to" not in r.text
 
 
 def test_search_page_renders_first_page_with_load_more(client):
     r = client.get("/onto/search", params={"q": "SHARED", "limit": 1})
     assert r.status_code == 200
-    assert "candidate events" in r.text
+    assert "up to" in r.text
     assert "MONDO:0000001" in r.text
     assert 'hx-trigger="revealed"' in r.text
     assert "after=MONDO%3A0000001" in r.text
