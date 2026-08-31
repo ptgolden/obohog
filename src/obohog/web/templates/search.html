@@ -35,8 +35,9 @@
       value="{{ params.term or '' if params else '' }}"></label>
     <label>order
       <select name="order">
-        <option value="term" {% if params and params.order == 'term' %}selected{% endif %}>by term</option>
-        <option value="date" {% if params and params.order == 'date' %}selected{% endif %}>by date</option>
+        <option value="term" {% if not params or params.order == 'term' %}selected{% endif %}>by term</option>
+        <option value="newest" {% if params and params.order == 'date' and not params.reverse %}selected{% endif %}>newest first</option>
+        <option value="oldest" {% if params and params.order == 'date' and params.reverse %}selected{% endif %}>oldest first</option>
       </select>
     </label>
     <label><input type="checkbox" name="regex" value="true"

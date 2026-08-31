@@ -264,6 +264,22 @@ def test_search_form_keeps_selected_filter_value(client):
     assert '<option value="bogus" selected>bogus</option>' in r.text
 
 
+def test_search_form_order_newest_and_oldest(client):
+    # The order select bakes commit-time direction into date order:
+    # newest → (date, reverse=False), oldest → (date, reverse=True).
+    newest = client.get("/onto/search", params={"q": "SHARED", "order": "newest"})
+    assert '<option value="newest" selected>' in newest.text
+    assert newest.text.find("MONDO:0000004") < newest.text.find("MONDO:0000001")
+    oldest = client.get("/onto/search", params={"q": "SHARED", "order": "oldest"})
+    assert '<option value="oldest" selected>' in oldest.text
+    assert oldest.text.find("MONDO:0000001") < oldest.text.find("MONDO:0000004")
+    # Pre-existing links with the raw API params still work and map back.
+    raw = client.get(
+        "/onto/search", params={"q": "SHARED", "order": "date", "reverse": "true"}
+    )
+    assert '<option value="oldest" selected>' in raw.text
+
+
 def test_search_results_fragment_pages(client):
     r = client.get(
         "/onto/search/results",

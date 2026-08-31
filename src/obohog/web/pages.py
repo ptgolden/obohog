@@ -6,7 +6,7 @@ routing and query-string plumbing.
 """
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -77,9 +77,24 @@ def _fragment_query_string(params: service.SearchParams) -> str:
 
 
 class _FormParams(service.SearchParams):
-    """The search form before a query is typed: ``q`` optional."""
+    """The search form before a query is typed: ``q`` optional.
+
+    ``order`` additionally accepts the form's combined values: a select
+    can only set one param, so ``newest``/``oldest`` mean date order
+    with the commit-time direction baked in (date order is newest-first
+    by default, ``reverse`` makes it oldest-first).
+    """
 
     q: str | None = None
+    order: Literal["term", "date", "newest", "oldest"] = "term"
+
+    def to_search_params(self) -> service.SearchParams:
+        data = self.model_dump()
+        if data["order"] == "newest":
+            data["order"], data["reverse"] = "date", False
+        elif data["order"] == "oldest":
+            data["order"], data["reverse"] = "date", True
+        return service.SearchParams(**data)
 
 
 @router.get("/{src}/search", response_class=HTMLResponse)
@@ -97,7 +112,7 @@ def search_page(
         "facets": request.app.state.registry.facets(src),
     }
     if params is not None and params.q:
-        sp = service.SearchParams(**params.model_dump())
+        sp = params.to_search_params()
         context["params"] = sp
         context["page"] = service.search(db, style, sp)
         context["qs"] = _fragment_query_string(sp)
