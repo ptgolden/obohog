@@ -142,7 +142,7 @@ def test_forks_query_concurrently(db):
     assert all(r == results[0] for r in results)
 
 
-def test_facets_lists_distinct_values_most_frequent_first(db):
+def test_facets_lists_distinct_values_alphabetically(db):
     tags, namespaces = db.facets()
-    assert tags == ["name", "xref"]  # tied counts break alphabetically
+    assert tags == ["name", "xref"]
     assert namespaces == ["MONDO"]

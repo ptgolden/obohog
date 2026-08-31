@@ -197,7 +197,7 @@ class SourceInfo(BaseModel):
 
 
 class FacetsOut(BaseModel):
-    """Distinct filter values present in a source, most frequent first."""
+    """Distinct filter values present in a source, alphabetical."""
 
     tags: list[str]
     namespaces: list[str]

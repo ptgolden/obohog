@@ -624,8 +624,8 @@ class HistoryDB:
         """Distinct ``(tags, namespaces)`` present in the events.
 
         Both are low-cardinality (a dozen-odd values even on millions of
-        events) and ordered most-frequent first, so filter UIs can offer
-        them as controlled choices instead of free text. Namespace is the
+        events) and ordered alphabetically, so filter UIs can offer them
+        as controlled choices instead of free text. Namespace is the
         CURIE prefix of ``term_id``, matching the ``namespace`` filters'
         ``starts_with(term_id, ns || ':')`` semantics.
         """
@@ -633,14 +633,14 @@ class HistoryDB:
             row[0]
             for row in self.con.execute(
                 "SELECT predicate FROM events"
-                " GROUP BY predicate ORDER BY count(*) DESC, predicate"
+                " GROUP BY predicate ORDER BY predicate"
             ).fetchall()
         ]
         namespaces = [
             row[0]
             for row in self.con.execute(
                 "SELECT split_part(term_id, ':', 1) AS ns FROM events"
-                " GROUP BY ns ORDER BY count(*) DESC, ns"
+                " GROUP BY ns ORDER BY ns"
             ).fetchall()
         ]
         return tags, namespaces
