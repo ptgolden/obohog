@@ -32,7 +32,6 @@ _STATUS = {
     ConfigError: 404,
     RefNotFound: 404,
     service.InvalidCursor: 400,
-    service.UnsupportedCombination: 400,
     ClauseSyntaxError: 400,
     duckdb.InvalidInputException: 400,
     ArtifactNotFound: 503,

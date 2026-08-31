@@ -524,15 +524,22 @@ def test_api_has_error_mapping(lclient):
     )
     assert bad_clause.status_code == 400
     assert "needs a value" in bad_clause.json()["detail"]
-    with_q = lclient.get(
-        "/api/v1/sources/life/search", params={"has": "~x", "q": "y"}
+
+
+def test_api_has_composes_with_event_filter(lclient):
+    body = lclient.get(
+        "/api/v1/sources/life/search",
+        params={"q": "DOID", "tag": "xref", "has": "~diabetes",
+                "order": "term"},
+    ).json()
+    assert [s["term_id"] for s in body["sections"]] == [
+        "MONDO:0000003", "MONDO:0000004",
+    ]
+    by_date = lclient.get(
+        "/api/v1/sources/life/search",
+        params={"has": "~diabetes", "order": "date"},
     )
-    assert with_q.status_code == 400
-    assert "has=" in with_q.json()["detail"]
-    date_order = lclient.get(
-        "/api/v1/sources/life/search", params={"has": "~x", "order": "date"}
-    )
-    assert date_order.status_code == 400
+    assert by_date.status_code == 200
 
 
 def test_terms_scope_page_translates_form_to_clause(lclient):

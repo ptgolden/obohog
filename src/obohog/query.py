@@ -154,6 +154,11 @@ class SearchFilters:
     match: str = "substring"  # "substring" | "exact" | "regex"
     ignore_case: bool = False
     namespace: str | None = None
+    # Term-set predicates: restrict to terms satisfying every clause
+    # (see :func:`parse_has_clause`). A term-axis narrowing — it picks
+    # *whose* events are eligible; the other fields (and the query) pick
+    # which of those events show.
+    has: tuple[HasClause, ...] = ()
 
 
 def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
@@ -579,6 +584,14 @@ class HistoryDB:
         dates via :meth:`resolve_bound` in the caller), ``namespace``
         restricts to
         term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
+
+        ``has`` clauses narrow along the *term* axis: only events of
+        terms satisfying every clause (see :meth:`_has_subquery`) are
+        eligible. They compose freely with everything above — the
+        canonical shape is "changes to xrefs containing NCIT (query +
+        tag) among terms whose names have ever contained diabetes
+        (has)". With no query at all, the eligible terms' histories
+        stream whole (clipped only by the date window, if any).
         """
         if query is None:
             where = "TRUE"
@@ -613,7 +626,48 @@ class HistoryDB:
         if f.namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
             params.append(f.namespace)
+        if f.has:
+            sub, sub_params = HistoryDB._has_subquery(f.has, f.ignore_case)
+            where += f" AND e.term_id IN {sub}"
+            params.extend(sub_params)
         return where, params
+
+    @staticmethod
+    def _has_subquery(
+        clauses: Sequence[HasClause], ignore_case: bool
+    ) -> tuple[str, list[object]]:
+        """A ``SELECT term_id`` subquery for terms satisfying every clause.
+
+        Per clause the WHERE comes from :meth:`_search_where` (a
+        clause-only :class:`SearchFilters`, so no recursion); clauses
+        combine by INTERSECT, so a term must satisfy all of them (AND).
+        Membership is deliberately timeless — no date bounds in here;
+        the outer WHERE's ``since_seq``/``until_seq`` clip which of the
+        eligible terms' events *show*, never who qualifies.
+
+        ``ever`` clauses match any event in history. ``now`` clauses
+        keep a term when some matching ``(term, tag, value)`` group's
+        last operation is an add — the clause is present at HEAD. The
+        arg_max can't tie because extraction diffs snapshots and so
+        never emits an add and a remove of the identical
+        ``(term, predicate, value)`` in one commit.
+        """
+        parts: list[str] = []
+        params: list[object] = []
+        for clause in clauses:
+            per = SearchFilters(
+                tag=clause.tag, match=clause.match, ignore_case=ignore_case
+            )
+            where, p = HistoryDB._search_where(clause.value or None, per)
+            select = f"SELECT e.term_id FROM events e WHERE {where}"
+            if clause.quantifier == "now":
+                select += (
+                    " GROUP BY e.term_id, e.predicate, e.value"
+                    " HAVING arg_max(e.operation, e.commit_seq) = 'add'"
+                )
+            parts.append(select)
+            params.extend(p)
+        return "(" + "\nINTERSECT\n".join(parts) + ")", params
 
     def _iter_term_changes(
         self,
@@ -779,79 +833,6 @@ class HistoryDB:
         can size result sets.
         """
         return self._count_events(*self._search_where(query, filters))
-
-    def _term_set_subquery(
-        self, clauses: Sequence[HasClause], f: SearchFilters
-    ) -> tuple[str, list[object]]:
-        """A ``SELECT term_id`` subquery for terms satisfying every clause.
-
-        ``f`` carries the narrowings shared by all clauses — ``term_id``,
-        ``namespace``, ``ignore_case``, and the membership window
-        (``since_seq``/``until_seq``); its ``tag``/``match`` fields go
-        unused (each clause brings its own). Per clause the WHERE comes
-        from :meth:`_search_where`; clauses combine by INTERSECT, so a
-        term must satisfy all of them (AND).
-
-        ``ever`` clauses match any event in the window. ``now`` clauses
-        keep a term when some matching ``(term, tag, value)`` group's
-        last operation at ``commit_seq <= until_seq`` (HEAD when unset)
-        is an add — the clause is present in the state as of that point.
-        ``since_seq`` does not apply to ``now`` clauses: presence is a
-        fact about one moment, not a window. The arg_max can't tie
-        because extraction diffs snapshots and so never emits an add and
-        a remove of the identical ``(term, predicate, value)`` in one
-        commit.
-        """
-        parts: list[str] = []
-        params: list[object] = []
-        for clause in clauses:
-            per = SearchFilters(
-                term_id=f.term_id,
-                tag=clause.tag,
-                since_seq=None if clause.quantifier == "now" else f.since_seq,
-                until_seq=f.until_seq,
-                match=clause.match,
-                ignore_case=f.ignore_case,
-                namespace=f.namespace,
-            )
-            where, p = self._search_where(clause.value or None, per)
-            select = f"SELECT e.term_id FROM events e WHERE {where}"
-            if clause.quantifier == "now":
-                select += (
-                    " GROUP BY e.term_id, e.predicate, e.value"
-                    " HAVING arg_max(e.operation, e.commit_seq) = 'add'"
-                )
-            parts.append(select)
-            params.extend(p)
-        return "(" + "\nINTERSECT\n".join(parts) + ")", params
-
-    def iter_term_set_events(
-        self,
-        clauses: Sequence[HasClause],
-        f: SearchFilters = SearchFilters(),
-        *,
-        reverse: bool = False,
-        after: str | None = None,
-    ) -> Iterator[TermChange]:
-        """Stream the *full* histories of terms satisfying every clause.
-
-        Stage one selects the term set (:meth:`_term_set_subquery`);
-        stage two streams every event of every member — the WHERE is
-        membership alone, so nothing trims the timelines. Term-ordered
-        only (sections are terms); ``reverse``/``after`` as in
-        :meth:`_iter_term_changes`.
-        """
-        sub, params = self._term_set_subquery(clauses, f)
-        return self._iter_term_changes(
-            f"e.term_id IN {sub}", params, reverse=reverse, after=after
-        )
-
-    def term_set_counts(
-        self, clauses: Sequence[HasClause], f: SearchFilters = SearchFilters()
-    ) -> EventCounts:
-        """Exact scope of a term-set query: all events of matching terms."""
-        sub, params = self._term_set_subquery(clauses, f)
-        return self._count_events(f"e.term_id IN {sub}", params)
 
     def facets(self) -> tuple[list[str], list[str]]:
         """Distinct ``(tags, namespaces)`` present in the events.

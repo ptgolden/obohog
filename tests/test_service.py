@@ -304,27 +304,35 @@ def test_has_pages_concatenate_to_unpaged(ldb):
     ]
 
 
-def test_has_membership_window_does_not_trim_rendering(ldb):
-    # until=c0 leaves only T1 in the set, but T1's later events (its
-    # synonym removal and re-add) still render.
+def test_has_dates_clip_events_not_membership(ldb):
+    # Membership is timeless, but the window clips what shows: at c0
+    # only T1 has events, so only its section (only its c0 events)
+    # renders.
     page = service.search(
         ldb, STYLE, SearchParams(has=["~diabetes"], until="2022-01-01")
     )
     (section,) = page.sections
     assert section.term_id == "MONDO:0000001"
-    assert max(g.commit.commit_seq for g in section.commits) == 3
+    assert [g.commit.commit_seq for g in section.commits] == [0]
 
 
-def test_has_rejects_contradictory_params(ldb):
-    from obohog.service import UnsupportedCombination
-
-    for bad in (
-        SearchParams(has=["~x"], q="y"),
-        SearchParams(has=["~x"], tag="name"),
-        SearchParams(has=["~x"], order="date"),
-    ):
-        with pytest.raises(UnsupportedCombination):
-            service.search(ldb, STYLE, bad)
+def test_has_composes_with_event_filter(ldb):
+    # "changes to xrefs containing DOID among terms that ever had
+    # 'diabetes'" — q and tag pick the events, has picks whose events.
+    page = service.search(
+        ldb, STYLE,
+        SearchParams(q="DOID", tag="xref", has=["~diabetes"], order="term"),
+    )
+    assert [s.term_id for s in page.sections] == [
+        "MONDO:0000003", "MONDO:0000004",
+    ]
+    assert page.counts.approximate is True  # q ran the delta filter
+    # Date order composes too, now that has is just a narrowing.
+    by_date = service.search(
+        ldb, STYLE, SearchParams(has=["~diabetes"], order="date")
+    )
+    seqs = [s.commit.commit_seq for s in by_date.sections]
+    assert seqs == sorted(seqs, reverse=True)
 
 
 def test_has_clause_syntax_error_propagates(ldb):
