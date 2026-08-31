@@ -412,10 +412,12 @@ class HistoryDB:
         return where, params
 
     @staticmethod
-    def _search_where(query: str, f: SearchFilters) -> tuple[str, list[object]]:
+    def _search_where(query: str | None, f: SearchFilters) -> tuple[str, list[object]]:
         """WHERE clause + params for events whose value matches ``query``.
 
-        Three match modes (``f.match``):
+        ``query=None`` means no text constraint at all — every event
+        matches, and the optional narrowings below do the filtering
+        (browse mode). Otherwise, three match modes (``f.match``):
 
         * ``"substring"`` (default): substring of the full ``value`` via
           DuckDB's ``contains()`` — no LIKE wildcard escape logic to write.
@@ -436,7 +438,9 @@ class HistoryDB:
         :meth:`resolve_ref` in the caller), ``namespace`` restricts to
         term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
         """
-        if f.match == "regex":
+        if query is None:
+            where = "TRUE"
+        elif f.match == "regex":
             if f.ignore_case:
                 where = "regexp_matches(e.value, ?, 'i')"
             else:
@@ -451,7 +455,7 @@ class HistoryDB:
                 where = "contains(LOWER(e.value), LOWER(?))"
             else:
                 where = "contains(e.value, ?)"
-        params: list[object] = [query]
+        params: list[object] = [] if query is None else [query]
         if f.term_id is not None:
             where += " AND e.term_id = ?"
             params.append(f.term_id)
@@ -588,7 +592,7 @@ class HistoryDB:
 
     def iter_search_events(
         self,
-        query: str,
+        query: str | None,
         filters: SearchFilters = SearchFilters(),
         *,
         order: str = "term",
@@ -614,13 +618,13 @@ class HistoryDB:
         )
 
     def search_events(
-        self, query: str, filters: SearchFilters = SearchFilters()
+        self, query: str | None, filters: SearchFilters = SearchFilters()
     ) -> list[TermChange]:
         """Materialized :meth:`iter_search_events`."""
         return list(self.iter_search_events(query, filters))
 
     def search_counts(
-        self, query: str, filters: SearchFilters = SearchFilters()
+        self, query: str | None, filters: SearchFilters = SearchFilters()
     ) -> EventCounts:
         """Candidate event/term/commit counts for a search.
 

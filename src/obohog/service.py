@@ -204,9 +204,14 @@ class FacetsOut(BaseModel):
 
 
 class SearchParams(BaseModel):
-    """Everything a search request can say, validated once at the edge."""
+    """Everything a search request can say, validated once at the edge.
 
-    q: str
+    ``q`` is optional like every other filter: absent means no text
+    constraint, so a request carrying only narrowings (tag, namespace,
+    term, since) browses everything under them.
+    """
+
+    q: str | None = None
     term: str | None = None
     tag: str | None = None
     namespace: str | None = None
@@ -220,7 +225,7 @@ class SearchParams(BaseModel):
     full: bool = False
 
     @field_validator(
-        "term", "tag", "namespace", "since", "after", mode="before"
+        "q", "term", "tag", "namespace", "since", "after", mode="before"
     )
     @classmethod
     def _blank_is_absent(cls, value):
@@ -493,8 +498,8 @@ def search(
 
     Same stages as the CLI: SQL candidates → pair by (term, commit) →
     clause-aware delta filter on edits → section cutoff. ``counts`` are
-    the SQL candidates (``approximate=True``); exact totals are derivable
-    from the sections themselves.
+    the SQL candidates — an upper bound (``approximate=True``) when a
+    query ran the delta filter, exact when browsing without one.
     """
     since_seq = db.resolve_ref(params.since) if params.since else None
     filters = SearchFilters(
@@ -515,24 +520,27 @@ def search(
         after=_parse_after(params.after, params.order),
     )
     groups = render.pair_by_term_and_commit(events, order=params.order)
-    filtered = (
-        g
-        for g in (
-            g._replace(
-                ops=render.filter_ops_by_delta_match(
-                    g.ops, params.q, params.match, params.ignore_case
+    if params.q is None:
+        filtered = groups  # nothing to delta-match; every paired op shows
+    else:
+        filtered = (
+            g
+            for g in (
+                g._replace(
+                    ops=render.filter_ops_by_delta_match(
+                        g.ops, params.q, params.match, params.ignore_case
+                    )
                 )
+                for g in groups
             )
-            for g in groups
+            if g.ops
         )
-        if g.ops
-    )
     taken, next_cursor = _take_page(filtered, params.order, params.limit)
     counts_out = CountsOut(
         events=counts.events,
         terms=counts.terms,
         commits=counts.commits,
-        approximate=True,
+        approximate=params.q is not None,
     )
     if params.order == "term":
         return PageOut(

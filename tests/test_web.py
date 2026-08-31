@@ -243,12 +243,14 @@ def test_search_page_without_query_shows_form_only(client):
 
 
 def test_search_page_renders_first_page_with_load_more(client):
+    # The form defaults to newest-first, so page one is the latest commit
+    # and the load-more cursor is its commit_seq.
     r = client.get("/onto/search", params={"q": "SHARED", "limit": 1})
     assert r.status_code == 200
     assert "events across" in r.text
-    assert "MONDO:0000001" in r.text
+    assert "MONDO:0000004" in r.text
     assert 'hx-trigger="revealed"' in r.text
-    assert "after=MONDO%3A0000001" in r.text
+    assert "after=3" in r.text
 
 
 def test_search_form_blank_filters_do_not_filter(client):
@@ -298,6 +300,24 @@ def test_search_form_order_newest_and_oldest(client):
         "/onto/search", params={"q": "SHARED", "order": "date", "reverse": "true"}
     )
     assert '<option value="oldest" selected>' in raw.text
+
+
+def test_search_without_query_browses(client):
+    # q is a filter like the others: filters-only (and even fully blank)
+    # requests browse everything they select, with exact counts.
+    api = client.get(
+        "/api/v1/sources/onto/search", params={"tag": "name", "order": "term"}
+    ).json()
+    assert api["counts"]["approximate"] is False
+    assert api["counts"]["events"] == 4
+    assert [s["term_id"] for s in api["sections"]] == [
+        "MONDO:0000001", "MONDO:0000002", "MONDO:0000003", "MONDO:0000004",
+    ]
+    # Blank form submit → browse; bare URL → just the form.
+    blank = client.get("/onto/search?q=&tag=&namespace=&term=")
+    assert "events across" in blank.text
+    bare = client.get("/onto/search")
+    assert "events across" not in bare.text
 
 
 def test_search_results_fragment_pages(client):

@@ -408,7 +408,12 @@ def diff(
 
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="Text to match in event values: substring by default, --exact or --regex to change the mode."),
+    query: Optional[str] = typer.Argument(
+        None,
+        help="Text to match in event values: substring by default, --exact "
+             "or --regex to change the mode. Omit to browse everything the "
+             "filters select.",
+    ),
     source: str = typer.Option(..., "--source", help="Configured source name."),
     config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
@@ -468,7 +473,10 @@ def search(
         # pattern, so success here means the stream won't hit it.
         counts = db.search_counts(query, filters)
     if counts.events == 0:
-        console.print(f'[yellow]No events matching[/] "{query}"')
+        if query is None:
+            console.print("[yellow]No events match those filters[/]")
+        else:
+            console.print(f'[yellow]No events matching[/] "{query}"')
         db.close()
         return
     # Provisional scope, printed before results start streaming. These are
@@ -484,12 +492,15 @@ def search(
         db.iter_search_events(query, filters, order=order.value, reverse=reverse),
         order=order.value,
     )
-    filtered = (
-        g for g in
-        (g._replace(ops=render.filter_ops_by_delta_match(g.ops, query, match, ignore_case))
-         for g in groups)
-        if g.ops
-    )
+    if query is None:
+        filtered = groups  # nothing to delta-match; every paired op shows
+    else:
+        filtered = (
+            g for g in
+            (g._replace(ops=render.filter_ops_by_delta_match(g.ops, query, match, ignore_case))
+             for g in groups)
+            if g.ops
+        )
     truncated = [False]
     if limit is not None:
         section_key = (
@@ -507,8 +518,11 @@ def search(
         verb = "Showed" if truncated[0] else "Found"
         footer = Text("\n")
         footer.append(f"{verb} {stats.events}", style="bold")
-        footer.append(" events matching ", style="dim")
-        footer.append(f'"{query}"', style="bold")
+        if query is None:
+            footer.append(" events", style="dim")
+        else:
+            footer.append(" events matching ", style="dim")
+            footer.append(f'"{query}"', style="bold")
         footer.append(" across ", style="dim")
         footer.append(f"{stats.terms}", style="bold")
         footer.append(" terms and ", style="dim")

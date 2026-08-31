@@ -5,7 +5,7 @@
 <h1>Search {{ src }}</h1>
 <form class="search" method="get" action="/{{ src }}/search">
   <div class="query">
-    <input type="search" name="q" value="{{ params.q if params else '' }}"
+    <input type="search" name="q" value="{{ params.q or '' if params else '' }}"
            placeholder="search clause values" autofocus>
     <label>match
       <select name="match">
@@ -46,8 +46,8 @@
       value="{{ params.term or '' if params else '' }}"></label>
     <label>order
       <select name="order">
-        <option value="term" {% if not params or params.order == 'term' %}selected{% endif %}>by term</option>
-        <option value="newest" {% if params and params.order == 'date' and not params.reverse %}selected{% endif %}>newest first</option>
+        <option value="term" {% if params and params.order == 'term' %}selected{% endif %}>by term</option>
+        <option value="newest" {% if not params or (params.order == 'date' and not params.reverse) %}selected{% endif %}>newest first</option>
         <option value="oldest" {% if params and params.order == 'date' and params.reverse %}selected{% endif %}>oldest first</option>
       </select>
     </label>

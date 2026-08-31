@@ -82,16 +82,17 @@ def _fragment_query_string(params: service.SearchParams) -> str:
 
 
 class _FormParams(service.SearchParams):
-    """The search form before a query is typed: ``q`` optional.
+    """The search form's dialect of :class:`service.SearchParams`.
 
     ``order`` additionally accepts the form's combined values: a select
     can only set one param, so ``newest``/``oldest`` mean date order
     with the commit-time direction baked in (date order is newest-first
-    by default, ``reverse`` makes it oldest-first).
+    by default, ``reverse`` makes it oldest-first). The form defaults to
+    newest-first — the git-log shape — where the API defaults to term
+    order.
     """
 
-    q: str | None = None
-    order: Literal["term", "date", "newest", "oldest"] = "term"
+    order: Literal["term", "date", "newest", "oldest"] = "newest"
 
     def to_search_params(self) -> service.SearchParams:
         data = self.model_dump()
@@ -116,7 +117,9 @@ def search_page(
         "page": None,
         "facets": request.app.state.registry.facets(src),
     }
-    if params is not None and params.q:
+    # A bare URL shows the quiet form; any submitted params — even all
+    # blank — run the search (a blank form browses everything, paged).
+    if params is not None and request.url.query:
         sp = params.to_search_params()
         context["params"] = sp
         context["page"] = service.search(db, style, sp)
