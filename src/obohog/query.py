@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterator, NamedTuple, Sequence
 
 import duckdb
+import pyarrow as pa
 
 from . import model
 from .obo import ParsedValue
@@ -288,9 +289,10 @@ class HistoryDB:
                 f"{model.SCHEMA_VERSION}. Rebuild it with `obohog source sync <name>`."
             )
         self.con = duckdb.connect(":memory:")
-        # Artifact-lifetime memo for commit_stats, shared with forks —
-        # the artifact is immutable, so entries never go stale.
+        # Artifact-lifetime memos, shared with forks — the artifact is
+        # immutable, so entries never go stale.
         self._commit_stats_cache: dict = {}
+        self._candidates_cache: dict = {}
         for name in ("commits", "term_snapshots", "events", "releases", "skipped"):
             source = self._source(name)
             if source is None:
@@ -847,6 +849,88 @@ class HistoryDB:
         """Materialized :meth:`iter_search_events`."""
         return list(self.iter_search_events(query, filters))
 
+    def search_candidates(
+        self, query: str, filters: SearchFilters = SearchFilters()
+    ) -> list[tuple[str, int, int]]:
+        """Candidate ``(term_id, commit_seq, matching_events)`` groups.
+
+        One aggregate scan yields everything a paged search needs before
+        touching a wide row: the SQL-candidate counts (sum/distincts of
+        these tuples equal :meth:`search_counts` exactly), the page plan
+        (which sections exist, how heavy each is), and — through
+        :meth:`search_page_events` — the fetch of exactly one page.
+
+        Memoized per ``(query, filters)`` for the handle's lifetime and
+        shared with forks (the artifact is immutable), so every later
+        page of the same search replans from memory and runs no scan at
+        all. Very broad matches are served but not cached. Callers must
+        not mutate the returned list. Surfaces an invalid regex like any
+        scan would.
+        """
+        key = (query, filters)
+        cached = self._candidates_cache.get(key)
+        if cached is not None:
+            return cached
+        where, params = self._search_where(query, filters)
+        rows = self.con.execute(
+            f"""
+            SELECT e.term_id, e.commit_seq, count(*)
+            FROM events e
+            WHERE {where}
+            GROUP BY e.term_id, e.commit_seq
+            """,
+            params,
+        ).fetchall()
+        if len(rows) <= 100_000:
+            if len(self._candidates_cache) >= 16:
+                self._candidates_cache.clear()
+            self._candidates_cache[key] = rows
+        return rows
+
+    def search_page_events(
+        self,
+        pairs: Sequence[tuple[str, int]],
+        filters: SearchFilters = SearchFilters(),
+        *,
+        order: str = "term",
+        reverse: bool = False,
+    ) -> list[TermChange]:
+        """One planned page's events: whole (term, commit) groups, in order.
+
+        ``pairs`` are the page's candidate groups (a subset of
+        :meth:`search_candidates`, which already applied every
+        narrowing on the term axis — so ``has`` is dropped from this
+        WHERE rather than re-scanned). The commit-range bound lets
+        row-group pruning skip everything outside the page; the pair
+        join then keeps only the page's groups, whose *whole* event
+        sets stream (pairing needs both sides of an edit even when only
+        one side's text matched). Materialized: a page is small by
+        construction, and the Arrow registration must outlive the query.
+        """
+        where, params = self._search_where(None, replace(filters, has=()))
+        seqs = [c for _, c in pairs]
+        where += " AND e.commit_seq BETWEEN ? AND ?"
+        params = [*params, min(seqs), max(seqs)]
+        where += (
+            " AND (e.term_id, e.commit_seq) IN"
+            " (SELECT term_id, commit_seq FROM __obohog_page_pairs)"
+        )
+        self.con.register(
+            "__obohog_page_pairs",
+            pa.table(
+                {
+                    "term_id": [t for t, _ in pairs],
+                    "commit_seq": pa.array(seqs, type=pa.int64()),
+                }
+            ),
+        )
+        try:
+            return list(
+                self._iter_term_changes(where, params, order=order, reverse=reverse)
+            )
+        finally:
+            self.con.unregister("__obohog_page_pairs")
+
     def search_counts(
         self, query: str | None, filters: SearchFilters = SearchFilters()
     ) -> EventCounts:
@@ -1021,6 +1105,7 @@ class HistoryDB:
         clone.dir = self.dir
         clone.con = self.con.cursor()
         clone._commit_stats_cache = self._commit_stats_cache
+        clone._candidates_cache = self._candidates_cache
         return clone
 
     def close(self) -> None:

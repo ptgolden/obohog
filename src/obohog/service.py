@@ -454,6 +454,49 @@ def _take_page(
     return taken, None
 
 
+def _plan_match_page(
+    pairs: list[tuple[str, int, int]],
+    order: str,
+    reverse: bool,
+    limit: int,
+    after: str | int | None,
+) -> tuple[list[tuple[str, int]], str | None]:
+    """Choose the sections one text-search page covers.
+
+    Same move as :func:`_plan_browse_page`, planning from
+    :meth:`HistoryDB.search_candidates` instead of commit stats: pick
+    section keys (commits for date order, terms A→Z otherwise) up to
+    ``limit`` or the op budget (candidate events stand in for ops — an
+    overcount, so pages err smaller; a page always gets at least one
+    section, however heavy). Sections here are *candidate* sections:
+    the delta filter may thin or drop some after the fetch, so a page
+    can render fewer than ``limit`` — the cursor still advances by
+    planned key, so pages tile without gaps.
+    """
+    idx = 0 if order == "term" else 1
+    weights: dict = {}
+    for p in pairs:
+        weights[p[idx]] = weights.get(p[idx], 0) + p[2]
+    # Term sections are always A→Z; date order is newest-first unless
+    # reversed — matching the stream spines in _iter_term_changes.
+    descending = order == "date" and not reverse
+    keys = sorted(weights, reverse=descending)
+    if after is not None:
+        keys = [k for k in keys if (k < after if descending else k > after)]
+    page_keys: list = []
+    estimate = 0
+    for k in keys:
+        if page_keys and (len(page_keys) >= limit or estimate >= PAGE_OP_BUDGET):
+            break
+        page_keys.append(k)
+        estimate += weights[k]
+    next_cursor = (
+        str(page_keys[-1]) if page_keys and len(page_keys) < len(keys) else None
+    )
+    chosen = set(page_keys)
+    return [(p[0], p[1]) for p in pairs if p[idx] in chosen], next_cursor
+
+
 def _plan_browse_page(
     db: HistoryDB,
     filters: SearchFilters,
@@ -626,18 +669,21 @@ def search(
     *,
     with_counts: bool = True,
 ) -> PageOut[TermSectionOut] | PageOut[CommitSectionOut]:
-    """One page of search results — the CLI ``search`` pipeline, paged.
+    """One page of search results — same semantics as the CLI ``search``.
 
-    Same stages as the CLI: SQL candidates → pair by (term, commit) →
-    clause-aware delta filter on edits → section cutoff. Date-ordered
-    browsing takes a planned path instead (see :func:`_plan_browse_page`):
-    a whole-release-sized commit joins its page cut to
-    :data:`SECTION_TERM_CAP` terms, the rest reachable only through the
-    commit view. ``counts`` are
-    the SQL candidates — an upper bound (``approximate=True``) when a
-    query ran the delta filter, exact when browsing without one; pass
-    ``with_counts=False`` to skip them (they cost a scan and never
-    change while paging one query).
+    Every path plans before it fetches, so a page's cost tracks the
+    page, not the result set. A text query plans from the candidate
+    skeleton (:meth:`HistoryDB.search_candidates`, memoized — later
+    pages run no scan) and delta-filters the fetched groups, so a page
+    may render fewer than ``limit`` sections; a date-ordered browse
+    plans from commit stats (:func:`_plan_browse_page`), cutting a
+    whole-release-sized commit to :data:`SECTION_TERM_CAP` terms (the
+    rest reachable only through the commit view); a term-ordered browse
+    streams and truncates. ``counts`` are the SQL candidates — an upper
+    bound (``approximate=True``) when a query ran the delta filter,
+    exact when browsing; ``with_counts=False`` skips them (for text
+    queries they're free either way; for browses they cost a scan and
+    never change while paging).
 
     ``has`` clauses narrow the *term* axis: only events of terms
     satisfying every clause are eligible; everything else (q, tag,
@@ -657,10 +703,60 @@ def search(
         namespace=params.namespace,
         has=tuple(parse_has_clause(h) for h in params.has),
     )
-    # The counts scan costs about as much as the page itself, and they
-    # don't change while paging one query — ``with_counts=False`` lets
-    # continuation fetches skip it. (When run, it also surfaces an
-    # invalid regex before the stream starts.)
+    if params.q is not None:
+        # Text search: plan-then-fetch, like the browse planner but from
+        # the candidate-group skeleton. One (memoized) aggregate scan
+        # yields the counts and the page plan; a commit-bounded fetch
+        # then pulls exactly the page's whole (term, commit) groups for
+        # pairing and the delta filter. Also surfaces an invalid regex
+        # before anything streams.
+        pairs = db.search_candidates(params.q, filters)
+        counts_out = None
+        if with_counts:
+            counts_out = CountsOut(
+                events=sum(n for _, _, n in pairs),
+                terms=len({t for t, _, _ in pairs}),
+                commits=len({c for _, c, _ in pairs}),
+                approximate=True,
+            )
+        page_pairs, next_cursor = _plan_match_page(
+            pairs, params.order, params.reverse, params.limit,
+            _parse_after(params.after, params.order),
+        )
+        taken = []
+        if page_pairs:
+            events = db.search_page_events(
+                page_pairs, filters, order=params.order, reverse=params.reverse
+            )
+            groups = render.pair_by_term_and_commit(events, order=params.order)
+            taken = [
+                g
+                for g in (
+                    g._replace(
+                        ops=render.filter_ops_by_delta_match(
+                            g.ops, params.q, params.match, params.ignore_case
+                        )
+                    )
+                    for g in groups
+                )
+                if g.ops
+            ]
+        if params.order == "term":
+            return PageOut(
+                sections=_term_sections(taken, style, params.full),
+                next_cursor=next_cursor,
+                counts=counts_out,
+            )
+        return PageOut(
+            sections=_commit_sections(
+                taken, style, params.full, term_cap=SECTION_TERM_CAP
+            ),
+            next_cursor=next_cursor,
+            counts=counts_out,
+        )
+
+    # Browsing (q=None): counts still need their own scan — they don't
+    # change while paging, so ``with_counts=False`` skips it.
     counts_out = None
     if with_counts:
         counts = db.search_counts(params.q, filters)
@@ -668,10 +764,10 @@ def search(
             events=counts.events,
             terms=counts.terms,
             commits=counts.commits,
-            approximate=params.q is not None,
+            approximate=False,
         )
 
-    if params.order == "date" and params.q is None:
+    if params.order == "date":
         # Browse: plan the page's commit skeleton first (see
         # _plan_browse_page), then fetch exactly one page of events —
         # capped commits contribute only their first SECTION_TERM_CAP
@@ -705,40 +801,19 @@ def search(
             counts=counts_out,
         )
 
+    # Term-ordered browse: no delta filter, sections truncate the
+    # incremental stream at the section limit / op budget.
     events = db.iter_search_events(
-        params.q,
+        None,
         filters,
-        order=params.order,
+        order="term",
         reverse=params.reverse,
-        after=_parse_after(params.after, params.order),
+        after=_parse_after(params.after, "term"),
     )
-    groups = render.pair_by_term_and_commit(events, order=params.order)
-    if params.q is None:
-        filtered = groups  # nothing to delta-match; every paired op shows
-    else:
-        filtered = (
-            g
-            for g in (
-                g._replace(
-                    ops=render.filter_ops_by_delta_match(
-                        g.ops, params.q, params.match, params.ignore_case
-                    )
-                )
-                for g in groups
-            )
-            if g.ops
-        )
-    taken, next_cursor = _take_page(filtered, params.order, params.limit)
-    if params.order == "term":
-        return PageOut(
-            sections=_term_sections(taken, style, params.full),
-            next_cursor=next_cursor,
-            counts=counts_out,
-        )
+    groups = render.pair_by_term_and_commit(events, order="term")
+    taken, next_cursor = _take_page(groups, "term", params.limit)
     return PageOut(
-        sections=_commit_sections(
-            taken, style, params.full, term_cap=SECTION_TERM_CAP
-        ),
+        sections=_term_sections(taken, style, params.full),
         next_cursor=next_cursor,
         counts=counts_out,
     )

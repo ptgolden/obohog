@@ -114,6 +114,29 @@ def test_search_op_budget_bounds_pages(db, monkeypatch):
     ]
 
 
+def test_query_pages_plan_by_candidate_sections(db, monkeypatch):
+    # A tiny op budget bounds pages by candidate weight: one section per
+    # page here, pages tile to the unpaged stream, and the derived
+    # counts ride along on every page for free.
+    unpaged = service.search(db, STYLE, SearchParams(q="SHARED", order="date", limit=500))
+    monkeypatch.setattr(service, "PAGE_OP_BUDGET", 1)
+    collected = []
+    after = None
+    while True:
+        page = service.search(
+            db, STYLE, SearchParams(q="SHARED", order="date", limit=500, after=after)
+        )
+        assert len(page.sections) == 1
+        assert page.counts == unpaged.counts
+        collected.extend(page.sections)
+        if page.next_cursor is None:
+            break
+        after = page.next_cursor
+    assert [s.model_dump() for s in collected] == [
+        s.model_dump() for s in unpaged.sections
+    ]
+
+
 def test_search_without_counts_skips_the_scan(db):
     page = service.search(
         db, STYLE, SearchParams(q="SHARED"), with_counts=False

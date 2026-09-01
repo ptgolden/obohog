@@ -365,3 +365,34 @@ def test_commit_stats_memo_is_shared_with_forks(ldb):
         assert fork.commit_stats() is ldb.commit_stats()
     finally:
         fork.close()
+
+
+def test_search_candidates_match_counts_and_memoize(ldb):
+    f = _filters("~diabetes")
+    pairs = ldb.search_candidates("DOID", f)
+    counts = ldb.search_counts("DOID", f)
+    assert sum(n for _, _, n in pairs) == counts.events
+    assert len({t for t, _, _ in pairs}) == counts.terms
+    assert len({c for _, c, _ in pairs}) == counts.commits
+    assert ldb.search_candidates("DOID", f) is pairs  # memoized
+    fork = ldb.fork()
+    try:
+        assert fork.search_candidates("DOID", f) is pairs
+    finally:
+        fork.close()
+
+
+def test_search_page_events_fetches_whole_groups(requalified_artifact):
+    # Same whole-group contract as iter_search_events, on the planned
+    # path: the page fetch pulls every event of a candidate group, not
+    # just the textually matching side.
+    db = HistoryDB(requalified_artifact)
+    try:
+        pairs = [(t, c) for t, c, _ in db.search_candidates("NCIT")]
+        rows = db.search_page_events(pairs)
+        assert len(rows) == 5
+        last_seq = max(tc.change.commit_seq for tc in rows)
+        c1 = [tc.change for tc in rows if tc.change.commit_seq == last_seq]
+        assert sorted(c.operation for c in c1) == ["add", "add", "remove"]
+    finally:
+        db.close()

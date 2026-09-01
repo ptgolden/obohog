@@ -6,7 +6,9 @@
     {{ m.commit_section(s, src) }}
   {%- endif -%}
 {%- else -%}
-{%- if not params.after %}<p class="empty">No matching {{ 'terms' if params.has and not params.q else 'events' }}.</p>{% endif -%}
+{# a page can be empty yet non-final: every candidate on it was
+   delta-filtered away — the sentinel below keeps loading #}
+{%- if not params.after and not page.next_cursor %}<p class="empty">No matching {{ 'terms' if params.has and not params.q else 'events' }}.</p>{% endif -%}
 {%- endfor -%}
 {#- the full page's timing lives in its counts line; each load-more
     batch notes its own fetch here -#}
