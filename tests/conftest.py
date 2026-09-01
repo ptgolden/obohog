@@ -301,6 +301,48 @@ def wide_commit_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def wide_commits_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A built artifact with two commits, each touching three terms.
+
+    Exercises the browse consumption cap across a *run* of wide commits:
+    a page keeps filling past a capped section instead of ending at the
+    first one.
+    """
+    from obohog.extract import extract
+    from obohog.gitsource import GitSource
+
+    base = tmp_path_factory.mktemp("wide2")
+    repo = base / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    def commit(names: list[str], msg: str, date: str) -> None:
+        _write(
+            repo,
+            "onto.obo",
+            HEADER
+            + "\n".join(
+                _term(f"MONDO:000000{i}", f"name: {name}")
+                for i, name in enumerate(names, start=1)
+            ),
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", msg, date=date)
+
+    commit(["alpha", "beta", "gamma"], "c0 wide", "2021-04-01T00:00:00+00:00")
+    commit(
+        ["alpha two", "beta two", "gamma two"],
+        "c1 wide again",
+        "2021-04-02T00:00:00+00:00",
+    )
+
+    out = base / "artifact"
+    with GitSource(repo) as src:
+        extract(src, "onto.obo", out)
+    return out
+
+
+@pytest.fixture(scope="session")
 def renamed_ns_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A repo whose namespace was renamed wholesale mid-history (TBD → MONDO).
 

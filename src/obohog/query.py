@@ -849,6 +849,104 @@ class HistoryDB:
         """
         return self._count_events(*self._search_where(query, filters))
 
+    def commit_stats(
+        self,
+        filters: SearchFilters = SearchFilters(),
+        *,
+        reverse: bool = False,
+        after: int | None = None,
+    ) -> list[tuple[int, int, int]]:
+        """Per-commit ``(commit_seq, events, terms)`` on the date spine.
+
+        The cheap skeleton a browse page is planned from: an aggregate
+        with no join and no big sort, so a caller can decide which
+        commits a page shows — and knows each one's exact term count —
+        before fetching a single event. Same filters as the event
+        stream; commits with no eligible events don't appear. ``after``
+        is the date-order keyset cursor, strictly-after in the stream's
+        direction (newest first unless ``reverse``).
+        """
+        where, params = self._search_where(None, filters)
+        direction = "ASC" if reverse else "DESC"
+        if after is not None:
+            cmp = ">" if reverse else "<"
+            where = f"({where}) AND e.commit_seq {cmp} ?"
+            params = [*params, int(after)]
+        return self.con.execute(
+            f"""
+            SELECT e.commit_seq, count(*), count(DISTINCT e.term_id)
+            FROM events e
+            WHERE {where}
+            GROUP BY e.commit_seq
+            ORDER BY e.commit_seq {direction}
+            """,
+            params,
+        ).fetchall()
+
+    def capped_term_bounds(
+        self,
+        seqs: Sequence[int],
+        cap: int,
+        filters: SearchFilters = SearchFilters(),
+    ) -> dict[int, str]:
+        """Per commit, the ``cap``-th eligible term_id in term order.
+
+        The inclusive upper bound a planned browse page fetches for a
+        commit too wide to show whole: events of terms past it stay
+        unread in DuckDB. Term order here (``ORDER BY term_id``) must
+        match the event stream's within-commit order.
+        """
+        where, params = self._search_where(None, filters)
+        marks = ", ".join("?" for _ in seqs)
+        rows = self.con.execute(
+            f"""
+            SELECT commit_seq, max(term_id) FROM (
+                SELECT e.commit_seq, e.term_id,
+                       dense_rank() OVER (
+                           PARTITION BY e.commit_seq ORDER BY e.term_id
+                       ) AS rk
+                FROM events e
+                WHERE ({where}) AND e.commit_seq IN ({marks})
+            )
+            WHERE rk <= ?
+            GROUP BY commit_seq
+            """,
+            [*params, *seqs, cap],
+        ).fetchall()
+        return {seq: bound for seq, bound in rows}
+
+    def iter_browse_page_events(
+        self,
+        seqs: Sequence[int],
+        term_bounds: dict[int, str],
+        filters: SearchFilters = SearchFilters(),
+        *,
+        reverse: bool = False,
+    ) -> Iterator[TermChange]:
+        """Stream exactly one planned browse page's events, date-ordered.
+
+        ``seqs`` are the page's commits (from :meth:`commit_stats`);
+        those in ``term_bounds`` contribute only terms up to their bound
+        (from :meth:`capped_term_bounds`). The sort input is one page's
+        worth of rows — no wasted work on events past the page.
+        """
+        where, params = self._search_where(None, filters)
+        parts: list[str] = []
+        extra: list[object] = []
+        whole = [s for s in seqs if s not in term_bounds]
+        if whole:
+            marks = ", ".join("?" for _ in whole)
+            parts.append(f"e.commit_seq IN ({marks})")
+            extra.extend(whole)
+        for seq in seqs:
+            if seq in term_bounds:
+                parts.append("(e.commit_seq = ? AND e.term_id <= ?)")
+                extra.extend([seq, term_bounds[seq]])
+        where = f"({where}) AND ({' OR '.join(parts)})"
+        return self._iter_term_changes(
+            where, [*params, *extra], order="date", reverse=reverse
+        )
+
     def facets(self) -> tuple[list[str], list[str]]:
         """Distinct ``(tags, namespaces)`` present in the events.
 

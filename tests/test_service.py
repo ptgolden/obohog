@@ -94,6 +94,7 @@ def test_search_op_budget_bounds_pages(db, monkeypatch):
     # stream exactly.
     unpaged = service.search(db, STYLE, SearchParams(order="date", limit=500))
     monkeypatch.setattr(service, "PAGE_OP_BUDGET", 1)
+    monkeypatch.setattr(service, "MIN_PAGE_COMMITS", 1)
     collected = []
     after = None
     pages = 0
@@ -259,9 +260,9 @@ def test_commit_view_pages_by_term(wide_db):
 
 
 def test_date_order_sections_cap_terms(wide_db, monkeypatch):
-    # Browsing (q=None) stops *consuming* the commit at the cap: the
-    # page ends there, more_terms comes from a SQL count, and the
-    # cursor resumes past the capped commit.
+    # Browsing (q=None) stops *consuming* the commit at the cap;
+    # more_terms comes from a SQL count. The stream resumes past the
+    # capped commit, finds nothing, and reports the page as final.
     monkeypatch.setattr(service, "SECTION_TERM_CAP", 2)
     page = service.search(wide_db, STYLE, SearchParams(order="date"))
     (section,) = page.sections
@@ -269,12 +270,7 @@ def test_date_order_sections_cap_terms(wide_db, monkeypatch):
         "MONDO:0000001", "MONDO:0000002",
     ]
     assert section.more_terms == 1
-    assert page.next_cursor == str(section.commit.commit_seq)
-    rest = service.search(
-        wide_db, STYLE, SearchParams(order="date", after=page.next_cursor)
-    )
-    assert rest.sections == []
-    assert rest.next_cursor is None
+    assert page.next_cursor is None
 
 
 def test_date_order_cap_respects_filters_in_more_terms(wide_db, monkeypatch):
@@ -288,6 +284,45 @@ def test_date_order_cap_respects_filters_in_more_terms(wide_db, monkeypatch):
     (section,) = page.sections
     assert [t.term_id for t in section.terms] == ["MONDO:0000001"]
     assert section.more_terms == 2
+
+
+@pytest.fixture(scope="module")
+def wide2_db(wide_commits_artifact):
+    db = HistoryDB(wide_commits_artifact)
+    yield db
+    db.close()
+
+
+def test_capped_commit_run_fills_one_page(wide2_db, monkeypatch):
+    # Both commits exceed the cap; the stream re-issues past each, so
+    # one page carries the whole run — with an exact per-commit count —
+    # instead of one commit per page.
+    monkeypatch.setattr(service, "SECTION_TERM_CAP", 2)
+    page = service.search(wide2_db, STYLE, SearchParams(order="date"))
+    assert [s.commit.commit_seq for s in page.sections] == [1, 0]
+    assert [len(s.terms) for s in page.sections] == [2, 2]
+    assert [s.more_terms for s in page.sections] == [1, 1]
+    assert page.next_cursor is None
+
+    oldest = service.search(
+        wide2_db, STYLE, SearchParams(order="date", reverse=True)
+    )
+    assert [s.commit.commit_seq for s in oldest.sections] == [0, 1]
+
+
+def test_min_page_commits_floor_beats_budget(wide2_db, monkeypatch):
+    # A spent op budget ends the page only once MIN_PAGE_COMMITS
+    # sections are on it — capped sections are cheap, so the floor
+    # can't reintroduce the giant-page problem.
+    monkeypatch.setattr(service, "SECTION_TERM_CAP", 2)
+    monkeypatch.setattr(service, "PAGE_OP_BUDGET", 1)
+    monkeypatch.setattr(service, "MIN_PAGE_COMMITS", 1)
+    page = service.search(wide2_db, STYLE, SearchParams(order="date"))
+    assert [s.commit.commit_seq for s in page.sections] == [1]
+    assert page.next_cursor == "1"
+    monkeypatch.setattr(service, "MIN_PAGE_COMMITS", 2)
+    page = service.search(wide2_db, STYLE, SearchParams(order="date"))
+    assert [s.commit.commit_seq for s in page.sections] == [1, 0]
 
 
 def test_date_order_query_path_consumes_whole_section(wide_db, monkeypatch):
