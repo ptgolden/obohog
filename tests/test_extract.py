@@ -798,3 +798,53 @@ def test_namespace_map_id_clause_supports_has_queries(renamed_artifact: Path):
     now = SearchFilters(has=(parse_has_clause("now:id~TBD"),))
     assert list(db.iter_search_events(None, now)) == []
     db.close()
+
+
+# ---------------------------------------------------------------------------
+# Compaction: layout-only rewrite after builds.
+
+
+def test_build_parallel_leaves_compacted_layout(obo_repo: Path, tmp_path: Path):
+    out = tmp_path / "art"
+    build_parallel(str(obo_repo), OBO, out, jobs=3)
+    for table in ("events", "term_snapshots"):
+        assert [p.name for p in (out / table).glob("*")] == ["compact.parquet"]
+
+
+def test_compact_artifact_is_idempotent_and_preserves_rows(
+    obo_repo: Path, tmp_path: Path
+):
+    from obohog.extract import compact_artifact
+
+    # A serial build stores single-file tables — the one layout compaction
+    # doesn't produce itself; it must adopt and still sort/merge.
+    out = tmp_path / "art"
+    with GitSource(obo_repo) as src:
+        extract(src, OBO, out)
+    db = HistoryDB(out)
+    cols = "term_id, commit_seq, operation, predicate, value"
+    before = _multiset(db, "events", cols)
+    snaps_before = _multiset(db, "term_snapshots", "term_id, commit_seq, content_hash")
+    db.close()
+
+    results = compact_artifact(out)
+    assert set(results) == {"events", "term_snapshots"}
+    db = HistoryDB(out)
+    assert _multiset(db, "events", cols) == before
+    assert (
+        _multiset(db, "term_snapshots", "term_id, commit_seq, content_hash")
+        == snaps_before
+    )
+    db.close()
+
+    assert compact_artifact(out) == {}  # second run: nothing to do
+
+
+def test_incremental_recompacts_appended_parts(obo_repo: Path, tmp_path: Path):
+    out = tmp_path / "art"
+    build_parallel(str(obo_repo), OBO, out, jobs=2)
+    _extend_repo(obo_repo)
+    report = build_parallel(str(obo_repo), OBO, out, jobs=2, update=True)
+    assert report.mode is BuildMode.INCREMENTAL
+    for table in ("events", "term_snapshots"):
+        assert [p.name for p in (out / table).glob("*")] == ["compact.parquet"]

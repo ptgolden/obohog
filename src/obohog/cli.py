@@ -290,6 +290,35 @@ def source_repack(
     )
 
 
+@source_app.command("compact")
+def source_compact(
+    name: str = typer.Argument(..., help="Source name (as declared in obohog.toml)."),
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
+):
+    """Consolidate a source's database part-files into one file per table.
+
+    Small part-files add per-file overhead to every scan, and sorting the
+    snapshot table makes it compress ~5x. Syncs now compact automatically;
+    run this once on databases built before that, or after an aborted run.
+    Layout only — no re-parsing, and queries see identical rows.
+    """
+    from .extract import compact_artifact
+
+    source = _resolve_source(name, config)
+    if not source.db_dir.exists():
+        console.print(f"[red]No database at {source.db_dir}. Run `obohog source sync {name}` first.[/]")
+        raise typer.Exit(1)
+    results = compact_artifact(source.db_dir)
+    if not results:
+        console.print(f"[green]Already compact[/] — {source.db_dir}.")
+        return
+    for table, (before, after) in results.items():
+        console.print(
+            f"[green]Compacted[/] {table}: {_fmt_size(before)} → {_fmt_size(after)} "
+            f"([yellow]saved {_fmt_size(before - after)}[/])."
+        )
+
+
 @app.command()
 def term(
     term_id: str = typer.Argument(..., help="e.g. MONDO:0007739"),

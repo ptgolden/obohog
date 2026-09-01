@@ -27,6 +27,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import NamedTuple
 
+import duckdb
 import pyarrow.parquet as pq
 
 from . import model
@@ -369,16 +370,21 @@ def build_parallel(
     if plan.mode is BuildMode.UP_TO_DATE:
         return _refresh_releases(out, tags, plan.resume)
     if plan.mode is BuildMode.INCREMENTAL:
-        return _build_update(
+        report = _build_update(
             clone_path, obo_path, out, full, tags, plan.resume,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
             namespace_map=namespace_map,
         )
-    return _build_full(
-        clone_path, obo_path, out, full[plan.offset:], tags,
-        jobs=jobs, chunk_size=chunk_size, progress=progress,
-        namespace_map=namespace_map,
-    )
+    else:
+        report = _build_full(
+            clone_path, obo_path, out, full[plan.offset:], tags,
+            jobs=jobs, chunk_size=chunk_size, progress=progress,
+            namespace_map=namespace_map,
+        )
+    # After build_meta commits: pure layout work, a failed compaction
+    # leaves a valid (merely uncompacted) artifact.
+    compact_artifact(out)
+    return report
 
 
 class _ResumePlan(NamedTuple):
@@ -620,6 +626,85 @@ def _adopt_single_file_tables(out: Path) -> None:
         if single.exists():
             (out / name).mkdir(exist_ok=True)
             single.rename(out / name / "base.parquet")
+
+
+# One file per table after compaction. The name is the marker: only
+# compaction writes it, so a directory holding exactly this file is
+# known-compacted (a serial artifact adopted as ``base.parquet`` still
+# needs its pass — the snapshot sort matters, not just the merge).
+_COMPACT_NAME = "compact.parquet"
+# Physical row order per table, chosen by measurement (see PERF.md):
+# events stay commit-clustered so row-group zone maps keep pruning
+# browse windows (term-sorting bloats the file and breaks that);
+# term_snapshots sort term-major — successive snapshots of one term are
+# near-identical, so zstd compresses them ~5x, and term_at's point
+# lookup prunes to a few row groups.
+_COMPACT_ORDER = {
+    "events": "commit_seq, term_id",
+    "term_snapshots": "term_id, commit_seq",
+}
+
+
+def compact_artifact(out: Path) -> dict[str, tuple[int, int]]:
+    """Rewrite each part-file table as one ordered file. {table: bytes before/after}.
+
+    Layout only — row content is untouched (verified by count before the
+    swap) and the artifact schema doesn't change, so readers need no
+    migration. The point is query cost: dozens of small part files add
+    ~40ms of per-file overhead to every full scan, and the snapshot sort
+    shrinks that table ~5x. Runs after every sync build; also safe to run
+    once on any existing artifact (idempotent — an already-compacted
+    table is skipped).
+
+    Crash-safe by directory swap: the merged file lands in a sibling
+    ``<table>.compacting`` dir, then replaces the live dir in two
+    renames. A crash can strand the live dir under ``<table>.old`` for
+    one run; both stray dirs are cleaned up on the next attempt, and
+    queries never glob them.
+    """
+    out = Path(out)
+    _adopt_single_file_tables(out)
+    results: dict[str, tuple[int, int]] = {}
+    con = duckdb.connect()
+    try:
+        for name, order in _COMPACT_ORDER.items():
+            live = out / name
+            tmp = out / f"{name}.compacting"
+            old = out / f"{name}.old"
+            shutil.rmtree(tmp, ignore_errors=True)
+            if old.is_dir() and not live.is_dir():
+                old.rename(live)  # a crash between the two renames
+            shutil.rmtree(old, ignore_errors=True)
+            if not live.is_dir():
+                continue
+            parts = sorted(live.glob("*.parquet"))
+            if [p.name for p in parts] == [_COMPACT_NAME]:
+                continue
+            before = sum(p.stat().st_size for p in parts)
+            source = str(live / "*.parquet")
+            n = con.execute(f"SELECT count(*) FROM '{source}'").fetchone()[0]
+            tmp.mkdir()
+            con.execute(
+                f"COPY (SELECT * FROM '{source}' ORDER BY {order})"
+                f" TO '{tmp / _COMPACT_NAME}'"
+                " (FORMAT parquet, COMPRESSION zstd)"
+            )
+            n_out = con.execute(
+                f"SELECT count(*) FROM '{tmp / _COMPACT_NAME}'"
+            ).fetchone()[0]
+            if n_out != n:
+                shutil.rmtree(tmp)
+                raise RuntimeError(
+                    f"compaction of {live} would lose rows ({n} -> {n_out});"
+                    " aborted, artifact untouched"
+                )
+            live.rename(old)
+            tmp.rename(live)
+            shutil.rmtree(old)
+            results[name] = (before, (live / _COMPACT_NAME).stat().st_size)
+    finally:
+        con.close()
+    return results
 
 
 def _clear_aborted_parts(out: Path, last_recorded: int) -> None:
