@@ -323,3 +323,24 @@ def test_has_counts_are_exact(ldb):
     assert counts.terms == 4
     assert counts.events == len(rows)
     assert counts.commits == len({tc.change.commit_seq for tc in rows})
+
+
+# ---------------------------------------------------------------------------
+# Whole-group streaming: a text match pulls in its (term, commit) group.
+
+
+def test_search_streams_whole_groups_for_matching_commits(requalified_artifact):
+    db = HistoryDB(requalified_artifact)
+    try:
+        rows = list(db.iter_search_events("NCIT"))
+        # "NCIT" textually matches two events (c0's xref add, c1's xref
+        # remove) — but both groups arrive whole: c0's name+xref adds,
+        # c1's remove plus both adds (the requalified partner and the
+        # unrelated MEDGEN xref). The op filter, not the SQL, decides
+        # what shows.
+        assert len(rows) == 5
+        last_seq = max(tc.change.commit_seq for tc in rows)
+        c1 = [tc.change for tc in rows if tc.change.commit_seq == last_seq]
+        assert sorted(c.operation for c in c1) == ["add", "add", "remove"]
+    finally:
+        db.close()

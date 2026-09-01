@@ -312,14 +312,35 @@ def pair_by_term_and_commit(
         )
 
 
+def _change_matches(
+    change: Change, query: str, match: str, ignore_case: bool
+) -> bool:
+    """The SQL candidate match, restated for one unpaired event: the full
+    value for substring/regex, the parsed body for exact (mirroring
+    ``_search_where``'s ``e.body = ?``)."""
+    if match == "exact":
+        body = change.parsed.body if change.parsed is not None else change.value
+        return _matches(body, query, match, ignore_case)
+    return _matches(change.value, query, match, ignore_case)
+
+
 def filter_ops_by_delta_match(
     ops: list[Op], query: str, match: str, ignore_case: bool
 ) -> list[Op]:
-    """Keep adds/removes; keep edits only if their delta contains the query."""
+    """Keep the ops whose own change involves the query.
+
+    Search streams whole (term, commit) groups (see
+    ``HistoryDB.iter_search_events``), so ops arrive unvetted: an edit
+    shows only if its *delta* contains the query, an unpaired add/remove
+    only if its value does — same-group bystanders drop here.
+    """
     return [
         op for op in ops
-        if not isinstance(op, Edit)
-        or edit_delta_matches(op, query, match, ignore_case)
+        if (
+            edit_delta_matches(op, query, match, ignore_case)
+            if isinstance(op, Edit)
+            else _change_matches(op.change, query, match, ignore_case)
+        )
     ]
 
 

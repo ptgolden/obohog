@@ -346,3 +346,37 @@ def test_has_blank_clauses_are_absent():
     assert SearchParams(has=["", "  ", "~x"]).has == ["~x"]
     assert SearchParams(has=[""]).has == []  # falls back to event search
     assert SearchParams(has="~x").has == ["~x"]  # bare string, one clause
+
+
+# ---------------------------------------------------------------------------
+# One-sided text matches still pair: the query hits only the removed side.
+
+
+def test_search_one_sided_match_renders_as_edit(requalified_artifact):
+    # c1 requalifies T1's UMLS xref (NCIT:4 out, MEDGEN:8 in) and adds an
+    # unrelated MEDGEN xref. "NCIT" matches only the removed value, but
+    # the result must be the ~ edit of that clause — not a fake deletion —
+    # and the unrelated add must not ride along.
+    db = HistoryDB(requalified_artifact)
+    try:
+        page = service.search(db, STYLE, SearchParams(q="NCIT"))
+        (section,) = page.sections
+        assert section.term_id == "MONDO:0000001"
+        first, second = section.commits  # chronological within the term
+        # c0: the term's creation — only the NCIT-bearing xref add shows.
+        (op0,) = first.ops
+        assert (op0.kind, op0.tag) == ("add", "xref")
+        assert "NCIT:4" in op0.after
+        # c1: one edit op; the requalification, with both raw sides.
+        (op1,) = second.ops
+        assert (op1.kind, op1.tag) == ("edit", "xref")
+        assert "NCIT:4" in op1.before
+        assert "MONDO:M" in op1.after
+        # The qualifier block diffs as a set: kept context, -/+ lines.
+        kinds = [q.kind for q in op1.quals]
+        assert kinds.count("del") == 2
+        assert kinds.count("ins") == 2
+        assert kinds.count("context") == 1
+        assert "edit" not in kinds
+    finally:
+        db.close()

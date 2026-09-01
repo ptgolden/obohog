@@ -199,6 +199,51 @@ def lifecycle_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return out
 
 
+@pytest.fixture(scope="session")
+def requalified_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A built artifact where one commit requalifies an xref.
+
+    c1 rewrites T1's UMLS xref qualifier set — ``NCIT:4`` and ``DOID:9``
+    out, ``MEDGEN:8`` and ``MONDO:M`` in, ``KEEP:1`` kept — and adds an
+    unrelated ``xref: MEDGEN:8`` clause in the same commit. A search for
+    ``NCIT`` matches only the *removed* side, so this is the shape that
+    demands whole-group streaming: without the add partner the edit
+    renders as a fake whole-clause deletion. (Modeled on MONDO:0004782's
+    UMLS:C0011848 xref in mondo commit 3a6ab90.)
+    """
+    from obohog.extract import extract
+    from obohog.gitsource import GitSource
+
+    base = tmp_path_factory.mktemp("requalified")
+    repo = base / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    def commit(terms: list[str], msg: str, date: str) -> None:
+        _write(repo, "onto.obo", HEADER + "\n".join(terms))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", msg, date=date)
+
+    before = _term(
+        "MONDO:0000001",
+        "name: alpha",
+        'xref: UMLS:1 {source="DOID:9", source="KEEP:1", source="NCIT:4"}',
+    )
+    after = _term(
+        "MONDO:0000001",
+        "name: alpha",
+        'xref: MEDGEN:8',
+        'xref: UMLS:1 {source="KEEP:1", source="MEDGEN:8", source="MONDO:M"}',
+    )
+    commit([before], "c0 seed", "2023-01-01T00:00:00+00:00")
+    commit([after], "c1 requalify", "2023-01-02T00:00:00+00:00")
+
+    out = base / "artifact"
+    with GitSource(repo) as src:
+        extract(src, "onto.obo", out)
+    return out
+
+
 @pytest.fixture
 def bad_then_removed_repo(tmp_path: Path) -> Path:
     """A repo where an unparseable term appears, then is removed the next commit.

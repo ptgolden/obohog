@@ -807,13 +807,28 @@ class HistoryDB:
         as in :meth:`_search_where`; ``order``/``reverse``/``after`` as
         in :meth:`_iter_term_changes`.
 
-        Note these are *candidate* rows: the CLI's clause-aware delta
-        filter (see ``obohog.render.edit_delta_matches``) further drops
-        paired edits whose changed portion doesn't contain the query.
+        The stream carries **whole (term, commit) groups**: the text match
+        picks candidate groups via a semi-join, then every event of those
+        groups (under the same non-text narrowings) flows through. Pairing
+        needs both sides of an edit even when only one side's text matches
+        — a query hitting only the removed value must render as a ``~`` of
+        that clause, not as a fake whole-clause deletion.
+
+        These are *candidate* rows: the clause-aware op filter
+        (``obohog.render.filter_ops_by_delta_match``) re-matches the query
+        per op — the paired-partner and same-group events pulled in by the
+        semi-join don't show unless their own delta involves the query.
         """
+        where, params = self._search_where(query, filters)
+        if query is not None:
+            outer, outer_params = self._search_where(None, filters)
+            where = (
+                f"{outer} AND (e.term_id, e.commit_seq) IN "
+                f"(SELECT e.term_id, e.commit_seq FROM events e WHERE {where})"
+            )
+            params = [*outer_params, *params]
         return self._iter_term_changes(
-            *self._search_where(query, filters),
-            order=order, reverse=reverse, after=after,
+            where, params, order=order, reverse=reverse, after=after,
         )
 
     def search_events(
