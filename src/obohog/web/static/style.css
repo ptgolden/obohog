@@ -72,7 +72,12 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Search form: two side-by-side axes (event filter | term selector),
    then a shared filter row. */
-form.search { margin: 0.75rem 0 1.5rem; }
+form.search {
+  margin: 0.75rem 0 1.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
 form.search .axes {
   display: flex;
   flex-wrap: wrap;
@@ -141,8 +146,22 @@ form.search button {
   cursor: pointer;
 }
 form.search button:hover { filter: brightness(1.1); }
-form.search .reset { color: var(--dim); }
-form.search .reset:hover { color: var(--accent); }
+form.search .actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+/* Same shape as the submit, none of its weight. */
+form.search .reset {
+  padding: 0.4rem 1.3rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+form.search .reset:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Reconstructed term stanza (state page + inline expand) */
 .state-link { font-size: 0.85rem; }

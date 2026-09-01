@@ -89,6 +89,8 @@
         <option value="oldest" {% if form and (form.order == 'oldest' or (form.order == 'date' and form.reverse)) %}selected{% endif %}>oldest first</option>
       </select>
     </label>
+  </div>
+  <div class="actions">
     <button type="submit">search</button>
     {# the bare URL renders the quiet form — that IS the reset #}
     <a class="reset" href="/{{ src }}/search">reset</a>
