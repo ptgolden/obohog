@@ -715,13 +715,18 @@ def test_namespace_map_one_identity_across_rename(renamed_artifact: Path):
     ).fetchall()
     assert ("add", "id", "TBD:0000002") in c0
 
-    # The rename commit is NOT a death-and-birth: beta's only event there
-    # is the id spelling going away. (alpha also has real content changes.)
+    # The rename commit is NOT a death-and-birth: beta's only events there
+    # are the id respelling — a remove/add pair the renderer pairs into
+    # one ~ line. (alpha also has real content changes.)
     beta_rename = db.con.execute(
         "SELECT operation, predicate, value FROM events"
         " WHERE term_id = 'MONDO:0000002' AND commit_seq = 1"
+        " ORDER BY operation"
     ).fetchall()
-    assert beta_rename == [("remove", "id", "TBD:0000002")]
+    assert beta_rename == [
+        ("add", "id", "MONDO:0000002"),
+        ("remove", "id", "TBD:0000002"),
+    ]
 
     # References inside values keep their as-written text and diff as the
     # genuine edits they were.

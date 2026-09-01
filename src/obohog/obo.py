@@ -200,16 +200,17 @@ def term_state_of(
 ) -> TermState:
     """A frame's :class:`TermState` under a source's ``namespace_map``.
 
-    When the mapping actually changes the id, the as-written id is kept as
-    a synthetic ``id:`` clause — so the file's original spelling stays a
-    recorded, diffable part of the term's history (its removal marks the
-    commit that renamed the namespace), and TBD-era snapshots reconstruct
-    with the id line the file really had.
+    A mapped source keeps every term's as-written id as a synthetic
+    ``id:`` clause — on *both* sides of a rename, so the rename commit
+    pairs into ``~ id: TBD:x → MONDO:x`` instead of a lone removal that
+    reads like a deletion. The file's original spelling stays a recorded,
+    diffable part of history, and snapshots reconstruct with the id line
+    the file really had. Unmapped sources are untouched.
     """
     raw_id = str(frame.id)
     term_id = map_term_id(raw_id, namespace_map)
     clauses = clauses_of(frame)
-    if term_id != raw_id:
+    if namespace_map:
         id_clause = Clause("id", raw_id, ParsedValue(raw_id, (), None))
         clauses = tuple(sorted((*clauses, id_clause)))
     return TermState(term_id, clauses, hash_clauses(clauses))
