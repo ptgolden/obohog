@@ -102,14 +102,16 @@
 {% if params.has and not params.q and params.order == 'term' %}
 <p class="dim">{{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} (full histories) —
   {{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
-  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
+  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}
+  · {{ elapsed }}</p>
 {% else %}
 {# counts are the SQL scan's upper bound (paired edits whose delta doesn't
    involve the query render nothing) — shown as a plain scale summary,
    deliberately unqualified #}
 <p class="dim">{{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
   {{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} and
-  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
+  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}
+  · {{ elapsed }}</p>
 {% endif %}
 <div id="results">
   {% include 'partials/search_results.html' %}

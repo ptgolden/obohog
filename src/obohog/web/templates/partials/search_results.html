@@ -8,6 +8,11 @@
 {%- else -%}
 {%- if not params.after %}<p class="empty">No matching {{ 'terms' if params.has and not params.q else 'events' }}.</p>{% endif -%}
 {%- endfor -%}
+{#- the full page's timing lives in its counts line; each load-more
+    batch notes its own fetch here -#}
+{%- if params.after and page.sections %}
+<p class="dim fetch-note">↳ {{ page.sections | length }} more section{{ 's' if page.sections | length != 1 }} · {{ elapsed }}</p>
+{%- endif %}
 {%- if page.next_cursor %}
 <div class="load-more"
      hx-get="/{{ src }}/search/results?{{ qs }}&after={{ page.next_cursor | urlencode }}"

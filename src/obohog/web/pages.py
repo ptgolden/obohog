@@ -5,6 +5,7 @@ Templates consume the service layer's models directly (op spans →
 routing and query-string plumbing.
 """
 
+import time
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlencode
@@ -102,6 +103,13 @@ def state_page(
     )
 
 
+def _elapsed_text(seconds: float) -> str:
+    """A human duration for the query-time note: ms under a second."""
+    if seconds < 1:
+        return f"{seconds * 1000:.0f} ms"
+    return f"{seconds:.1f} s"
+
+
 def _fragment_query_string(params: service.SearchParams) -> str:
     """The current search restated as a query string, minus the cursor —
     the load-more sentinel appends its own ``after``. ``doseq`` so the
@@ -194,7 +202,9 @@ def search_page(
         # nulls q/tag in terms scope, so `sp` can't refill the inputs.
         context["form"] = params
         context["params"] = sp
+        t0 = time.perf_counter()
         context["page"] = service.search(db, style, sp)
+        context["elapsed"] = _elapsed_text(time.perf_counter() - t0)
         context["qs"] = _fragment_query_string(sp)
     return templates.TemplateResponse(request, "search.html", context)
 
@@ -207,6 +217,7 @@ def search_results(
     params: Annotated[service.SearchParams, Query()],
 ):
     db, style = handle
+    t0 = time.perf_counter()
     page = service.search(db, style, params)
     return templates.TemplateResponse(
         request,
@@ -215,6 +226,7 @@ def search_results(
             "src": src,
             "params": params,
             "page": page,
+            "elapsed": _elapsed_text(time.perf_counter() - t0),
             "qs": _fragment_query_string(params),
         },
     )

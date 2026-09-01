@@ -1,6 +1,7 @@
 """The JSON API over a built artifact: routes, error mapping, paging."""
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,11 @@ def test_date_order_search_has_band_chevrons(client):
     # term-major keeps headers plain: no page-jump buttons
     html = client.get("/onto/search?q=&order=term").text
     assert 'button class="cnav"' not in html
+
+
+def test_search_page_reports_query_time(client):
+    html = client.get("/onto/search?q=&order=newest").text
+    assert re.search(r"· \d+ ms|· \d+\.\d s", html)
 
 
 def test_unknown_commit_is_404(client):
