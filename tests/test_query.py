@@ -344,3 +344,24 @@ def test_search_streams_whole_groups_for_matching_commits(requalified_artifact):
         assert sorted(c.operation for c in c1) == ["add", "add", "remove"]
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_commit_stats_after_slices_the_memoized_list(ldb, reverse):
+    full = ldb.commit_stats(reverse=reverse)
+    assert len(full) >= 3
+    seqs = [row[0] for row in full]
+    assert seqs == sorted(seqs, reverse=not reverse)
+    # Any cursor slices to exactly the strictly-after remainder, and the
+    # memoized list is what gets sliced (same rows, same order).
+    for i, (seq, _, _) in enumerate(full):
+        rest = ldb.commit_stats(reverse=reverse, after=seq)
+        assert rest == full[i + 1 :]
+
+
+def test_commit_stats_memo_is_shared_with_forks(ldb):
+    fork = ldb.fork()
+    try:
+        assert fork.commit_stats() is ldb.commit_stats()
+    finally:
+        fork.close()

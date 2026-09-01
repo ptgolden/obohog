@@ -288,6 +288,9 @@ class HistoryDB:
                 f"{model.SCHEMA_VERSION}. Rebuild it with `obohog source sync <name>`."
             )
         self.con = duckdb.connect(":memory:")
+        # Artifact-lifetime memo for commit_stats, shared with forks —
+        # the artifact is immutable, so entries never go stale.
+        self._commit_stats_cache: dict = {}
         for name in ("commits", "term_snapshots", "events", "releases", "skipped"):
             source = self._source(name)
             if source is None:
@@ -872,23 +875,37 @@ class HistoryDB:
         stream; commits with no eligible events don't appear. ``after``
         is the date-order keyset cursor, strictly-after in the stream's
         direction (newest first unless ``reverse``).
+
+        Memoized per ``(filters, reverse)`` for the handle's lifetime
+        (the artifact is immutable, so the answer can't change); the
+        ``after`` cursor is sliced from the memoized list in Python, so
+        every page of a browse pays the aggregate once. Callers must
+        not mutate the returned list.
         """
-        where, params = self._search_where(None, filters)
-        direction = "ASC" if reverse else "DESC"
+        key = (filters, reverse)
+        stats = self._commit_stats_cache.get(key)
+        if stats is None:
+            where, params = self._search_where(None, filters)
+            direction = "ASC" if reverse else "DESC"
+            stats = self.con.execute(
+                f"""
+                SELECT e.commit_seq, count(*), count(DISTINCT e.term_id)
+                FROM events e
+                WHERE {where}
+                GROUP BY e.commit_seq
+                ORDER BY e.commit_seq {direction}
+                """,
+                params,
+            ).fetchall()
+            if len(self._commit_stats_cache) >= 32:
+                self._commit_stats_cache.clear()
+            self._commit_stats_cache[key] = stats
         if after is not None:
-            cmp = ">" if reverse else "<"
-            where = f"({where}) AND e.commit_seq {cmp} ?"
-            params = [*params, int(after)]
-        return self.con.execute(
-            f"""
-            SELECT e.commit_seq, count(*), count(DISTINCT e.term_id)
-            FROM events e
-            WHERE {where}
-            GROUP BY e.commit_seq
-            ORDER BY e.commit_seq {direction}
-            """,
-            params,
-        ).fetchall()
+            bound = int(after)
+            if reverse:
+                return [row for row in stats if row[0] > bound]
+            return [row for row in stats if row[0] < bound]
+        return stats
 
     def capped_term_bounds(
         self,
@@ -1003,6 +1020,7 @@ class HistoryDB:
         clone = object.__new__(HistoryDB)
         clone.dir = self.dir
         clone.con = self.con.cursor()
+        clone._commit_stats_cache = self._commit_stats_cache
         return clone
 
     def close(self) -> None:
