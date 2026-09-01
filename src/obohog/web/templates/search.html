@@ -3,16 +3,18 @@
 {% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
 {% block content %}
 <h1>Search {{ src }}</h1>
-{% macro match_select(name, current) -%}
+{# The match select's labels conjugate with the group legend: finite
+   verbs after "changes where", participles after "…that ever had". #}
+{% macro match_select(name, current, verbs) -%}
 <select name="{{ name }}">
-  <option value="substring" {% if current == 'substring' %}selected{% endif %}>substring</option>
-  <option value="exact" {% if current == 'exact' %}selected{% endif %}>exact</option>
-  <option value="regex" {% if current == 'regex' %}selected{% endif %}>regex</option>
+  <option value="substring" {% if current == 'substring' %}selected{% endif %}>{{ verbs[0] }}</option>
+  <option value="exact" {% if current == 'exact' %}selected{% endif %}>{{ verbs[1] }}</option>
+  <option value="regex" {% if current == 'regex' %}selected{% endif %}>{{ verbs[2] }}</option>
 </select>
 {%- endmacro %}
 {% macro tag_select(name, picked) -%}
 <select name="{{ name }}">
-  <option value="">any</option>
+  <option value="">any field</option>
   {% for p in facets.tags %}
   <option value="{{ p }}"{% if picked == p %} selected{% endif %}>{{ p }}</option>
   {% endfor %}
@@ -27,12 +29,13 @@
      group means "no constraint on this axis". #}
   <div class="axes">
     <fieldset class="axis">
-      <legend>changes matching</legend>
-      <input type="search" name="q" value="{{ form.q or '' if form else '' }}"
-             placeholder="text in the changed value" autofocus>
-      <div class="knobs">
-        <label>match {{ match_select('match', form.match if form else 'substring') }}</label>
-        <label>tag {{ tag_select('tag', form.tag if form else none) }}</label>
+      <legend>changes where</legend>
+      <div class="clause">
+        {{ tag_select('tag', form.tag if form else none) }}
+        {{ match_select('match', form.match if form else 'substring',
+                        ['contains', 'is exactly', 'matches regex']) }}
+        <input type="search" name="q" value="{{ form.q or '' if form else '' }}"
+               autofocus>
       </div>
     </fieldset>
     <fieldset class="axis">
@@ -42,15 +45,23 @@
           <option value="now" {% if form and form.quantifier == 'now' %}selected{% endif %}>currently have</option>
         </select>
       </legend>
-      <input type="search" name="tq" value="{{ form.tq or '' if form else '' }}"
-             placeholder="text in any matching value">
+      <div class="clause">
+        {{ tag_select('ttag', form.ttag if form else none) }}
+        {{ match_select('tmatch', form.tmatch if form else 'substring',
+                        ['containing', 'exactly', 'matching regex']) }}
+        <input type="search" name="tq" value="{{ form.tq or '' if form else '' }}">
+      </div>
       <div class="knobs">
-        <label>match {{ match_select('tmatch', form.tmatch if form else 'substring') }}</label>
-        <label>tag {{ tag_select('ttag', form.ttag if form else none) }}</label>
         <label>term <input name="term" size="14"
           value="{{ form.term or '' if form else '' }}"></label>
       </div>
     </fieldset>
+  </div>
+  {# One flag, both axes: it lowercases both sides of every text match
+     above (all three modes), so it sits under the pair, not per-group. #}
+  <div class="case-row">
+    <label><input type="checkbox" name="ignore_case" value="true"
+      {% if form and form.ignore_case %}checked{% endif %}> ignore case in text matches</label>
   </div>
   <div class="filters">
     {% set picked_namespace = form.namespace if form else none %}
@@ -78,8 +89,6 @@
         <option value="oldest" {% if form and (form.order == 'oldest' or (form.order == 'date' and form.reverse)) %}selected{% endif %}>oldest first</option>
       </select>
     </label>
-    <label><input type="checkbox" name="ignore_case" value="true"
-      {% if form and form.ignore_case %}checked{% endif %}> ignore case</label>
     <button type="submit">search</button>
   </div>
 </form>
