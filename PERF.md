@@ -74,6 +74,64 @@ Only worth bundling with another schema bump.
 harmless, but not the main lever here: it only helps repeated
 identical queries, and the expected traffic is mostly novel queries.
 
+## Round 2: layout + plan-then-fetch (2026-09-01, deeper pass)
+
+**Artifact layout is the biggest untwisted knob, and it needs no schema
+bump** — readers glob the table dirs, so file count/order/codec are
+free to change. Measured on mondo, current code, only the files
+changed:
+
+| operation            | current | best layout |
+|----------------------|--------:|------------:|
+| typical search p1    |  392 ms |      244 ms |
+| typical load-more    |  271 ms |      197 ms |
+| browse newest (warm) |  110 ms |       68 ms |
+| browse oldest (warm) |  327 ms |      126 ms |
+| timeline (busy term) |  116 ms |       58 ms |
+| state at HEAD        |   65 ms |       29 ms |
+| artifact size        |  471 MB |      160 MB |
+
+"Best layout" is two changes, ~2 s to produce from the existing
+artifact (pure DuckDB COPY, no git):
+
+1. **Compact events to one file, keeping commit order.** 56 small
+   files cost ~40 ms of per-file overhead on *every* `contains()`
+   scan (56→16 ms measured in isolation). Commit order preserves
+   row-group zone maps on commit_seq, so browse-window pruning
+   survives. Do NOT sort events by term: it bloats the file
+   (92→129 MB — diff rows have no cross-row redundancy) and kills
+   commit pruning.
+2. **Sort term_snapshots by (term_id, commit_seq) and compact.**
+   Successive snapshots of one term are near-identical, so zstd
+   crushes the redundancy: 379→74 MB (5×). term_at (a term-major
+   point lookup) halves. No consumer needs snapshots in commit order
+   (term_at and the name joins are key lookups).
+
+Caveats measured: ROW_GROUP_SIZE 500k regresses point lookups (state
+274 ms) — keep the default; incremental syncs that append files will
+decay performance again, so compaction belongs at the end of every
+sync, not as a one-off. Compaction must respect extract's incremental
+file-naming scheme (`{chunk}-{batch}.parquet` resumption) — study that
+before wiring in.
+
+**Plan-then-fetch generalizes to delta searches** (prototype, on best
+layout): one match-scan returns `(term_id, commit_seq, n)` candidate
+pairs (53 ms) — counts derive from it for free, the page plan is
+Python over the pairs, and a commit-bounded fetch joined against the
+page's pairs (an Arrow-registered relation) pulls only the page's wide
+rows (49 ms; term-order variant 56 ms). Estimated end-to-end: cold
+page ~140 ms (vs 244), and with the pairs memoized per (q, filters) a
+load-more page ~90 ms (vs 197) — no scans at all, just the bounded
+fetch. Stacked with the layout change: the original 0.45 s query lands
+around 0.09–0.14 s. Behavior delta to accept: pages plan by candidate
+commits, so a page can render fewer than `limit` sections after the
+delta filter drops groups (cursor semantics unchanged).
+
+Trap for the implementation: never `executemany` the pairs into a temp
+table — 2.5k inserts cost 600 ms. `con.register()` an Arrow table
+(zero-copy, instant). Restricting the name join to page pairs is not
+worth it (49→45 ms).
+
 ## Measured dead ends (don't revisit without new evidence)
 
 - Dropping the `term_snapshots` LEFT JOIN: no gain (DuckDB handles it).
@@ -81,6 +139,11 @@ identical queries, and the expected traffic is mostly novel queries.
 - Re-issuing the stream past capped commits (tried, discarded before
   merge): each re-issue re-paid the full sort, ~0.4s × ~12 capped
   commits per page. Planning the page first is strictly better.
+- Sorting *events* by term or (predicate, term): larger files, broken
+  commit pruning, and the contains() win turned out to be file-count
+  overhead, not sort order.
+- `executemany` for passing a pair list to DuckDB (600ms for 2.5k
+  rows); register an Arrow table instead.
 
 ## Deploy tuning (untested, check when the box exists)
 
