@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% import 'partials/macros.html' as m %}
+{% block title %}{{ timeline.term_id }} — {{ src }} — obohog{% endblock %}
+{% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
+{% block content %}
+<h1>{{ timeline.term_id }}{% if timeline.header and timeline.header.current_name %}
+  <span class="name">— {{ timeline.header.current_name }}</span>{% endif %}</h1>
+
+{% if timeline.header %}
+<p class="dim">
+  {% if timeline.shown_events != timeline.total_events -%}
+  showing {{ "{:,}".format(timeline.shown_events) }} of {{ "{:,}".format(timeline.total_events) }} events
+  {%- else -%}
+  {{ "{:,}".format(timeline.total_events) }} event{{ 's' if timeline.total_events != 1 }}
+  {%- endif %} across {{ "{:,}".format(timeline.commits | length) }} {{ commit_noun }}{{ 's' if timeline.commits | length != 1 }}
+  · first {{ timeline.header.first_date | dateonly }}
+  · last {{ timeline.header.last_date | dateonly }}
+</p>
+{% endif %}
+{% if timeline.by_tag %}
+<p class="dim">by tag:
+  {% for t, n in timeline.by_tag.items() %}{{ t }} {{ n }}{{ ", " if not loop.last }}{% endfor %}
+</p>
+{% endif %}
+
+{% for g in timeline.commits %}
+<section class="commit-section">
+  {{ m.commit_header(g.commit, src, term_id=timeline.term_id) }}
+  {% for o in g.ops %}{{ m.op(o) }}{% endfor %}
+</section>
+{% endfor %}
+{% endblock %}

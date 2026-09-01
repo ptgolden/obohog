@@ -1,0 +1,18 @@
+{% import 'partials/macros.html' as m %}
+{%- for s in page.sections -%}
+  {%- if params.order == 'term' -%}
+    {{ m.term_section(s, src) }}
+  {%- else -%}
+    {{ m.commit_section(s, src) }}
+  {%- endif -%}
+{%- else -%}
+{%- if not params.after %}<p class="empty">No matching events.</p>{% endif -%}
+{%- endfor -%}
+{%- if page.next_cursor %}
+<div class="load-more"
+     hx-get="/{{ src }}/search/results?{{ qs }}&after={{ page.next_cursor | urlencode }}"
+     hx-trigger="revealed"
+     hx-swap="outerHTML">
+  <span class="dim">loading more…</span>
+</div>
+{%- endif %}

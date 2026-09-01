@@ -53,6 +53,38 @@ def test_first_commit_has_no_parent(obo_repo: Path):
     assert versions[1].commit.parent_sha == versions[0].commit.sha
 
 
+def test_fetch_advances_local_branch(obo_repo: Path, tmp_path: Path) -> None:
+    """fetch() must make new upstream commits visible to the history walk.
+
+    Our clones are --no-checkout, so a bare ``git fetch`` only moves
+    refs/remotes/origin/* — the walk starts at HEAD and would stay stale.
+    """
+    from conftest import HEADER, _git, _term, _write
+
+    clone = tmp_path / "clone"
+    GitSource.clone(str(obo_repo), clone).close()
+
+    # A sixth commit lands upstream after the clone.
+    two_terms = (
+        _term("MONDO:0000001", "name: disease", 'synonym: "illness" EXACT []',
+              "xref: DOID:4")
+        + "\n"
+        + _term("MONDO:0000002", "name: cancer", "xref: NCIT:C9305")
+    )
+    _write(obo_repo, "src/onto.obo", HEADER + two_terms)
+    _git(obo_repo, "add", "-A")
+    _git(obo_repo, "commit", "-qm", "c5 add xref to term 2",
+         date="2021-01-06T00:00:00+00:00")
+
+    with GitSource(clone) as src:
+        before = [v.commit.message for v in src.iter_file_history(OBO)]
+        src.fetch()
+        after = [v.commit.message for v in src.iter_file_history(OBO)]
+
+    assert "c5 add xref to term 2" not in before
+    assert after == before + ["c5 add xref to term 2"]
+
+
 def test_merge_populates_branch_commits(tmp_path: Path) -> None:
     """iter_file_history resolves branch commits via the in-memory DAG walk.
 

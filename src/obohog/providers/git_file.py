@@ -24,8 +24,10 @@ class GitFileProvider:
         self, source: GitFileSource, *, since: str | None = None
     ) -> str:
         """Return the path to source's clone, cloning it (blob-filtered) if
-        missing. Backfills the tracked file's blobs on every call — idempotent
-        after the first successful run.
+        missing or fetching new upstream commits if present. Backfills the
+        tracked file's blobs on every call — idempotent after the first
+        successful run, and it's what pulls the blobs for freshly fetched
+        commits.
 
         The scoped backfill is what makes ``git log --follow`` on the tracked
         file fast: without it, git triggers a lazy-fetch per commit during
@@ -42,9 +44,10 @@ class GitFileProvider:
             GitSource.clone(source.repo, source.clone_dir, since=since).close()
         else:
             self.console.print(
-                f"Reusing clone at [cyan]{source.clone_dir}[/] "
-                "(delete it to re-clone with different bounds)."
+                f"Fetching new commits into [cyan]{source.clone_dir}[/] "
+                "(delete it to re-clone with different bounds) …"
             )
+            GitSource(source.clone_dir).fetch()
         self.console.print(
             f"Backfilling blobs for [cyan]{source.file}[/] "
             "(one delta-packed fetch of all historical versions) …"

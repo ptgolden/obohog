@@ -46,7 +46,7 @@ Chosen stack:
   (change detected by content-hashing each normalized term frame). Reconstructing
   "state of `MONDO:x` at commit `c`" = the latest snapshot with `commit_seq <= seq(c)`.
 - **Change events**, materialized by diffing adjacent snapshots of the same term:
-  `(term_id, commit_seq, predicate, value, operation)` where operation ∈ {add, remove}.
+  `(term_id, commit_seq, tag, value, operation)` where operation ∈ {add, remove}.
   A synonym text edit is naturally a remove+add of that clause. This table is the
   queryable spine for "when did X change".
 - Snapshots are the source of truth; events are a convenience view over them.
@@ -121,6 +121,12 @@ Chosen stack:
   recomposes to `value` byte-for-byte) and lets query/render work without
   running fastobo at all. Semantic events (term_created / term_obsoleted /
   term_merged) are just filtered views over this table.
+
+  Naming: the stored `predicate` columns (here and in `clauses`) predate a
+  vocabulary cleanup — everywhere above the storage layer (code, CLI, API, UI)
+  this field is called **tag**, matching OBO-format terminology (this is not
+  RDF). The column rename itself is deferred to the next schema bump so a pure
+  rename never forces a re-sync.
 - **`build_meta`** — schema version, generator version, source repo URL, source
   sha range (first/last `commit_seq`), obo path. Makes results deterministic and
   reproducible; supports incremental rebuilds.
@@ -146,9 +152,11 @@ commits) so point-in-time queries are simple range comparisons.
      by diffing clause sets vs the previous version, write `events` rows.
    - Removed terms (present before, absent now) → a removal marker event.
 4. Write Parquet via pyarrow/DuckDB; write `build_meta`.
-5. **Incremental mode** (`--since ARTIFACT`): read last `commit_seq` from prior
-   `build_meta`, seed the "previous version" from the last snapshot state, process
-   only newer commits, append. Keeps ongoing per-release rebuilds cheap.
+5. **Incremental mode** (the default on re-sync): read `last_commit_seq` from
+   the prior `build_meta`, verify the new walk still has that sha at that
+   position (else fall back to a full rebuild), seed the "previous version"
+   from that commit's blob, process only newer commits, append. Keeps ongoing
+   re-syncs seconds-cheap; `--rebuild` forces a from-scratch build.
 
 Cost note: parsing is Rust-backed (fastobo) and one-time; term-level hashing avoids
 storing/diffing unchanged terms; per-commit parse is independent and parallelizable
@@ -156,7 +164,7 @@ if needed.
 
 **Robustness stance:** correctness comes from *types and libraries*, not defensive
 code. Model snapshots/events/operations as typed dataclasses (or Pydantic/attrs) and
-a small enum for `operation`/`predicate`; let fastobo, pyarrow, and DuckDB enforce
+a small enum for `operation`/`tag`; let fastobo, pyarrow, and DuckDB enforce
 their own invariants and raise on violation. Avoid speculative edge-case handling.
 
 ---
@@ -170,6 +178,29 @@ CLI (`obohog`):
 - `commit <sha>` — all terms changed together in that commit.
 - `pr <n>` — terms affected by a PR.
 - `diff <releaseA> <releaseB> [--term MONDO:x]` — changes between two releases.
+
+HTTP (`obohog serve`, read-only; the `web` extra):
+- **One service layer** (`service.py`) that the JSON routes, the HTML pages,
+  and any future agent adapter (MCP) all call — typed Pydantic results, no
+  query logic in any adapter. Nothing in `service.py` imports FastAPI, so an
+  MCP server later is a page of thin wrappers.
+- **JSON API** under `/api/v1` (OpenAPI at `/api/docs`): sources, releases,
+  term timeline/state, search, diff, commit, PR. Ops arrive as role-tagged
+  spans (`same`/`del`/`ins`/`note`) plus raw before/after values.
+- **Web UI**: server-rendered Jinja2 + HTMX (no SPA). Search results page
+  incrementally — a sentinel `div` `hx-get`s the next fragment when revealed.
+- **Pagination**: bounded by default (50 sections, cap 500), keyset cursor =
+  the section key (`term_id` for term order, `commit_seq` for date order);
+  `next_cursor` passes back as `after`, and pages concatenate to exactly the
+  unpaged stream.
+- **Concurrency & refresh**: one open `HistoryDB` per source in a registry;
+  each request gets a `fork()` (a DuckDB cursor sharing the parent's view
+  catalog). `build_meta.parquet` is always the artifact's final write, so a
+  changed `(mtime_ns, size)` stat means a CLI re-sync completed and the
+  handle is reopened.
+- **Error mapping**: unknown source / bad ref / no rows → 404; bad regex or
+  cursor → 400; missing-or-stale artifact → 503 with a re-sync hint. HTML
+  routes render error pages (bare fragments for HTMX requests).
 
 ### Commit-header rendering: GitHub-specific heuristics with a graceful fallback
 
@@ -241,9 +272,17 @@ src/obohog/
   gitsource.py                # blobless clone / rename-aware log walk / cat-file blob reader
   obo.py                      # frame normalization, canonical clause set, hashing
   model.py                    # Parquet schemas / table writers
-  query.py                    # DuckDB query helpers (shared by CLI + API)
-  render.py                   # structural word-diff, pairing, delta search
-  cli.py                      # command-line entry point (source subcommand + query commands)
+  query.py                    # DuckDB query helpers (shared by CLI + service layer)
+  render.py                   # console-free pipeline: pairing, delta filter, op_view spans
+  views.py                    # rich console presentation (SourceStyle, timeline/commit views)
+  service.py                  # shared service layer: typed results + keyset paging (CLI status, JSON, HTML)
+  cli.py                      # command-line entry point (source subcommand + query commands + serve)
+  web/                        # the HTTP layer (the `web` extra; FastAPI imports live here)
+    app.py                    #   create_app(config): routers, registry, error mapping
+    deps.py                   #   SourceRegistry: per-source HistoryDB cache + build_meta invalidation
+    api.py                    #   /api/v1 JSON routes
+    pages.py                  #   HTML pages + HTMX search-results fragment
+    templates/ static/        #   Jinja2 templates; vendored htmx + hand-written CSS
   providers/
     __init__.py               # get_provider(source, console) → Provider dispatcher
     _synthetic_git.py         # shared helpers: git init/tag/commit-or-tag-head for materializer providers
@@ -293,39 +332,66 @@ data/                         # gitignored per-source working state
 - CLI is source-aware. All query commands (`term`, `commit`, `pr`, `diff`,
   `search`, `releases`) take a required `--source <name>`. The `source`
   subcommand group manages sources: `source list` shows configured sources
-  with disk usage, `source sync <name>` clones + builds a source's database.
+  with build status, artifact schema version (flagging stale artifacts that
+  need a resync), and disk usage; `source sync <name>` clones (or fetches)
+  + builds a source's database.
 - `gitsource` — blob-filtered clone; rename-following single-file walk; scoped,
   delta-packed history fetch via `git backfill --sparse` (sparse-checkout
   scoped to the source's OBO file); blob reads via a persistent
   `git cat-file --batch`.
 - `obo` — fastobo normalization (single-threaded parse, `threads=1`), canonical
-  clause sets, content hashing, clause diffing.
-- `extract` — single-threaded `build()` (full-parse reference) and a **parallel,
-  streaming `build_parallel()`**: the commit range is split into **more chunks
-  than workers** (default ~4/worker, tunable via `--chunk-size`) and dispatched
-  dynamically by the process pool, so a worker that finishes a light chunk grabs
-  the next queued one instead of idling (the earlier tail-latency issue). Each
-  chunk is seeded by the previous chunk's last commit — a one-parse cost that
-  bounds how small chunks can usefully get. Parquet **part-files** are flushed
-  periodically to bound memory; output dirs are cleared first so re-runs don't
-  accumulate stale files.
-  - **Diff-scoped parsing:** rather than fastobo-parsing all ~45 MB each commit,
-    a worker splits the file into stanzas by text (cheap), hashes each, and hands
-    fastobo *only the stanzas whose bytes changed*, carrying unchanged term state
-    forward. This is ~10× faster (verified byte-identical to full parsing) and
-    more resilient — an unparseable stanza only matters at the commit that
-    touches it.
+  clause sets, content hashing, clause diffing; **`DocumentState`**, the one
+  diff core every builder drives: it applies one version's bytes at a time and
+  returns a typed `CommitDelta` (changed terms with clause-level diffs,
+  removed terms, per-stanza failures).
+- `extract` — orchestration over that core: a serial in-process `build()` and
+  a **parallel, streaming `build_parallel()`** sharing the same semantics (an
+  independent naive full-parse oracle lives in the test suite). The commit
+  range is split into **more chunks than workers** (default ~4/worker, tunable
+  via `--chunk-size`) and dispatched dynamically by the process pool, so a
+  worker that finishes a light chunk grabs the next queued one instead of
+  idling (the earlier tail-latency issue). Each chunk is seeded by the
+  previous chunk's last commit — a one-parse cost that bounds how small chunks
+  can usefully get. Parquet **part-files** are flushed periodically to bound
+  memory; output dirs are cleared first so re-runs don't accumulate stale
+  files.
+  - **Diff-scoped parsing** (inside `DocumentState.apply`): rather than
+    fastobo-parsing all ~45 MB each commit, split the file into stanzas by
+    text (cheap), hash each, and hand fastobo *only the stanzas whose bytes
+    changed*, carrying unchanged term state forward. This is ~10× faster
+    (verified byte-identical to full parsing) and more resilient — an
+    unparseable stanza only matters at the commit that touches it.
   - **Per-term skip-and-isolate:** a failing batch is bisected until the single
     offending stanza is found; that one term is recorded in `skipped` and skipped,
     never the whole commit.
+  - **Incremental append** (`update=True`, the `source sync` default): resume
+    from `build_meta`'s `last_commit_seq` after checking the new walk still has
+    the same sha at that position (history rewrite → full rebuild), seed worker
+    state from that commit's blob via the existing chunk-seeding machinery, and
+    append `inc-<seq>`-prefixed part-files. The small metadata tables are
+    rewritten whole; `build_meta` is the commit point and is written last, so
+    an aborted increment leaves a consistent, merely stale artifact whose
+    orphaned parts are cleaned up by prefix on the next run. An up-to-date run
+    still refreshes `releases` (release tags rarely touch the tracked file).
 - `model` — Parquet schemas incl. `releases` and `skipped_commits`.
-- `query`/`cli` — DuckDB over part-file globs or single files; `source sync`
-  (with `--jobs`), `term` (with `--limit`, `--since`, `--full`, `--only`,
-  `--at` accepting sha/tag/seq), `commit`, `pr`, `diff`, `search` (with
-  `--regex`, `--ignore-case`, `--namespace`, `--predicate`), `releases`;
-  rich rendering. All query commands are scoped by `--source`.
-- `render` — **structure-aware term timeline**: paired remove/add events on the
-  same predicate render as `~` word-diff edits rather than two adjacent lines.
+- `query` — DuckDB over part-file globs or single files: typed `Change`/
+  `TermChange` rows, streaming iterators with `(term_id, commit_seq)` /
+  `(commit_seq, term_id)` sort spines, and pre-counts.
+- `cli` — typer commands only: `source sync` (with `--jobs`), `term` (with
+  `--limit`, `--since`, `--full`, `--only`, `--at` accepting sha/tag/seq),
+  `commit`, `pr`, `diff`, `search` (with `--exact`, `--regex`, `--ignore-case`,
+  `--namespace`, `--tag`, and `--since`/`--until` taking a ref or a
+  `YYYY-MM-DD` date), `releases`. All query commands are scoped
+  by `--source`.
+- `views` — the console presentation layer: the process console (with a
+  fast plain-text path for pipes), per-source `SourceStyle` knobs threaded
+  explicitly (no module state — safe for a multi-source process like the
+  future HTTP API), commit headers, and the timeline/commit/paired-group
+  views.
+- `render` — the console-free presentation *pipeline* (group by (term,
+  commit), pair, delta-filter, limit — the spine an HTTP API would page
+  over) plus the **structure-aware term timeline**: paired remove/add events on the
+  same tag render as `~` word-diff edits rather than two adjacent lines.
   Pairing is two-pass — parsed-body identity first (fastobo-parsed), then greedy
   lexical similarity — so a same-target clause whose qualifiers were reordered
   can't cross-pair with a different-target clause whose qualifier text happens
@@ -341,9 +407,17 @@ data/                         # gitignored per-source working state
     line token word-diff using a compound-identifier-aware tokenizer that keeps
     CURIEs, URLs, and snake_case names whole while splitting on structural
     punctuation. Git `--word-diff=plain` markers stay readable when piped.
-- **50 tests**, incl. parallel-build == single-threaded equivalence, stale
-  part-file clearing, structure-aware rendering, and the commit-1476 pairing
-  regression.
+- `service` / `web` — the read-only HTTP layer described under
+  *Interfaces*: one typed service layer (Pydantic models, keyset-cursor
+  pages, ops as role-tagged spans built by `render.op_view`) with thin
+  FastAPI JSON routes and Jinja2/HTMX pages over it. `obohog serve`.
+  MCP for agents is deliberately deferred; the service layer is shaped so
+  it lands later as a thin adapter.
+- **178 tests**, incl. parallel == serial and incremental == full-rebuild
+  artifact equivalence, a naive full-parse oracle for the diff-scoped
+  parser, stale part-file clearing, structure-aware rendering, the
+  commit-1476 pairing regression, cursor-paging round-trips (query,
+  service, and HTTP layers), concurrent forks, and registry invalidation.
 
 **Local state:**
 - `./data/mondo/clone/` — full history of `mondo-edit.obo`, 2017-09→2026-06
@@ -357,23 +431,19 @@ data/                         # gitignored per-source working state
 single-threaded build (checksum match on a 12-commit slice).
 
 **Next steps:**
-1. **Incremental updates** — a `source sync --update` path: self-seed from
-   the latest snapshot per term, `git fetch` + `git backfill --sparse` the
-   new commits, append new part-files, extend `commit_seq`; ancestry check
-   as a rewrite guard. This is the top of the queue.
-2. **Prefix migration** — per-source `replaced_prefix` config to
+1. **Prefix migration** — per-source `replaced_prefix` config to
    transparently include `TBD:0000450` events when querying
    `MONDO:0000450`; specified in
    `2026-07-03-note.term-identity-across-renames.md` (deferred note).
-3. **Distribution** — publish part-files to GitHub Releases; document HTTP
+2. **Distribution** — publish part-files to GitHub Releases; document HTTP
    range-query use.
-4. **N-to-M pairing** — detect commits like `1ac4db2^` (two same-target xrefs
+3. **N-to-M pairing** — detect commits like `1ac4db2^` (two same-target xrefs
    collapsed into one with a merged qualifier list). Now tractable given the
    fastobo-parsed body + qualifier sets; the missing piece is grouping
-   events by body within a predicate bucket before pairing.
-5. **Non-OBO serializations** — OFN, RDF/XML, Turtle. Would require
+   events by body within a tag bucket before pairing.
+4. **Non-OBO serializations** — OFN, RDF/XML, Turtle. Would require
    abstracting the per-commit stanza scan and per-term parse behind a
    format strategy interface; today's diff-scoped parse depends on OBO's
    line-oriented `[Term]` stanzas.
-6. **If size matters** — evaluate the keyframe + event-replay variant to
+5. **If size matters** — evaluate the keyframe + event-replay variant to
    shrink `term_snapshots`.

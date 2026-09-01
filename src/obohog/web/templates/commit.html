@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% import 'partials/macros.html' as m %}
+{% block title %}{% if view.commit.hide_sha %}version {{ view.commit.committed_date | dateonly }}{% else %}commit {{ view.commit.sha[:7] }}{% endif %} — {{ src }} — obohog{% endblock %}
+{% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
+{% block content %}
+<h1>{{ 'Version' if view.commit.hide_sha else 'Commit' }}</h1>
+{{ m.commit_header(view.commit, src, prev_url=prev_url, next_url=next_url) }}
+{% if view.commit.raw_subject %}<p class="dim raw-subject">{{ view.commit.raw_subject }}</p>{% endif %}
+<p class="dim">{{ "{:,}".format(view.counts.terms) }} term{{ 's' if view.counts.terms != 1 }} changed</p>
+{% include 'partials/commit_terms.html' %}
+{% endblock %}

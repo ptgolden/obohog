@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}{{ src }} — search — obohog{% endblock %}
+{% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
+{% block content %}
+<h1>Search {{ src }}</h1>
+<form class="search" method="get" action="/{{ src }}/search">
+  <div class="query">
+    <input type="search" name="q" value="{{ params.q or '' if params else '' }}"
+           placeholder="search clause values" autofocus>
+    <label>match
+      <select name="match">
+        <option value="substring" {% if not params or params.match == 'substring' %}selected{% endif %}>substring</option>
+        <option value="exact" {% if params and params.match == 'exact' %}selected{% endif %}>exact</option>
+        <option value="regex" {% if params and params.match == 'regex' %}selected{% endif %}>regex</option>
+      </select>
+    </label>
+    <label><input type="checkbox" name="ignore_case" value="true"
+      {% if params and params.ignore_case %}checked{% endif %}> ignore case</label>
+  </div>
+  <div class="filters">
+    {% set picked_tag = params.tag if params else none %}
+    <label>tag
+      <select name="tag">
+        <option value="">any</option>
+        {% for p in facets.tags %}
+        <option value="{{ p }}"{% if picked_tag == p %} selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+        {% if picked_tag and picked_tag not in facets.tags %}
+        <option value="{{ picked_tag }}" selected>{{ picked_tag }}</option>
+        {% endif %}
+      </select>
+    </label>
+    {% set picked_namespace = params.namespace if params else none %}
+    <label>namespace
+      <select name="namespace">
+        <option value="">any</option>
+        {% for ns in facets.namespaces %}
+        <option value="{{ ns }}"{% if picked_namespace == ns %} selected{% endif %}>{{ ns }}</option>
+        {% endfor %}
+        {% if picked_namespace and picked_namespace not in facets.namespaces %}
+        <option value="{{ picked_namespace }}" selected>{{ picked_namespace }}</option>
+        {% endif %}
+      </select>
+    </label>
+    <label>term <input name="term" size="14"
+      value="{{ params.term or '' if params else '' }}"></label>
+    <label>from <input type="date" name="since"
+      value="{{ params.since or '' if params else '' }}"></label>
+    <label>to <input type="date" name="until"
+      value="{{ params.until or '' if params else '' }}"></label>
+    <label>order
+      <select name="order">
+        <option value="term" {% if params and params.order == 'term' %}selected{% endif %}>by term</option>
+        <option value="newest" {% if not params or (params.order == 'date' and not params.reverse) %}selected{% endif %}>newest first</option>
+        <option value="oldest" {% if params and params.order == 'date' and params.reverse %}selected{% endif %}>oldest first</option>
+      </select>
+    </label>
+    <button type="submit">search</button>
+  </div>
+</form>
+
+{% if page %}
+{# counts are the SQL scan's upper bound (paired edits whose delta doesn't
+   involve the query render nothing) — shown as a plain scale summary,
+   deliberately unqualified #}
+<p class="dim">{{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
+  {{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} and
+  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
+<div id="results">
+  {% include 'partials/search_results.html' %}
+</div>
+{% endif %}
+{% endblock %}

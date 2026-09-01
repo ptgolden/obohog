@@ -1,6 +1,7 @@
 """Tests for OBO normalization, hashing, and clause diffing."""
 
 from obohog.obo import (
+    DocumentState,
     clause_delta,
     hash_clauses,
     parse_stanzas,
@@ -23,7 +24,7 @@ TERM_B = "[Term]\nid: MONDO:0000002\nname: cancer\n"
 def test_parse_terms_indexes_by_id():
     terms = parse_terms(_doc(TERM_A, TERM_B))
     assert set(terms) == {"MONDO:0000001", "MONDO:0000002"}
-    assert any(c.predicate == "name" and c.value == "disease"
+    assert any(c.tag == "name" and c.value == "disease"
                for c in terms["MONDO:0000001"].clauses)
 
 
@@ -80,7 +81,7 @@ def test_clause_delta_reports_addition():
     after = parse_terms(_doc(TERM_A_SYN))["MONDO:0000001"].clauses
 
     added, removed = clause_delta(before, after)
-    assert [c.predicate for c in added] == ["synonym"]
+    assert [c.tag for c in added] == ["synonym"]
     assert removed == []
 
 
@@ -89,8 +90,8 @@ def test_clause_delta_reports_edit_as_remove_plus_add():
     renamed = parse_terms(_doc("[Term]\nid: MONDO:0000001\nname: illness\n"))["MONDO:0000001"].clauses
 
     added, removed = clause_delta(before, renamed)
-    assert [(c.predicate, c.value) for c in added] == [("name", "illness")]
-    assert [(c.predicate, c.value) for c in removed] == [("name", "disease")]
+    assert [(c.tag, c.value) for c in added] == [("name", "illness")]
+    assert [(c.tag, c.value) for c in removed] == [("name", "disease")]
 
 
 def test_clause_decomposition_recomposes_to_value():
@@ -114,7 +115,7 @@ def test_clause_decomposition_recomposes_to_value():
             recomposed += " {" + ", ".join(c.parsed.qualifiers) + "}"
         if c.parsed.comment is not None:
             recomposed += " ! " + c.parsed.comment
-        assert recomposed == c.value, c.predicate
+        assert recomposed == c.value, c.tag
 
 
 def test_comment_clause_decomposition_has_no_phantom_comment():
@@ -122,7 +123,36 @@ def test_comment_clause_decomposition_has_no_phantom_comment():
     # must not record it as a trailing `!` comment (nothing was peeled).
     doc = _doc("[Term]\nid: MONDO:0000001\ncomment: check NCIT; see notes\n")
     clauses = parse_terms(doc)["MONDO:0000001"].clauses
-    (comment_clause,) = [c for c in clauses if c.predicate == "comment"]
+    (comment_clause,) = [c for c in clauses if c.tag == "comment"]
     assert comment_clause.parsed.body == "check NCIT; see notes"
     assert comment_clause.parsed.comment is None
     assert comment_clause.parsed.qualifiers == ()
+
+
+def test_document_state_apply_reports_creation_change_and_removal():
+    v1 = _doc(TERM_A, TERM_B)
+    v2 = _doc(TERM_A_SYN)  # A gains a synonym, B disappears
+
+    state = DocumentState()
+    d1 = state.apply(v1)
+    assert {t.term.term_id for t in d1.changed} == {"MONDO:0000001", "MONDO:0000002"}
+    assert d1.removed == [] and d1.failed == []
+    # Creation is ∅ → full clause set: everything arrives as additions.
+    assert all(t.removed == [] for t in d1.changed)
+
+    # Byte-identical re-apply is a no-op (the diff-scoped shortcut).
+    d_same = state.apply(v1)
+    assert d_same.changed == [] and d_same.removed == []
+
+    d2 = state.apply(v2)
+    assert [t.term.term_id for t in d2.changed] == ["MONDO:0000001"]
+    (a_delta,) = d2.changed
+    assert [c.tag for c in a_delta.added] == ["synonym"]
+    assert [t.term_id for t in d2.removed] == ["MONDO:0000002"]
+
+
+def test_document_state_from_blob_seeds_a_no_op():
+    v1 = _doc(TERM_A, TERM_B)
+    seeded = DocumentState.from_blob(v1)
+    d = seeded.apply(v1)
+    assert d.changed == [] and d.removed == [] and d.failed == []

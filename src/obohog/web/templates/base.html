@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}obohog{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css?v={{ style_v() }}">
+  <script src="/static/htmx.min.js" defer></script>
+  <script>
+    // "term @ <ref>" links toggle: if that spot already has an open stanza,
+    // a second click closes it instead of fetching another copy. htmx has
+    // already suppressed the link's navigation; cancelling htmx:confirm
+    // cancels the request itself.
+    // Band chevrons: jump to the previous/next commit band on the page.
+    // (The commit page's chevrons are plain links; these are buttons.)
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('button.cnav');
+      if (!btn) return;
+      const bands = [...document.querySelectorAll('.commit-header')];
+      const i = bands.indexOf(btn.closest('.commit-header'));
+      bands[i + Number(btn.dataset.dir)]?.scrollIntoView();
+    });
+    document.addEventListener('htmx:confirm', (e) => {
+      const link = e.detail.elt.closest('.state-link');
+      if (!link) return;
+      const sel = (link.getAttribute('hx-target') || '').replace(/^closest /, '');
+      const open = sel && link.closest(sel)?.nextElementSibling;
+      if (open && open.classList.contains('term-state')) {
+        open.remove();
+        e.preventDefault();
+      }
+    });
+  </script>
+</head>
+<body>
+  <header class="site">
+    <nav>
+      <a class="brand" href="/">obohog</a>
+      {% block nav %}{% endblock %}
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

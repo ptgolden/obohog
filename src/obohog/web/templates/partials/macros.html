@@ -1,0 +1,106 @@
+{# Shared rendering for ops, commit headers, and page sections.
+
+   These consume the service layer's shapes directly: OpOut spans map to
+   <del>/<ins>/plain text — the HTML counterpart of the CLI's bracket
+   markers — and CommitOut carries subject/pr_url/hide_sha pre-resolved. #}
+
+{%- macro spans(sp) -%}
+  {%- for s in sp -%}
+    {%- if s.role == 'same' -%}{{ s.text }}
+    {%- elif s.role == 'del' -%}<del>{{ s.text }}</del>
+    {%- elif s.role == 'ins' -%}<ins>{{ s.text }}</ins>
+    {%- elif s.role == 'note' -%}  <span class="note">{{ s.text }}</span>
+    {%- endif -%}
+  {%- endfor -%}
+{%- endmacro -%}
+
+{#- .text is white-space: pre-wrap, so its markup must stay on one line —
+    any template newline or indent inside it would render literally. -#}
+{%- macro op(o) -%}
+<div class="op op-{{ o.kind }}">
+<div class="line"><span class="marker">{{ {'add': '+', 'remove': '-', 'edit': '~'}[o.kind] }}</span><span class="text"><span class="tag">{{ o.tag }}:</span> {{ spans(o.head) }}</span></div>
+{%- for ql in o.quals %}
+<div class="line qual qual-{{ ql.kind }}"><span class="marker">{{ {'del': '-', 'ins': '+', 'edit': '~', 'context': ''}[ql.kind] }}</span><span class="text">{{ spans(ql.spans) }}</span></div>
+{%- endfor %}
+</div>
+{%- endmacro -%}
+
+{#- Link to the reconstructed stanza after commit `c`. The sha only means
+    something for sources synced from git; synthetic histories (releases,
+    BioPortal) hide it, so those link by date and resolve via commit_seq. -#}
+{%- macro state_link(c, src, term_id, target) -%}
+<a class="state-link dim"
+   href="/{{ src }}/terms/{{ term_id }}/state?at={{ c.sha[:7] if not c.hide_sha else c.commit_seq }}"
+   hx-get="/{{ src }}/terms/{{ term_id }}/state?at={{ c.sha[:7] if not c.hide_sha else c.commit_seq }}"
+   hx-target="closest {{ target }}" hx-swap="afterend" hx-sync="this:drop"
+>term @ {{ c.sha[:7] if not c.hide_sha else (c.committed_date | dateonly) }}</a>
+{%- endmacro -%}
+
+{#- Git sources lead with the sha link; synthetic histories (releases,
+    BioPortal) have no meaningful sha, so the date itself becomes the
+    identifier — a version chip linking to the change set by seq.
+
+    band-tools floats at the band's right edge: the state link, then
+    either page-jump chevrons (nav=true; JS in base.html scrolls to the
+    adjacent band) or older/newer links (prev_url/next_url, used on the
+    single commit/version page). -#}
+{%- macro commit_header(c, src, term_id=none, nav=false, prev_url=none, next_url=none) -%}
+<div class="commit-header">
+  {%- if term_id or nav or prev_url or next_url %}
+  <span class="band-tools">
+    {%- if term_id %}{{ state_link(c, src, term_id, '.commit-header') }}{% endif %}
+    {%- if nav %}
+    <button class="cnav" data-dir="-1" title="previous on this page">↑</button>
+    <button class="cnav" data-dir="1" title="next on this page">↓</button>
+    {%- endif %}
+    {%- if prev_url %}<a class="cnav" href="{{ prev_url }}">older</a>{% endif %}
+    {%- if next_url %}<a class="cnav" href="{{ next_url }}">newer</a>{% endif %}
+  </span>
+  {%- endif %}
+  {%- if not c.hide_sha %}
+  <a class="sha" href="/{{ src }}/commits/{{ c.sha[:7] }}">{{ c.sha[:7] }}</a>
+  <span class="date">{{ c.committed_date | dateonly }}</span>
+  {%- else %}
+  <a class="version" href="/{{ src }}/commits/{{ c.commit_seq }}">{{ c.committed_date | dateonly }}</a>
+  {%- endif %}
+  <span class="author">{{ c.author_name }}</span>
+  <span class="subject">{{ c.subject }}</span>
+  {%- if c.pr_url %}
+  <a class="pr" href="{{ c.pr_url }}">PR #{{ c.pr_number }}</a>
+  {%- elif c.pr_number is not none %}
+  <span class="pr">PR #{{ c.pr_number }}</span>
+  {%- endif %}
+  {%- if c.snapshot_url %}
+  <a class="pr" href="{{ c.snapshot_url }}">release</a>
+  {%- endif %}
+</div>
+{%- endmacro -%}
+
+{%- macro term_link(src, term_id) -%}
+<a class="term" href="/{{ src }}/terms/{{ term_id }}">{{ term_id }}</a>
+{%- endmacro -%}
+
+{%- macro term_section(s, src) -%}
+<section class="term-section">
+  <h3>{{ term_link(src, s.term_id) }}{% if s.name %} <span class="name">— {{ s.name }}</span>{% endif %}</h3>
+  {%- for g in s.commits %}
+  {{ commit_header(g.commit, src, term_id=s.term_id) }}
+  {%- for o in g.ops %}{{ op(o) }}{% endfor %}
+  {%- endfor %}
+</section>
+{%- endmacro -%}
+
+{%- macro commit_section(s, src) -%}
+<section class="commit-section">
+  {{ commit_header(s.commit, src, nav=true) }}
+  {%- for t in s.terms %}
+  <h4>{{ term_link(src, t.term_id) }}{% if t.name %} <span class="name">— {{ t.name }}</span>{% endif %}
+    {{ state_link(s.commit, src, t.term_id, 'h4') }}</h4>
+  {%- for o in t.ops %}{{ op(o) }}{% endfor %}
+  {%- endfor %}
+  {%- if s.more_terms %}
+  <p class="more-terms dim">… {{ "{:,}".format(s.more_terms) }} more term{{ 's' if s.more_terms != 1 }} —
+    <a href="/{{ src }}/commits/{{ s.commit.sha[:7] if not s.commit.hide_sha else s.commit.commit_seq }}">open {{ 'version' if s.commit.hide_sha else 'commit' }}</a></p>
+  {%- endif %}
+</section>
+{%- endmacro -%}

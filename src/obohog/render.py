@@ -1,23 +1,29 @@
-"""Terminal rendering for the term timeline.
+"""Presentation pipeline for the term timeline: pairing, filtering, rendering.
 
 The events table is authoritative — nothing here changes what is recorded. This
-module only decides *how* to present a commit's events: pairing an ``add`` and a
-``remove`` of the same predicate that describe an edit to the same clause, and
-rendering the pair as an inline ``~`` line with intra-value diff highlighting
-(git ``--word-diff`` style). Unpaired events render as ``+`` / ``-`` as before.
+module decides *how* to present a commit's events: grouping the query layer's
+row stream into (term, commit) units, pairing an ``add`` and a ``remove`` of
+the same tag that describe an edit to the same clause, filtering paired
+edits by whether the query hit their changed portion, and rendering each op as
+an inline ``~`` line with intra-value diff highlighting (git ``--word-diff``
+style). Unpaired events render as ``+`` / ``-`` as before.
+
+Everything up to rendering is console-free — the same grouping/pairing/
+filtering pipeline serves any consumer of query results (CLI today, HTTP API
+later); only the ``render_*`` functions commit to rich ``Text`` output.
 """
 
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from itertools import groupby
 from cydifflib import SequenceMatcher
-from typing import Iterable
+from typing import Iterable, Iterator, NamedTuple
 
-import fastobo
 from rich.text import Text
 
-from .obo import ParsedValue, decompose_clause
-from .query import Change
+from .obo import ParsedValue
+from .query import Change, TermChange
 
 PAIR_THRESHOLD = 0.5
 DEFAULT_TRUNCATE = 200
@@ -48,8 +54,8 @@ class Add:
     change: Change
 
     @property
-    def predicate(self) -> str:
-        return self.change.predicate
+    def tag(self) -> str:
+        return self.change.tag
 
 
 @dataclass(frozen=True)
@@ -57,13 +63,13 @@ class Remove:
     change: Change
 
     @property
-    def predicate(self) -> str:
-        return self.change.predicate
+    def tag(self) -> str:
+        return self.change.tag
 
 
 @dataclass(frozen=True)
 class Edit:
-    predicate: str
+    tag: str
     before: Change  # the removed value
     after: Change   # the added value
 
@@ -74,7 +80,7 @@ Op = Add | Remove | Edit
 def pair_events(
     changes: Iterable[Change], threshold: float = PAIR_THRESHOLD
 ) -> list[Op]:
-    """Pair adds/removes within one predicate.
+    """Pair adds/removes within one tag.
 
     Two-pass:
 
@@ -94,10 +100,10 @@ def pair_events(
     """
     buckets: dict[str, list[Change]] = defaultdict(list)
     for c in changes:
-        buckets[c.predicate].append(c)
+        buckets[c.tag].append(c)
 
     ops: list[Op] = []
-    for predicate, group in buckets.items():
+    for tag, group in buckets.items():
         adds = [c for c in group if c.operation == "add"]
         removes = [c for c in group if c.operation == "remove"]
 
@@ -133,7 +139,7 @@ def pair_events(
                 )
             used_r.add(i)
             used_a.add(best_j)
-            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[best_j]))
+            ops.append(Edit(tag=tag, before=removes[i], after=adds[best_j]))
 
         # Pass 2: greedy lexical similarity for the leftovers.
         scored: list[tuple[float, int, int]] = []
@@ -152,7 +158,7 @@ def pair_events(
                 continue
             used_r.add(i)
             used_a.add(j)
-            ops.append(Edit(predicate=predicate, before=removes[i], after=adds[j]))
+            ops.append(Edit(tag=tag, before=removes[i], after=adds[j]))
 
         for i, r in enumerate(removes):
             if i not in used_r:
@@ -166,12 +172,12 @@ def pair_events(
 
 
 def _sort_key(op: Op) -> tuple[str, int, str]:
-    """Stable within-commit order: by predicate, then kind, then value."""
+    """Stable within-commit order: by tag, then kind, then value."""
     if isinstance(op, Edit):
-        return (op.predicate, 0, op.before.value)
+        return (op.tag, 0, op.before.value)
     if isinstance(op, Remove):
-        return (op.predicate, 1, op.change.value)
-    return (op.predicate, 2, op.change.value)
+        return (op.tag, 1, op.change.value)
+    return (op.tag, 2, op.change.value)
 
 
 def _truncate(s: str, cap: int | None) -> str:
@@ -180,50 +186,15 @@ def _truncate(s: str, cap: int | None) -> str:
     return s[: cap - 1] + ELLIPSIS
 
 
-_STANZA_TEMPLATE = "format-version: 1.2\n\n[Term]\nid: TMP:0000001\n{tag}: {value}\n"
-
-
-def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
-    """Parse one OBO clause value using fastobo, returning its structural parts.
-
-    Returns ``None`` when fastobo can't parse the line — some historical
-    clauses in the artifact are malformed enough that fastobo rejects (or
-    even panics on) them; when that happens we fall back to lexical
-    rendering. fastobo already handles the tricky parts (quoted values with
-    escapes, ``!`` inside strings, nested brackets), so we don't hand-parse.
-
-    Keep ``threads=1``. fastobo's default (``threads=0``) starts one thread
-    per logical core on every call, and setting up that pool costs ~19x more
-    than parsing does when the "document" is a single synthetic one-clause
-    stanza. Same reasoning as :mod:`obohog.obo`.
-    """
-    stanza = _STANZA_TEMPLATE.format(tag=predicate, value=value)
-    try:
-        doc = fastobo.loads(stanza, threads=1)
-    except (KeyboardInterrupt, SystemExit):
-        # The bare ``except`` below is here to absorb fastobo's Rust panics
-        # (``BaseException``, not ``Exception``). Interpreter control flow
-        # must not get absorbed with them — swallowing KeyboardInterrupt in
-        # a function this hot makes the CLI unkillable by ^C.
-        raise
-    except BaseException:  # fastobo can panic, not just raise
-        return None
-    frames = list(doc)
-    if not frames:
-        return None
-    for clause in frames[0]:
-        if clause.raw_tag() == "id":
-            continue
-        _, _, serialized = str(clause).partition(": ")
-        return decompose_clause(clause, serialized)
-    return None
-
-
-def _matches(text: str, query: str, regex: bool, ignore_case: bool) -> bool:
-    """Substring or regex match, honoring ``ignore_case`` — mirrors SQL layer."""
-    if regex:
+def _matches(text: str, query: str, match: str, ignore_case: bool) -> bool:
+    """Substring/exact/regex match, honoring ``ignore_case`` — mirrors SQL layer."""
+    if match == "regex":
         flags = re.IGNORECASE if ignore_case else 0
         return re.search(query, text, flags) is not None
+    if match == "exact":
+        if ignore_case:
+            return query.lower() == text.lower()
+        return query == text
     if ignore_case:
         return query.lower() in text.lower()
     return query in text
@@ -232,7 +203,7 @@ def _matches(text: str, query: str, regex: bool, ignore_case: bool) -> bool:
 def edit_delta_matches(
     edit: Edit,
     query: str,
-    regex: bool = False,
+    match: str = "substring",
     ignore_case: bool = False,
 ) -> bool:
     """Whether ``query`` appears in the portion of the clause that changed.
@@ -258,6 +229,11 @@ def edit_delta_matches(
     the query only appears there, the edit's delta doesn't actually
     involve the query.
 
+    ``match="exact"`` compares whole bodies, not tokens: the edit counts
+    only if the body itself changed and one side's body is exactly the
+    query. A qualifier- or comment-only edit of the queried body is a
+    kept-unchanged body — not a match, same philosophy as above.
+
     Fallback: if either side couldn't be parsed via fastobo, return ``True``
     (safe default; preserves current behavior on the historical malformed
     clauses fastobo rejects).
@@ -268,13 +244,18 @@ def edit_delta_matches(
         return True
 
     def check_text(text: str | None) -> bool:
-        return text is not None and _matches(text, query, regex, ignore_case)
+        return text is not None and _matches(text, query, match, ignore_case)
+
+    if match == "exact":
+        if before.body == after.body:
+            return False
+        return check_text(before.body) or check_text(after.body)
 
     if before.body != after.body:
         b_tokens = Counter(_tokenize(before.body))
         a_tokens = Counter(_tokenize(after.body))
         for token in list((b_tokens - a_tokens)) + list((a_tokens - b_tokens)):
-            if _matches(token, query, regex, ignore_case):
+            if _matches(token, query, match, ignore_case):
                 return True
     if before.comment != after.comment:
         if check_text(before.comment) or check_text(after.comment):
@@ -285,31 +266,145 @@ def edit_delta_matches(
     only_before = b_counts - a_counts
     only_after = a_counts - b_counts
     for qualifier in list(only_before) + list(only_after):
-        if _matches(qualifier, query, regex, ignore_case):
+        if _matches(qualifier, query, match, ignore_case):
             return True
     return False
 
 
-def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:
-    """Render one paired-or-unpaired event as a rich ``Text`` line."""
+class PairedCommit(NamedTuple):
+    """One (term, commit) group's events, paired into render ops."""
+
+    term_id: str
+    name: str | None  # the term's name at this commit, if snapshotted
+    head: Change
+    ops: list[Op]
+
+
+def pair_by_term_and_commit(
+    events: Iterable[TermChange], order: str = "term"
+) -> Iterator[PairedCommit]:
+    """Group ``events`` by (term, commit) and pair each group into ops.
+
+    Pairing runs once here; both the search filter and the renderer
+    consume the resulting ops, so an ``Edit`` is guaranteed to render
+    exactly as it was filtered. ``order`` must name the stream's actual
+    sort spine (see :meth:`obohog.query.HistoryDB._iter_term_changes`) so
+    groupings are contiguous: ``"term"`` for term-major streams, ``"date"``
+    for commit-major ones. Either way each yielded group is one (term,
+    commit) pair — only the arrival order differs.
+
+    Lazy: each group is paired as the underlying stream reaches it, so a
+    streaming source (:meth:`obohog.query.HistoryDB.iter_search_events`)
+    renders its first results long before the full result set has been
+    fetched.
+    """
+    if order == "term":
+        key = lambda tc: (tc.term_id, tc.change.commit_seq)
+    else:
+        key = lambda tc: (tc.change.commit_seq, tc.term_id)
+    for _, group in groupby(events, key=key):
+        rows = list(group)
+        yield PairedCommit(
+            rows[0].term_id,
+            rows[0].name,
+            rows[0].change,
+            pair_events([tc.change for tc in rows]),
+        )
+
+
+def filter_ops_by_delta_match(
+    ops: list[Op], query: str, match: str, ignore_case: bool
+) -> list[Op]:
+    """Keep adds/removes; keep edits only if their delta contains the query."""
+    return [
+        op for op in ops
+        if not isinstance(op, Edit)
+        or edit_delta_matches(op, query, match, ignore_case)
+    ]
+
+
+def take_sections(
+    groups: Iterable[PairedCommit],
+    limit: int,
+    section_key,
+    truncated: list[bool],
+) -> Iterator[PairedCommit]:
+    """Pass groups through until ``limit`` distinct sections have completed.
+
+    ``section_key`` maps a group to its section identity (term id for
+    term-ordered output, commit seq for date-ordered). Stops consuming
+    the underlying stream at the section boundary — with a streaming
+    source this abandons the query after only a prefix has been fetched.
+    Sets ``truncated[0]`` when the limit actually cut something off.
+    """
+    current = object()
+    seen = 0
+    for g in groups:
+        key = section_key(g)
+        if key != current:
+            current = key
+            seen += 1
+            if seen > limit:
+                truncated[0] = True
+                return
+        yield g
+
+
+class Span(NamedTuple):
+    """One run of rendered text with a presentation role, no markup.
+
+    The roles are the full vocabulary any adapter needs: ``same`` renders
+    plain, ``del``/``ins`` get the word-diff treatment (bracket markers on
+    the terminal, ``<del>``/``<ins>`` in HTML), ``note`` is a dim editorial
+    tag (e.g. ``(qualifier order rewritten)``).
+    """
+
+    role: str  # "same" | "del" | "ins" | "note"
+    text: str
+
+
+class QualLine(NamedTuple):
+    """One indented sub-line of a qualifier block."""
+
+    kind: str  # "context" | "del" | "ins" | "edit"
+    spans: list[Span]
+
+
+class OpView(NamedTuple):
+    """A fully-decided rendering of one op, free of any output format.
+
+    ``head`` is the content after ``<marker> <tag>: `` on the top
+    line; ``quals`` are the indented qualifier sub-lines (empty except for
+    qualifier-block edits). Adapters — the rich terminal renderer below,
+    HTML templates — only map roles to markup; every presentation decision
+    (dispatch, pairing, truncation, word-diffing) already happened here.
+    """
+
+    kind: str  # "add" | "remove" | "edit"
+    tag: str
+    head: list[Span]
+    quals: list[QualLine]
+
+
+def op_view(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> OpView:
+    """Build the structured rendering of one paired-or-unpaired event."""
     if isinstance(op, Add):
-        return _render_plain(op.predicate, op.change.value, "+", "bold green", truncate)
+        return OpView(
+            "add", op.tag,
+            [Span("same", _truncate(op.change.value, truncate))], [],
+        )
     if isinstance(op, Remove):
-        return _render_plain(op.predicate, op.change.value, "-", "bold red", truncate)
+        return OpView(
+            "remove", op.tag,
+            [Span("same", _truncate(op.change.value, truncate))], [],
+        )
     if isinstance(op, Edit):
-        return _render_edit(op, truncate)
+        return _edit_view(op, truncate)
     raise TypeError(f"unknown op: {op!r}")
 
 
-def _render_plain(predicate: str, value: str, marker: str, style: str, cap: int | None) -> Text:
-    line = Text("    ")
-    line.append(f"{marker} ", style=style)
-    line.append(f"{predicate}: {_truncate(value, cap)}")
-    return line
-
-
-def _render_edit(edit: Edit, cap: int | None) -> Text:
-    """Render a paired remove/add as one ``~`` line, structure-aware.
+def _edit_view(edit: Edit, cap: int | None) -> OpView:
+    """View a paired remove/add as one ``~`` op, structure-aware.
 
     Reads the pairing-time fastobo parses off the ``Edit`` —
     ``(body, qualifiers, ! comment)`` per side — and picks a rendering
@@ -325,12 +420,12 @@ def _render_edit(edit: Edit, cap: int | None) -> Text:
     * Qualifier multiset differs (anywhere) → render as a **block**: body +
       comment on the top ``~`` line (word-diffed inline if they changed),
       then each qualifier on its own indented sub-line with a ``-``/``+``/``~``
-      marker or dim if kept. Reads like an axiom-annotation diff, not a
-      run-together sentence.
+      marker or as plain context if kept. Reads like an axiom-annotation
+      diff, not a run-together sentence.
     * Everything else (including any case where fastobo couldn't parse
       either side) → the token-level word-diff fallback.
     """
-    predicate = edit.predicate
+    tag = edit.tag
     b = edit.before.parsed
     a = edit.after.parsed
 
@@ -342,54 +437,48 @@ def _render_edit(edit: Edit, cap: int | None) -> Text:
 
         if body_same and quals_multiset_same:
             if not comment_same:
-                return _render_comment_only(predicate, b, a, cap)
+                return OpView("edit", tag, _comment_only_spans(b, a, cap), [])
             if not quals_order_same:
-                return _render_reorder_only(predicate, a, cap)
+                return OpView("edit", tag, _reorder_only_spans(a, cap), [])
         if not quals_multiset_same:
-            return _render_qualifier_block(predicate, b, a, cap)
+            return _qualifier_block_view(tag, b, a, cap)
 
-    return _render_token_diff(predicate, edit.before.value, edit.after.value, cap)
+    return OpView(
+        "edit", tag,
+        _word_diff_spans(edit.before.value, edit.after.value, cap), [],
+    )
 
 
-def _render_comment_only(
-    predicate: str, before: ParsedValue, after: ParsedValue, cap: int | None
-) -> Text:
+def _comment_only_spans(
+    before: ParsedValue, after: ParsedValue, cap: int | None
+) -> list[Span]:
     """Only the trailing ``!`` name comment differs.
 
-    Render the shared body + qualifiers plain and the comment change as a
+    The shared body + qualifiers render plain and the comment change as a
     single bracketed edit — no token-level word-diff on the label itself.
     We used to tag this case (``(referenced term renamed)``) but the tag
     was making an interpretive leap: sometimes the target really was
     renamed elsewhere, sometimes a label was manually added or removed,
-    and the reader can see which from the ``[-...-] {+...+}`` marks
-    without us projecting a story.
+    and the reader can see which from the del/ins marks without us
+    projecting a story.
     """
-    line = Text("    ")
-    line.append("~ ", style="bold yellow")
-    line.append(f"{predicate}: ")
-    line.append(_truncate(_head(before), cap))
-    line.append(" ! ")
+    spans = [Span("same", _truncate(_head(before), cap)), Span("same", " ! ")]
     old = _truncate(before.comment or "", cap)
     new = _truncate(after.comment or "", cap)
     if old:
-        line.append(f"[-{old}-]", style="red")
+        spans.append(Span("del", old))
     if new:
-        line.append(f"{{+{new}+}}", style="green")
-    return line
+        spans.append(Span("ins", new))
+    return spans
 
 
-def _render_reorder_only(
-    predicate: str, current: ParsedValue, cap: int | None
-) -> Text:
+def _reorder_only_spans(current: ParsedValue, cap: int | None) -> list[Span]:
     """Qualifier multiset unchanged; only the order was rewritten."""
-    line = Text("    ")
-    line.append("~ ", style="bold yellow")
-    line.append(f"{predicate}: ")
-    line.append(_truncate(_head(current), cap))
+    spans = [Span("same", _truncate(_head(current), cap))]
     if current.comment:
-        line.append(f" ! {_truncate(current.comment, cap)}")
-    line.append("  (qualifier order rewritten)", style="dim")
-    return line
+        spans.append(Span("same", f" ! {_truncate(current.comment, cap)}"))
+    spans.append(Span("note", "(qualifier order rewritten)"))
+    return spans
 
 
 def _head(pv: ParsedValue) -> str:
@@ -399,84 +488,68 @@ def _head(pv: ParsedValue) -> str:
     return f"{pv.body} {{{', '.join(pv.qualifiers)}}}"
 
 
-def _render_qualifier_block(
-    predicate: str, before: ParsedValue, after: ParsedValue, cap: int | None
-) -> Text:
-    """Render a body + comment on the top line, then indent the qualifier diff.
+def _qualifier_block_view(
+    tag: str, before: ParsedValue, after: ParsedValue, cap: int | None
+) -> OpView:
+    """Body + comment on the top line, then the qualifier diff as sub-lines.
 
-    The qualifier list diffs as a sequence: kept qualifiers render dim as
-    context, inserts as ``+``, deletes as ``-``. A ``replace`` opcode gets
+    The qualifier list diffs as a sequence: kept qualifiers become context
+    lines, inserts ``+``, deletes ``-``. A ``replace`` opcode gets
     sub-paired by similarity so a qualifier whose value was edited (same
     ``key`` on both sides, different value) shows as one ``~`` line with an
     inline word-diff, rather than a ``-`` / ``+`` pair.
     """
-    text = Text("    ")
-    text.append("~ ", style="bold yellow")
-    text.append(f"{predicate}: ")
-    _append_body(text, before.body, after.body, cap)
-    _append_comment_tail(text, before.comment, after.comment, cap)
+    head = _body_spans(before.body, after.body, cap)
+    head.extend(_comment_tail_spans(before.comment, after.comment, cap))
 
+    quals: list[QualLine] = []
     matcher = SequenceMatcher(None, before.qualifiers, after.qualifiers, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
+    for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
+        if opcode == "equal":
             for q in before.qualifiers[i1:i2]:
-                # Context line: no marker, indent aligned with the value column
-                # of the marked lines. Same convention as git diff's leading
-                # space for unchanged context.
-                text.append("\n        ")
-                text.append(_truncate(q, cap))
-        elif tag == "delete":
+                quals.append(QualLine("context", [Span("same", _truncate(q, cap))]))
+        elif opcode == "delete":
             for q in before.qualifiers[i1:i2]:
-                text.append("\n      ")
-                text.append("- ", style="bold red")
-                text.append(_truncate(q, cap))
-        elif tag == "insert":
+                quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
+        elif opcode == "insert":
             for q in after.qualifiers[j1:j2]:
-                text.append("\n      ")
-                text.append("+ ", style="bold green")
-                text.append(_truncate(q, cap))
-        elif tag == "replace":
+                quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
+        elif opcode == "replace":
             removes = list(before.qualifiers[i1:i2])
             adds = list(after.qualifiers[j1:j2])
             pairs, unpaired_r, unpaired_a = _pair_strings(removes, adds)
             for r, a in pairs:
-                text.append("\n      ")
-                text.append("~ ", style="bold yellow")
-                _append_word_diff(text, r, a, cap)
+                quals.append(QualLine("edit", _word_diff_spans(r, a, cap)))
             for q in unpaired_r:
-                text.append("\n      ")
-                text.append("- ", style="bold red")
-                text.append(_truncate(q, cap))
+                quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
             for q in unpaired_a:
-                text.append("\n      ")
-                text.append("+ ", style="bold green")
-                text.append(_truncate(q, cap))
-    return text
+                quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
+    return OpView("edit", tag, head, quals)
 
 
-def _append_body(text: Text, before: str, after: str, cap: int | None) -> None:
+def _body_spans(before: str, after: str, cap: int | None) -> list[Span]:
     """Body of the clause: plain if unchanged, word-diffed if changed."""
     if before == after:
-        text.append(_truncate(before, cap))
-    else:
-        _append_word_diff(text, before, after, cap)
+        return [Span("same", _truncate(before, cap))]
+    return _word_diff_spans(before, after, cap)
 
 
-def _append_comment_tail(
-    text: Text, before: str | None, after: str | None, cap: int | None
-) -> None:
-    """Trailing ``! comment``: skip if absent both sides, plain if unchanged,
-    bracketed pair if changed."""
+def _comment_tail_spans(
+    before: str | None, after: str | None, cap: int | None
+) -> list[Span]:
+    """Trailing ``! comment``: nothing if absent both sides, plain if
+    unchanged, del/ins pair if changed."""
     if not before and not after:
-        return
-    text.append(" ! ")
+        return []
+    spans = [Span("same", " ! ")]
     if before == after:
-        text.append(_truncate(after or "", cap))
-        return
+        spans.append(Span("same", _truncate(after or "", cap)))
+        return spans
     if before:
-        text.append(f"[-{_truncate(before, cap)}-]", style="red")
+        spans.append(Span("del", _truncate(before, cap)))
     if after:
-        text.append(f"{{+{_truncate(after, cap)}+}}", style="green")
+        spans.append(Span("ins", _truncate(after, cap)))
+    return spans
 
 
 def _pair_strings(
@@ -513,41 +586,81 @@ def _pair_strings(
     return pairs, unpaired_r, unpaired_a
 
 
-def _append_word_diff(text: Text, before: str, after: str, cap: int | None) -> None:
-    """Append the token-level word-diff of ``before`` → ``after`` to ``text``.
+def _word_diff_spans(before: str, after: str, cap: int | None) -> list[Span]:
+    """The token-level word-diff of ``before`` → ``after`` as spans.
 
     Runs at the **token** level (see ``_TOKEN_RE``) so identifier swaps,
     snake_case edits, and qualifier-membership changes show as whole-token
-    edits rather than character shuffles. Uses git's ``--word-diff=plain``
-    bracket markers (``[-old-]``, ``{+new+}``) so the diff stays readable
-    when piped to a file or a non-color terminal; the markers are
-    additionally styled red/green when the console supports it.
+    edits rather than character shuffles. Also the fallback for a whole
+    edit when fastobo couldn't parse either side.
     """
     b_tokens = _tokenize(_truncate(before, cap))
     a_tokens = _tokenize(_truncate(after, cap))
+    spans: list[Span] = []
     matcher = SequenceMatcher(None, b_tokens, a_tokens, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            text.append("".join(b_tokens[i1:i2]))
-        elif tag == "delete":
-            text.append(f"[-{''.join(b_tokens[i1:i2])}-]", style="red")
-        elif tag == "insert":
-            text.append(f"{{+{''.join(a_tokens[j1:j2])}+}}", style="green")
-        elif tag == "replace":
-            text.append(f"[-{''.join(b_tokens[i1:i2])}-]", style="red")
-            text.append(f"{{+{''.join(a_tokens[j1:j2])}+}}", style="green")
+    for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
+        if opcode == "equal":
+            spans.append(Span("same", "".join(b_tokens[i1:i2])))
+        elif opcode == "delete":
+            spans.append(Span("del", "".join(b_tokens[i1:i2])))
+        elif opcode == "insert":
+            spans.append(Span("ins", "".join(a_tokens[j1:j2])))
+        elif opcode == "replace":
+            spans.append(Span("del", "".join(b_tokens[i1:i2])))
+            spans.append(Span("ins", "".join(a_tokens[j1:j2])))
+    return spans
 
 
-def _render_token_diff(
-    predicate: str, before: str, after: str, cap: int | None
-) -> Text:
-    """Fallback: token-level word-diff over the raw value strings.
+# ---------------------------------------------------------------------------
+# The rich terminal adapter. Everything above is console-free; from here on
+# spans and lines become styled ``Text``. del/ins spans use git's
+# ``--word-diff=plain`` bracket markers (``[-old-]``, ``{+new+}``) so the
+# diff stays readable when piped to a file or a non-color terminal; the
+# markers are additionally styled red/green when the console supports it.
 
-    Used when fastobo can't parse either side, or when there are no
-    qualifiers to break out into a block. The output is a single ``~`` line.
-    """
+_OP_MARKERS = {
+    "add": ("+ ", "bold green"),
+    "remove": ("- ", "bold red"),
+    "edit": ("~ ", "bold yellow"),
+}
+
+
+def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:
+    """Render one paired-or-unpaired event as a rich ``Text`` line."""
+    return render_op_view(op_view(op, truncate))
+
+
+def render_op_view(view: OpView) -> Text:
+    """Map an :class:`OpView` to terminal form: markers, indents, styles."""
+    marker, style = _OP_MARKERS[view.kind]
     line = Text("    ")
-    line.append("~ ", style="bold yellow")
-    line.append(f"{predicate}: ")
-    _append_word_diff(line, before, after, cap)
+    line.append(marker, style=style)
+    line.append(f"{view.tag}: ")
+    _append_spans(line, view.head)
+    for ql in view.quals:
+        if ql.kind == "context":
+            # Context line: no marker, indent aligned with the value column
+            # of the marked lines. Same convention as git diff's leading
+            # space for unchanged context.
+            line.append("\n        ")
+        else:
+            line.append("\n      ")
+            marker, style = _OP_MARKERS[_QUAL_OP_KIND[ql.kind]]
+            line.append(marker, style=style)
+        _append_spans(line, ql.spans)
     return line
+
+
+_QUAL_OP_KIND = {"del": "remove", "ins": "add", "edit": "edit"}
+
+
+def _append_spans(text: Text, spans: list[Span]) -> None:
+    for role, s in spans:
+        if role == "same":
+            text.append(s)
+        elif role == "del":
+            text.append(f"[-{s}-]", style="red")
+        elif role == "ins":
+            text.append(f"{{+{s}+}}", style="green")
+        elif role == "note":
+            text.append(f"  {s}", style="dim")

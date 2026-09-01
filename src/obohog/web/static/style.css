@@ -1,0 +1,261 @@
+/* obohog — hand-written, no build step. Terminal-flavored: monospace ops,
+   git-style +/-/~ colors, quiet chrome. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --dim: #767676;
+  --line: #e4e4e4;
+  --add: #1a7f37;
+  --add-bg: #dafbe1;
+  --del: #cf222e;
+  --del-bg: #ffebe9;
+  --edit: #9a6700;
+  --accent: #0969da;
+  --band: #e7f0fa;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --fg: #d8dce2;
+    --dim: #8a919d;
+    --line: #2a2f38;
+    --add: #57ab5a;
+    --add-bg: #12261e;
+    --del: #e5534b;
+    --del-bg: #2d1a1c;
+    --edit: #c69026;
+    --accent: #539bf5;
+    --band: #1a2534;
+  }
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, sans-serif;
+}
+main { max-width: 62rem; margin: 0 auto; padding: 1rem 1.25rem 4rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { font-size: 1.4rem; }
+h1 .name, h3 .name, h4 .name { font-weight: normal; }
+.dim { color: var(--dim); }
+.empty { color: var(--dim); font-style: italic; }
+.error { color: var(--del); }
+
+header.site {
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 1.25rem;
+}
+header.site nav { max-width: 62rem; margin: 0 auto; display: flex; gap: 1rem; }
+.brand { font-weight: 700; color: var(--fg); }
+
+/* Sources table */
+table.sources { border-collapse: collapse; width: 100%; }
+table.sources th, table.sources td {
+  text-align: left;
+  padding: 0.3rem 0.8rem 0.3rem 0;
+  border-bottom: 1px solid var(--line);
+}
+table.sources th { color: var(--dim); font-weight: normal; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.status-built { color: var(--add); }
+.status-stale { color: var(--edit); }
+.status-not-built { color: var(--dim); }
+
+/* Search form */
+form.search { margin: 0.75rem 0 1.5rem; }
+form.search .query, form.search .filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+form.search .filters { margin-top: 0.5rem; }
+form.search .query label { white-space: nowrap; }
+form.search input[type="search"] {
+  flex: 1;
+  max-width: 34rem;
+  min-width: 14rem;
+  padding: 0.45rem 0.6rem;
+  font-size: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+form.search input:not([type="search"]), form.search select {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.15rem 0.3rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+form.search button {
+  padding: 0.25rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+form.search button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Reconstructed term stanza (state page + inline expand) */
+.state-link { font-size: 0.85rem; }
+/* In headings, keep the link from reading as part of the term name: quiet
+   weight, pushed to the far edge of the heading line. */
+section h3 .state-link, section h4 .state-link {
+  float: right;
+  font-weight: normal;
+  margin-left: 1ch;
+}
+.term-state {
+  margin: 0.5rem 0 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+}
+.term-state .state-head {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  font-size: 0.85rem;
+}
+.term-state .state-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0;
+}
+.term-state .state-close:hover { color: var(--accent); }
+.term-state pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.term-state .state-disclaimer { font-size: 0.8rem; margin: 0; }
+
+/* Sections — one per term (term order) or per commit (date order).
+   Commit sections open with the header band below, which delimits them
+   on its own; term sections open with an h3, so they get a rule. */
+section.term-section { margin: 0; padding: 0.6rem 0 0.4rem; }
+section.commit-section { margin: 0; padding: 0.9rem 0 0.6rem; }
+section.term-section + section.term-section {
+  border-top: 1px solid var(--line);
+}
+section.term-section > :first-child,
+section.commit-section > :first-child { margin-top: 0; }
+section h3, section h4 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
+
+/* The commit/version header is a tinted band — the visual anchor that
+   marks where one change set ends and the next begins. */
+.commit-header {
+  margin: 1.1rem 0 0.55rem;
+  padding: 0.45rem 0.75rem;
+  background: var(--band);
+  /* a notch darker than --dim: plain gray sinks into the tint */
+  color: color-mix(in srgb, var(--dim) 55%, var(--fg));
+  font-size: 0.85rem;
+}
+/* Where one commit's group runs long — date-ordered search results and
+   the single commit page — the band pins to the viewport top while its
+   commit is in view; the next band pushes it off. Term timelines and
+   term-major search keep headers in flow (short groups; pinning is
+   noise there — Patrick). */
+#results section.commit-section > .commit-header,
+main > .commit-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.commit-header .band-tools {
+  float: right;
+  margin-left: 1ch;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.cnav {
+  border: none;
+  background: none;
+  padding: 0 0.1rem;
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+}
+.cnav:hover { color: var(--accent); text-decoration: none; }
+/* Interpuncts between whichever parts this header has. */
+.commit-header > :not(.band-tools) + :not(.band-tools)::before {
+  content: "·";
+  color: var(--dim);
+  margin-right: 0.45rem;
+}
+.commit-header .sha { font-family: ui-monospace, monospace; }
+/* Synthetic-history identifier: the date-as-version chip, visibly not a
+   git sha. */
+.commit-header a.version {
+  font-family: ui-monospace, monospace;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+  background: var(--bg);
+}
+.commit-header .subject { color: var(--fg); }
+.raw-subject { font-style: italic; margin: 0.1rem 0; font-size: 0.85rem; }
+
+/* Ops — the diff lines. Each .line is a flex row: fixed marker column,
+   then pre-wrap text so continuations hang-indent under the value. */
+.op {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.83rem;
+  line-height: 1.45;
+}
+.op .line { display: flex; padding-left: 1.25rem; }
+.op .line.qual { padding-left: calc(1.25rem + 2ch); }
+.op .marker { flex: none; width: 2ch; font-weight: 700; }
+.op .text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.op-add > .line > .marker { color: var(--add); }
+.op-remove > .line > .marker { color: var(--del); }
+.op-edit > .line > .marker { color: var(--edit); }
+.op .tag { color: var(--dim); }
+.op del {
+  color: var(--del);
+  background: var(--del-bg);
+  text-decoration: line-through;
+}
+.op ins {
+  color: var(--add);
+  background: var(--add-bg);
+  text-decoration: none;
+}
+.op .note { color: var(--dim); font-style: italic; margin-left: 1ch; }
+
+.qual-context { color: var(--dim); }
+.op .qual-del > .marker { color: var(--del); }
+.op .qual-ins > .marker { color: var(--add); }
+.op .qual-edit > .marker { color: var(--edit); }
+
+.load-more { padding: 1rem 0; text-align: center; }
+.more-terms { font-size: 0.85rem; }
+
+ul.pr-terms { padding-left: 1.25rem; }

@@ -34,6 +34,9 @@ Working end-to-end on the full Mondo history (7,487 commits, ~5 min build):
   each rendered distinctly — see `src/obohog/render.py`). `search`
   additionally filters at the delta level so hits reflect what actually
   changed.
+- `service` / `web` — a read-only HTTP server (`obohog serve`, `web`
+  extra): an HTMX web UI and a JSON API at `/api/v1` sharing one typed
+  service layer with the CLI, with keyset-cursor pagination.
 
 Only the OBO file format is supported today. Future serializations
 (OFN, RDF/XML, Turtle) would require abstracting the per-commit parse step;
@@ -70,7 +73,14 @@ uv sync --extra dev
 # of the declared OBO file is downloaded, lazily.
 uv run obohog source sync mondo
 
-# What's currently configured, built, and how much disk it's using:
+# Re-running sync is incremental: it fetches what's new upstream and
+# appends just those commits (seconds, not minutes). --rebuild starts
+# over, and a rebuild also happens automatically when appending isn't
+# safe (schema change, rewritten upstream history).
+uv run obohog source sync mondo
+
+# What's configured, built with which artifact schema (stale artifacts
+# need a resync), and how much disk it's using:
 uv run obohog source list
 ```
 
@@ -98,15 +108,41 @@ uv run obohog diff     --source mondo v2026-06-02 HEAD --term MONDO:0001213
 # clause where the query appears in the *changed* portion. Kept-unchanged
 # qualifiers and unchanged body tokens don't count as hits.
 uv run obohog search   --source mondo "OMIM:609814"
-uv run obohog search   --source mondo "GARD:18551" --predicate xref
+uv run obohog search   --source mondo "GARD:18551" --tag xref
 uv run obohog search   --source mondo "\bCML\b" --regex
+uv run obohog search   --source mondo "Huntington disease" --tag name --exact
 uv run obohog search   --source mondo "CML" --namespace MONDO
 uv run obohog search   --source mondo "MONDO:MalaCards" --term MONDO:0012350
+
+# --since/--until take a ref (sha, tag, seq, HEAD) or a date, both ends
+# inclusive: definition changes during March 2025.
+uv run obohog search   --source mondo --tag def --since 2025-03-01 --until 2025-03-31
 
 # git-log style: the 10 most recent commits that touched an NCIT xref,
 # newest first (--reverse for oldest first).
 uv run obohog search   --source mondo "NCIT" --order date --limit 10
 ```
+
+### 4. Serve
+
+With the `web` extra installed (`uv sync --extra web`), `obohog serve`
+runs a read-only HTTP server over the same artifacts:
+
+```sh
+uv run obohog serve            # http://127.0.0.1:8009
+```
+
+- **Web UI** — a source list at `/`, plus per-source pages mirroring the
+  CLI views: `/{src}/terms/{id}` (timeline with inline word-diffs),
+  `/{src}/search` (paged incrementally via HTMX), `/{src}/commits/{sha}`,
+  `/{src}/prs/{n}`.
+- **JSON API** — the same queries under `/api/v1/…`, interactive docs at
+  `/api/docs`. Results are bounded by default (50 sections per page, one
+  section per term or commit); each page carries a `next_cursor` to pass
+  back as `after`.
+
+Syncing stays a CLI concern: re-run `obohog source sync` any time and the
+server picks up the refreshed artifact on the next request.
 
 ## Development
 

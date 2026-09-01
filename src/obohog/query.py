@@ -5,13 +5,18 @@ they all answer from the same Parquet files. DuckDB reads the Parquet lazily and
 can point at local paths or HTTP URLs, so a hosted artifact needs no server.
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, NamedTuple
 
 import duckdb
 
+from . import model
 from .obo import ParsedValue
+
+
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 class EventCounts(NamedTuple):
@@ -26,10 +31,74 @@ class ArtifactNotFound(Exception):
     """Raised when an artifact directory lacks the core history tables."""
 
 
+class SchemaMismatch(Exception):
+    """Raised when an artifact was built with a different schema version.
+
+    Queries assume the current schema's columns exist; letting a stale
+    artifact through surfaces as a confusing DuckDB binder error deep in
+    some query instead of a clear "rebuild me".
+    """
+
+
+class RefNotFound(Exception):
+    """Raised when a user-supplied ref matches no tag, sha, or commit_seq."""
+
+
+@dataclass(frozen=True)
+class RangeFilters:
+    """Optional narrowings for range (diff) queries.
+
+    ``term_id`` restricts to one term; ``namespace`` to term IDs with the
+    given CURIE prefix (e.g. ``"MONDO"``).
+    """
+
+    term_id: str | None = None
+    namespace: str | None = None
+
+
+@dataclass(frozen=True)
+class SearchFilters:
+    """Match flags and optional narrowings for search queries.
+
+    One frozen object feeds both the count and the iterator call for a
+    search, so the two can't disagree. Field meanings as documented on
+    :meth:`HistoryDB._search_where`.
+    """
+
+    term_id: str | None = None
+    tag: str | None = None
+    since_seq: int | None = None
+    until_seq: int | None = None
+    match: str = "substring"  # "substring" | "exact" | "regex"
+    ignore_case: bool = False
+    namespace: str | None = None
+
+
 def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
     """Convert the artifact's decomposition columns into a ParsedValue."""
     return ParsedValue(
         body=body, qualifiers=tuple(qualifiers or ()), comment=comment
+    )
+
+
+# The SELECT list that fully populates a :class:`Change`, in the exact order
+# :func:`_change_from_row` unpacks. Queries that build Changes interpolate
+# this (optionally after extra leading columns) so the column list and the
+# row mapping can't drift apart.
+_CHANGE_COLUMNS = """c.commit_seq, c.committed_date, c.sha, c.author_name,
+       c.pr_number, c.message,
+       e.operation, e.predicate, e.value,
+       c.branch_commits, c.snapshot_url,
+       e.body, e.qualifiers, e.comment"""
+
+
+def _change_from_row(row) -> "Change":
+    """Build a Change from a row SELECTed with ``_CHANGE_COLUMNS``."""
+    return Change(
+        *row[:9],
+        branch_commits=_wrap_branch_commits(row[9]),
+        snapshot_url=row[10],
+        parsed=_wrap_parsed(row[11], row[12], row[13]),
     )
 
 
@@ -75,7 +144,7 @@ class Change:
     pr_number: int | None
     message: str
     operation: str
-    predicate: str
+    tag: str
     value: str
     branch_commits: tuple[BranchCommit, ...] = ()
     snapshot_url: str | None = None
@@ -123,6 +192,14 @@ class HistoryDB:
                 f"No history artifact at '{self.dir}' (missing: {', '.join(absent)}). "
                 "Run `obohog source sync <name>` first."
             )
+        meta = model.read_build_meta(self.dir)
+        built = meta.schema_version if meta else None
+        if built != model.SCHEMA_VERSION:
+            raise SchemaMismatch(
+                f"Artifact at '{self.dir}' was built with schema "
+                f"{built or 'unknown'}; this obohog reads schema "
+                f"{model.SCHEMA_VERSION}. Rebuild it with `obohog source sync <name>`."
+            )
         self.con = duckdb.connect(":memory:")
         for name in ("commits", "term_snapshots", "events", "releases", "skipped"):
             source = self._source(name)
@@ -133,23 +210,15 @@ class HistoryDB:
     def _create_view(self, name: str, source: str) -> None:
         """Create a DuckDB view over the parquet path ``source``.
 
-        Older artifacts predate the ``snapshot_url`` column on ``commits``;
-        wrap them so callers can always ``SELECT c.snapshot_url`` without
-        branching. Add-on columns projected here should always be nullable.
+        No per-column back-compat here: the schema check at open refuses
+        artifacts that don't match ``model.SCHEMA_VERSION``, so every
+        current column is guaranteed present.
         """
         # read_parquet needs a literal path (CREATE VIEW can't bind params);
         # escape single quotes in the path we control.
         literal = source.replace("'", "''")
         self.con.execute(
-            f"CREATE VIEW {name}_raw AS SELECT * FROM read_parquet('{literal}')"
-        )
-        cols = {row[1] for row in self.con.execute(f"PRAGMA table_info('{name}_raw')").fetchall()}
-        projections = [f"*"]
-        if name == "commits" and "snapshot_url" not in cols:
-            projections.append("CAST(NULL AS VARCHAR) AS snapshot_url")
-        select_list = ", ".join(projections)
-        self.con.execute(
-            f"CREATE VIEW {name} AS SELECT {select_list} FROM {name}_raw"
+            f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{literal}')"
         )
 
     def _source(self, name: str) -> str | None:
@@ -160,20 +229,16 @@ class HistoryDB:
         single = self.dir / f"{name}.parquet"
         return str(single) if single.exists() else None
 
-    def term_timeline(self, term_id: str, predicate: str | None = None) -> list[Change]:
+    def term_timeline(self, term_id: str, tag: str | None = None) -> list[Change]:
         """All changes to a term, oldest first, optionally one clause kind only."""
         where = "e.term_id = ?"
         params: list[object] = [term_id]
-        if predicate is not None:
+        if tag is not None:
             where += " AND e.predicate = ?"
-            params.append(predicate)
+            params.append(tag)
         rows = self.con.execute(
             f"""
-            SELECT c.commit_seq, c.committed_date, c.sha, c.author_name,
-                   c.pr_number, c.message,
-                   e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url,
-                   e.body, e.qualifiers, e.comment
+            SELECT {_CHANGE_COLUMNS}
             FROM events e
             JOIN commits c USING (commit_seq)
             WHERE {where}
@@ -181,15 +246,7 @@ class HistoryDB:
             """,
             params,
         ).fetchall()
-        return [
-            Change(
-                *row[:9],
-                branch_commits=_wrap_branch_commits(row[9]),
-                snapshot_url=row[10],
-                parsed=_wrap_parsed(*row[11:14]),
-            )
-            for row in rows
-        ]
+        return [_change_from_row(row) for row in rows]
 
     def term_header(self, term_id: str) -> TermHeader | None:
         """Orientation stats for the term, or ``None`` if it has no events."""
@@ -245,9 +302,16 @@ class HistoryDB:
         return [(c["predicate"], c["value"]) for c in row[0]]
 
     def commit_events(
-        self, sha_prefix: str, namespace: str | None = None
+        self,
+        ref: str,
+        namespace: str | None = None,
+        after: str | None = None,
     ) -> tuple[Change | None, list[TermChange]]:
         """Full events for one commit, plus a Change-shaped commit header row.
+
+        ``ref`` is anything :meth:`resolve_ref` accepts — a sha prefix, a
+        release tag, a commit_seq, or HEAD; synthetic-history sources
+        (whose shas reference nothing) are addressed by seq.
 
         Returns ``(head, events)``. ``head`` is a ``Change`` whose commit-level
         fields describe the matched commit (its operation/predicate/value are
@@ -255,15 +319,22 @@ class HistoryDB:
         header). ``events`` is ordered by ``(term_id, operation, predicate, value)``
         so ``groupby(events, key=term_id)`` gives per-term event lists directly
         consumable by :func:`obohog.render.pair_events`. Optionally
-        restricted to term IDs with a given CURIE prefix via ``namespace``.
+        restricted to term IDs with a given CURIE prefix via ``namespace``;
+        ``after`` is a term_id keyset cursor — only events for strictly
+        later term IDs are returned (paged consumers resume with the last
+        term they rendered).
 
-        Returns ``(None, [])`` when no commit matches the sha prefix.
+        Returns ``(None, [])`` when the ref matches no commit.
         """
+        try:
+            seq = self.resolve_ref(ref)
+        except RefNotFound:
+            return None, []
         row = self.con.execute(
             """SELECT commit_seq, sha, author_name, committed_date, pr_number,
                       message, branch_commits, snapshot_url
-               FROM commits WHERE sha LIKE ? || '%' ORDER BY commit_seq LIMIT 1""",
-            [sha_prefix],
+               FROM commits WHERE commit_seq = ?""",
+            [seq],
         ).fetchone()
         if row is None:
             return None, []
@@ -280,6 +351,9 @@ class HistoryDB:
         if namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
             params.append(namespace)
+        if after is not None:
+            where += " AND e.term_id > ?"
+            params.append(after)
         rows = self.con.execute(
             f"""
             SELECT e.term_id, s.name, e.operation, e.predicate, e.value,
@@ -332,84 +406,131 @@ class HistoryDB:
         if row is not None:
             return row[0]
         if ref.isdigit():
-            return int(ref)
+            row = self.con.execute(
+                "SELECT commit_seq FROM commits WHERE commit_seq = ?",
+                [int(ref)],
+            ).fetchone()
+            if row is not None:
+                return int(ref)
+            # No such seq — an all-digit sha prefix falls through.
         row = self.con.execute(
             "SELECT commit_seq FROM commits WHERE sha LIKE ? || '%' ORDER BY commit_seq LIMIT 1",
             [ref],
         ).fetchone()
         if row is None:
-            raise KeyError(f"could not resolve ref {ref!r} to a commit")
+            raise RefNotFound(
+                f"could not resolve ref {ref!r} — expected a release tag, "
+                "short sha, HEAD, or commit_seq"
+            )
+        return row[0]
+
+    def resolve_bound(self, ref: str, *, end: bool = False) -> int:
+        """Resolve a ref *or* a ``YYYY-MM-DD`` date to a commit_seq bound.
+
+        Non-dates go through :meth:`resolve_ref` unchanged. A date is
+        direction-aware: as a start bound it resolves to the first commit
+        on or after that day, as an end bound (``end=True``) to the last
+        commit on or before the end of it — so ``since=2025-03-01`` with
+        ``until=2025-03-31`` means "during March 2025", both ends
+        inclusive. A date beyond the history's edge resolves to a
+        sentinel seq that matches nothing in that direction. (A release
+        tag that happens to look like a date wins — same commit either
+        way in practice.)
+        """
+        if not _DATE_RE.fullmatch(ref):
+            return self.resolve_ref(ref)
+        if self._has_releases():
+            row = self.con.execute(
+                "SELECT commit_seq FROM releases WHERE tag = ?", [ref]
+            ).fetchone()
+            if row is not None:
+                return row[0]
+        agg, cmp = ("max", "<=") if end else ("min", ">=")
+        row = self.con.execute(
+            f"SELECT {agg}(commit_seq) FROM commits"
+            f" WHERE CAST(committed_date AS DATE) {cmp} CAST(? AS DATE)",
+            [ref],
+        ).fetchone()
+        if row[0] is None:
+            return -1 if end else self.resolve_ref("HEAD") + 1
         return row[0]
 
     def _range_where(
-        self,
-        ref_a: str,
-        ref_b: str,
-        term_id: str | None = None,
-        namespace: str | None = None,
+        self, ref_a: str, ref_b: str, f: RangeFilters
     ) -> tuple[str, list[object]]:
         """WHERE clause + params for events in the range ``(lo, hi]``."""
         lo, hi = sorted((self.resolve_ref(ref_a), self.resolve_ref(ref_b)))
         where = "e.commit_seq > ? AND e.commit_seq <= ?"
         params: list[object] = [lo, hi]
-        if term_id is not None:
+        if f.term_id is not None:
             where += " AND e.term_id = ?"
-            params.append(term_id)
-        if namespace is not None:
+            params.append(f.term_id)
+        if f.namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
-            params.append(namespace)
+            params.append(f.namespace)
         return where, params
 
     @staticmethod
-    def _search_where(
-        query: str,
-        term_id: str | None = None,
-        predicate: str | None = None,
-        since_seq: int | None = None,
-        regex: bool = False,
-        ignore_case: bool = False,
-        namespace: str | None = None,
-    ) -> tuple[str, list[object]]:
-        """WHERE clause + params for events whose ``value`` matches ``query``.
+    def _search_where(query: str | None, f: SearchFilters) -> tuple[str, list[object]]:
+        """WHERE clause + params for events whose value matches ``query``.
 
-        * ``regex=False`` (default): substring match via DuckDB's
-          ``contains()`` — no LIKE wildcard escape logic to write.
-        * ``regex=True``: full regex match via DuckDB's
+        ``query=None`` means no text constraint at all — every event
+        matches, and the optional narrowings below do the filtering
+        (browse mode). Otherwise, three match modes (``f.match``):
+
+        * ``"substring"`` (default): substring of the full ``value`` via
+          DuckDB's ``contains()`` — no LIKE wildcard escape logic to write.
+        * ``"exact"``: equality against ``body`` — the value minus its
+          trailing ``{...}`` modifiers and ``!`` comment — so an exact
+          clause body matches regardless of qualifiers.
+        * ``"regex"``: full regex over ``value`` via DuckDB's
           ``regexp_matches()``. Invalid regex raises DuckDB's parse error
           up to the caller.
-        * ``ignore_case=True``: applies to both modes — via ``LOWER()`` on
-          both sides for substring, via the ``'i'`` option flag for regex.
+
+        ``ignore_case=True`` applies to every mode — ``LOWER()`` on both
+        sides for substring/exact, the ``'i'`` option flag for regex.
 
         Optional narrowings (all AND'd together): ``term_id`` restricts to
-        one term, ``predicate`` restricts to one clause kind (``xref``,
-        ``is_a``, ...), ``since_seq`` cuts off commits older than the
-        supplied ``commit_seq`` (resolve external refs via
-        :meth:`resolve_ref` in the caller), ``namespace`` restricts to
+        one term, ``tag`` restricts to one clause kind (``xref``,
+        ``is_a``, ...), ``since_seq``/``until_seq`` cut off commits
+        outside ``[since_seq, until_seq]`` (resolve external refs or
+        dates via :meth:`resolve_bound` in the caller), ``namespace``
+        restricts to
         term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
         """
-        if regex:
-            if ignore_case:
+        if query is None:
+            where = "TRUE"
+        elif f.match == "regex":
+            if f.ignore_case:
                 where = "regexp_matches(e.value, ?, 'i')"
             else:
                 where = "regexp_matches(e.value, ?)"
+        elif f.match == "exact":
+            if f.ignore_case:
+                where = "LOWER(e.body) = LOWER(?)"
+            else:
+                where = "e.body = ?"
         else:
-            if ignore_case:
+            if f.ignore_case:
                 where = "contains(LOWER(e.value), LOWER(?))"
             else:
                 where = "contains(e.value, ?)"
-        params: list[object] = [query]
-        if term_id is not None:
+        params: list[object] = [] if query is None else [query]
+        if f.term_id is not None:
             where += " AND e.term_id = ?"
-            params.append(term_id)
-        if predicate is not None:
+            params.append(f.term_id)
+        if f.tag is not None:
             where += " AND e.predicate = ?"
-            params.append(predicate)
-        if since_seq is not None:
+            params.append(f.tag)
+        if f.since_seq is not None:
             where += " AND e.commit_seq >= ?"
-            params.append(since_seq)
-        if namespace is not None:
+            params.append(f.since_seq)
+        if f.until_seq is not None:
+            where += " AND e.commit_seq <= ?"
+            params.append(f.until_seq)
+        if f.namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
-            params.append(namespace)
+            params.append(f.namespace)
         return where, params
 
     def _iter_term_changes(
@@ -419,6 +540,7 @@ class HistoryDB:
         batch_size: int = 10_000,
         order: str = "term",
         reverse: bool = False,
+        after: str | int | None = None,
     ) -> Iterator[TermChange]:
         """Stream ``TermChange`` rows for a WHERE over events, in render order.
 
@@ -443,11 +565,26 @@ class HistoryDB:
         spine (``git log --reverse`` analog): date order becomes oldest
         first; term order keeps its A→Z sections but lists each term's
         history newest first.
+
+        ``after`` is the keyset cursor for paged consumers: the *section
+        key* of the last section a previous page emitted — a ``term_id``
+        for term order (sections are always A→Z regardless of
+        ``reverse``), a ``commit_seq`` for date order. Resumption is
+        strictly-after in the stream's direction, so pages concatenate to
+        exactly the unpaged stream.
         """
         direction = {
             ("term", False): "ASC", ("term", True): "DESC",
             ("date", False): "DESC", ("date", True): "ASC",
         }[(order, reverse)]
+        if after is not None:
+            if order == "term":
+                where = f"({where}) AND e.term_id > ?"
+                params = [*params, str(after)]
+            else:
+                cmp = ">" if direction == "ASC" else "<"
+                where = f"({where}) AND e.commit_seq {cmp} ?"
+                params = [*params, int(after)]
         order_by = {
             "term": f"e.term_id, c.commit_seq {direction}, e.operation, e.predicate, e.value",
             "date": f"c.commit_seq {direction}, e.term_id, e.operation, e.predicate, e.value",
@@ -455,11 +592,7 @@ class HistoryDB:
         cur = self.con.execute(
             f"""
             SELECT e.term_id, s.name,
-                   c.commit_seq, c.committed_date, c.sha, c.author_name,
-                   c.pr_number, c.message,
-                   e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url,
-                   e.body, e.qualifiers, e.comment
+                   {_CHANGE_COLUMNS}
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
@@ -473,17 +606,9 @@ class HistoryDB:
             rows = cur.fetchmany(batch_size)
             if not rows:
                 return
-            for (term_id, name, seq, date, sha, author, pr, message, op, pred,
-                 val, bc, snapshot_url, body, qualifiers, comment) in rows:
+            for row in rows:
                 yield TermChange(
-                    term_id=term_id,
-                    name=name,
-                    change=Change(
-                        seq, date, sha, author, pr, message, op, pred, val,
-                        branch_commits=_wrap_branch_commits(bc),
-                        snapshot_url=snapshot_url,
-                        parsed=_wrap_parsed(body, qualifiers, comment),
-                    ),
+                    term_id=row[0], name=row[1], change=_change_from_row(row[2:])
                 )
 
     def _count_events(self, where: str, params: list[object]) -> EventCounts:
@@ -497,48 +622,73 @@ class HistoryDB:
         ).fetchone()
         return EventCounts(*row)
 
-    def iter_range_events(self, ref_a: str, ref_b: str, **filters) -> Iterator[TermChange]:
+    def iter_range_events(
+        self,
+        ref_a: str,
+        ref_b: str,
+        filters: RangeFilters = RangeFilters(),
+        *,
+        after: str | None = None,
+    ) -> Iterator[TermChange]:
         """Stream events in ``(lo, hi]``, one row per clause change.
 
         ``lo``/``hi`` are the two refs (any of tag, short sha, HEAD, or
         commit_seq — via :meth:`resolve_ref`), sorted so order doesn't
-        matter. Filters as in :meth:`_range_where`.
+        matter. Term-ordered; ``after`` is the term-id section cursor
+        (see :meth:`_iter_term_changes`).
         """
-        return self._iter_term_changes(*self._range_where(ref_a, ref_b, **filters))
+        return self._iter_term_changes(
+            *self._range_where(ref_a, ref_b, filters), after=after
+        )
 
-    def range_events(self, ref_a: str, ref_b: str, **filters) -> list[TermChange]:
+    def range_events(
+        self, ref_a: str, ref_b: str, filters: RangeFilters = RangeFilters()
+    ) -> list[TermChange]:
         """Materialized :meth:`iter_range_events`."""
-        return list(self.iter_range_events(ref_a, ref_b, **filters))
+        return list(self.iter_range_events(ref_a, ref_b, filters))
 
-    def range_counts(self, ref_a: str, ref_b: str, **filters) -> "EventCounts":
+    def range_counts(
+        self, ref_a: str, ref_b: str, filters: RangeFilters = RangeFilters()
+    ) -> EventCounts:
         """Event/term/commit counts for a range — exact (no post-filter)."""
-        return self._count_events(*self._range_where(ref_a, ref_b, **filters))
+        return self._count_events(*self._range_where(ref_a, ref_b, filters))
 
     def iter_search_events(
-        self, query: str, order: str = "term", reverse: bool = False, **filters
+        self,
+        query: str | None,
+        filters: SearchFilters = SearchFilters(),
+        *,
+        order: str = "term",
+        reverse: bool = False,
+        after: str | int | None = None,
     ) -> Iterator[TermChange]:
         """Stream events whose clause ``value`` matches ``query``.
 
         "Which commits added or removed a clause matching this?" —
         analogous to ``git log -S<string>`` (default substring mode) or
-        ``git log -G<pattern>`` (``regex=True``) at the file-line level,
+        ``git log -G<pattern>`` (``match="regex"``) at the file-line level,
         but on our clause-event granularity. Match semantics and filters
-        as in :meth:`_search_where`; ``order``/``reverse`` as in
-        :meth:`_iter_term_changes`.
+        as in :meth:`_search_where`; ``order``/``reverse``/``after`` as
+        in :meth:`_iter_term_changes`.
 
         Note these are *candidate* rows: the CLI's clause-aware delta
         filter (see ``obohog.render.edit_delta_matches``) further drops
         paired edits whose changed portion doesn't contain the query.
         """
         return self._iter_term_changes(
-            *self._search_where(query, **filters), order=order, reverse=reverse
+            *self._search_where(query, filters),
+            order=order, reverse=reverse, after=after,
         )
 
-    def search_events(self, query: str, **filters) -> list[TermChange]:
+    def search_events(
+        self, query: str | None, filters: SearchFilters = SearchFilters()
+    ) -> list[TermChange]:
         """Materialized :meth:`iter_search_events`."""
-        return list(self.iter_search_events(query, **filters))
+        return list(self.iter_search_events(query, filters))
 
-    def search_counts(self, query: str, **filters) -> "EventCounts":
+    def search_counts(
+        self, query: str | None, filters: SearchFilters = SearchFilters()
+    ) -> EventCounts:
         """Candidate event/term/commit counts for a search.
 
         Counts SQL-level value matches — an upper bound on what survives
@@ -546,7 +696,32 @@ class HistoryDB:
         events), so callers can show scope up front and paged consumers
         can size result sets.
         """
-        return self._count_events(*self._search_where(query, **filters))
+        return self._count_events(*self._search_where(query, filters))
+
+    def facets(self) -> tuple[list[str], list[str]]:
+        """Distinct ``(tags, namespaces)`` present in the events.
+
+        Both are low-cardinality (a dozen-odd values even on millions of
+        events) and ordered alphabetically, so filter UIs can offer them
+        as controlled choices instead of free text. Namespace is the
+        CURIE prefix of ``term_id``, matching the ``namespace`` filters'
+        ``starts_with(term_id, ns || ':')`` semantics.
+        """
+        tags = [
+            row[0]
+            for row in self.con.execute(
+                "SELECT predicate FROM events"
+                " GROUP BY predicate ORDER BY predicate"
+            ).fetchall()
+        ]
+        namespaces = [
+            row[0]
+            for row in self.con.execute(
+                "SELECT split_part(term_id, ':', 1) AS ns FROM events"
+                " GROUP BY ns ORDER BY ns"
+            ).fetchall()
+        ]
+        return tags, namespaces
 
     def releases(self) -> list[tuple[str, int, object]]:
         if not self._has_releases():
@@ -557,6 +732,22 @@ class HistoryDB:
 
     def _has_releases(self) -> bool:
         return (self.dir / "releases.parquet").exists()
+
+    def fork(self) -> "HistoryDB":
+        """A second handle on this artifact, for concurrent use.
+
+        A DuckDB connection must not run queries from multiple threads at
+        once, but cursors on one in-memory connection share its catalog
+        (the views built at open) while executing independently. A server
+        opens one ``HistoryDB`` per artifact and hands each request a
+        fork, closing it after the response; the artifact validation
+        already happened when the parent opened. Closing the parent
+        invalidates its forks.
+        """
+        clone = object.__new__(HistoryDB)
+        clone.dir = self.dir
+        clone.con = self.con.cursor()
+        return clone
 
     def close(self) -> None:
         self.con.close()

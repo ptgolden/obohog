@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ state.term_id }} @ {{ state.ref }} — {{ src }} — obohog{% endblock %}
+{% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
+{% block content %}
+<h1><a class="term" href="/{{ src }}/terms/{{ state.term_id }}">{{ state.term_id }}</a>
+  <span class="name">@ {{ state.ref }}</span></h1>
+{% include 'partials/term_state.html' %}
+{% endblock %}

@@ -7,7 +7,10 @@ deltas derived by diffing adjacent snapshots). ``build_meta`` records provenance
 """
 
 import enum
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import TypedDict
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -22,6 +25,75 @@ SCHEMA_VERSION = "2"
 class Operation(enum.StrEnum):
     ADD = "add"
     REMOVE = "remove"
+
+
+# Row shapes as TypedDicts, one per Parquet schema below. Rows stay plain
+# dicts at runtime (pyarrow's ``Table.from_pylist`` consumes dicts, and the
+# events path builds millions of them), but producers annotate with these so
+# a type checker can verify construction — and
+# ``test_row_typeddicts_match_schemas`` locks each declaration's keys to its
+# ``pa.schema``, so the two can't drift.
+
+
+class ClauseRow(TypedDict):
+    predicate: str
+    value: str
+
+
+class BranchCommitRow(TypedDict):
+    sha: str
+    author_name: str
+    committed_date: datetime
+    message: str
+
+
+class CommitRow(TypedDict):
+    commit_seq: int
+    sha: str
+    author_name: str
+    author_email: str
+    committed_date: datetime
+    message: str
+    pr_number: int | None
+    parent_sha: str | None
+    branch_commits: list[BranchCommitRow]
+    snapshot_url: str | None
+
+
+class SnapshotRow(TypedDict):
+    term_id: str
+    commit_seq: int
+    sha: str
+    name: str | None
+    is_obsolete: bool
+    content_hash: str
+    clauses: list[ClauseRow]
+
+
+class EventRow(TypedDict):
+    term_id: str
+    commit_seq: int
+    sha: str
+    predicate: str
+    value: str
+    operation: str
+    body: str
+    qualifiers: list[str]
+    comment: str | None
+
+
+class ReleaseRow(TypedDict):
+    tag: str
+    sha: str
+    date: datetime
+    commit_seq: int
+
+
+class SkipRow(TypedDict):
+    commit_seq: int
+    sha: str
+    term_id: str | None
+    error: str
 
 
 _CLAUSE = pa.struct([("predicate", pa.string()), ("value", pa.string())])
@@ -125,6 +197,43 @@ FILES = {
     "skipped": SKIPPED,
     "build_meta": BUILD_META,
 }
+
+
+@dataclass(frozen=True)
+class BuildMeta:
+    """The artifact's ``build_meta`` row, typed: what's on disk and how it
+    was built. The compatibility gate (``schema_version``) and the
+    incremental-sync resume point (``last_commit_seq``) both live here."""
+
+    schema_version: str
+    generator_version: str
+    source_path: str
+    first_commit_seq: int | None
+    last_commit_seq: int | None
+    n_commits: int
+
+
+def read_build_meta(artifact_dir: Path | str) -> BuildMeta | None:
+    """Return the artifact's single ``build_meta`` row, or None if absent.
+
+    One tiny row — read it with pyarrow directly rather than spinning up a
+    DuckDB connection.
+    """
+    path = Path(artifact_dir) / "build_meta.parquet"
+    if not path.exists():
+        return None
+    rows = pq.read_table(path).to_pylist()
+    if not rows:
+        return None
+    row = rows[0]
+    return BuildMeta(
+        schema_version=row["schema_version"],
+        generator_version=row["generator_version"],
+        source_path=row["source_path"],
+        first_commit_seq=row["first_commit_seq"],
+        last_commit_seq=row["last_commit_seq"],
+        n_commits=row["n_commits"],
+    )
 
 
 def write_table(rows: list[dict], schema: pa.Schema, out_dir: Path, name: str) -> Path:
