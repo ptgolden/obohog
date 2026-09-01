@@ -298,3 +298,55 @@ def wide_commit_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
     with GitSource(repo) as src:
         extract(src, "onto.obo", out)
     return out
+
+
+@pytest.fixture(scope="session")
+def renamed_ns_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A repo whose namespace was renamed wholesale mid-history (TBD → MONDO).
+
+    * c0  TBD:0000001 "alpha" (is_a TBD:0000002), TBD:0000002 "beta"
+    * c1  same terms, ids and the is_a reference rewritten to MONDO:;
+          alpha also gains a synonym (a real content change alongside
+          the rename)
+    * c2  MONDO:0000002 gains an xref (ordinary post-rename history)
+
+    Built with ``namespace_map={"TBD": "MONDO"}`` each term should be one
+    continuous identity across all three commits.
+    """
+    repo = tmp_path_factory.mktemp("renamedns") / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    def commit(terms: list[str], msg: str, date: str) -> None:
+        _write(repo, "onto.obo", HEADER + "\n".join(terms))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", msg, date=date)
+
+    commit(
+        [
+            _term("TBD:0000001", "name: alpha", "is_a: TBD:0000002"),
+            _term("TBD:0000002", "name: beta"),
+        ],
+        "c0 born as TBD", "2020-01-01T00:00:00+00:00",
+    )
+    commit(
+        [
+            _term(
+                "MONDO:0000001", "name: alpha", "is_a: MONDO:0000002",
+                'synonym: "first" EXACT []',
+            ),
+            _term("MONDO:0000002", "name: beta"),
+        ],
+        "c1 rename TBD to MONDO", "2020-01-02T00:00:00+00:00",
+    )
+    commit(
+        [
+            _term(
+                "MONDO:0000001", "name: alpha", "is_a: MONDO:0000002",
+                'synonym: "first" EXACT []',
+            ),
+            _term("MONDO:0000002", "name: beta", "xref: DOID:7"),
+        ],
+        "c2 ordinary edit", "2020-01-03T00:00:00+00:00",
+    )
+    return repo

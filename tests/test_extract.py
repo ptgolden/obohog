@@ -684,3 +684,112 @@ def test_iter_search_events_reverse_orders(artifact: Path):
     for _, grp in __import__("itertools").groupby(term_rev, key=lambda tc: tc.term_id):
         seqs = [tc.change.commit_seq for tc in grp]
         assert seqs == sorted(seqs, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Namespace mapping: a wholesale prefix rename stays one term identity.
+
+NSMAP = {"TBD": "MONDO"}
+
+
+@pytest.fixture
+def renamed_artifact(renamed_ns_repo: Path, tmp_path: Path) -> Path:
+    out = tmp_path / "artifact"
+    with GitSource(renamed_ns_repo) as src:
+        extract(src, "onto.obo", out, namespace_map=NSMAP)
+    return out
+
+
+def test_namespace_map_one_identity_across_rename(renamed_artifact: Path):
+    db = HistoryDB(renamed_artifact)
+    ids = {
+        r[0] for r in
+        db.con.execute("SELECT DISTINCT term_id FROM events").fetchall()
+    }
+    assert ids == {"MONDO:0000001", "MONDO:0000002"}
+
+    # Creation records the as-written id as a clause.
+    c0 = db.con.execute(
+        "SELECT operation, predicate, value FROM events"
+        " WHERE term_id = 'MONDO:0000002' AND commit_seq = 0"
+    ).fetchall()
+    assert ("add", "id", "TBD:0000002") in c0
+
+    # The rename commit is NOT a death-and-birth: beta's only event there
+    # is the id spelling going away. (alpha also has real content changes.)
+    beta_rename = db.con.execute(
+        "SELECT operation, predicate, value FROM events"
+        " WHERE term_id = 'MONDO:0000002' AND commit_seq = 1"
+    ).fetchall()
+    assert beta_rename == [("remove", "id", "TBD:0000002")]
+
+    # References inside values keep their as-written text and diff as the
+    # genuine edits they were.
+    alpha_rename = db.con.execute(
+        "SELECT operation, predicate, value FROM events"
+        " WHERE term_id = 'MONDO:0000001' AND commit_seq = 1"
+        " ORDER BY predicate, operation"
+    ).fetchall()
+    assert ("remove", "is_a", "TBD:0000002") in alpha_rename
+    assert ("add", "is_a", "MONDO:0000002") in alpha_rename
+    db.close()
+
+
+def test_namespace_map_state_reconstructs_written_id(renamed_artifact: Path):
+    from obohog import service
+
+    db = HistoryDB(renamed_artifact)
+    tbd_era = service.get_state(db, "MONDO:0000001", "0")
+    assert tbd_era.written_id == "TBD:0000001"
+    assert all(c["tag"] != "id" for c in tbd_era.clauses)
+    now = service.get_state(db, "MONDO:0000001", "HEAD")
+    assert now.written_id == "MONDO:0000001"
+    db.close()
+
+
+def test_namespace_map_parallel_build_matches_serial(
+    renamed_ns_repo: Path, tmp_path: Path
+):
+    single = tmp_path / "single"
+    parallel = tmp_path / "parallel"
+    with GitSource(renamed_ns_repo) as src:
+        extract(src, "onto.obo", single, namespace_map=NSMAP)
+    build_parallel(
+        str(renamed_ns_repo), "onto.obo", parallel, jobs=2, namespace_map=NSMAP
+    )
+    ds, dp = HistoryDB(single), HistoryDB(parallel)
+    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    assert _multiset(ds, "events", ev_cols) == _multiset(dp, "events", ev_cols)
+    ds.close()
+    dp.close()
+
+
+def test_namespace_map_change_forces_full_rebuild(
+    renamed_ns_repo: Path, tmp_path: Path
+):
+    out = tmp_path / "artifact"
+    build_parallel(str(renamed_ns_repo), "onto.obo", out, namespace_map=NSMAP)
+    # Same map → nothing to do; different (absent) map → the existing rows
+    # are keyed under the wrong ids, so appending is off the table.
+    same = build_parallel(
+        str(renamed_ns_repo), "onto.obo", out, update=True, namespace_map=NSMAP
+    )
+    assert same.mode is BuildMode.UP_TO_DATE
+    changed = build_parallel(
+        str(renamed_ns_repo), "onto.obo", out, update=True, namespace_map=None
+    )
+    assert changed.mode is BuildMode.FULL
+
+
+def test_namespace_map_id_clause_supports_has_queries(renamed_artifact: Path):
+    # The as-written id is an ordinary clause, so the term-set machinery
+    # gets "was ever / is currently spelled TBD" for free.
+    from obohog.query import parse_has_clause
+
+    db = HistoryDB(renamed_artifact)
+    ever = SearchFilters(has=(parse_has_clause("id~TBD"),))
+    terms = {tc.term_id for tc in db.iter_search_events(None, ever)}
+    assert terms == {"MONDO:0000001", "MONDO:0000002"}
+    now = SearchFilters(has=(parse_has_clause("now:id~TBD"),))
+    assert list(db.iter_search_events(None, now)) == []
+    db.close()

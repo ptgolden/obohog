@@ -225,3 +225,39 @@ def test_get_source_empty_config_error_message(tmp_path: Path):
     cfg = load_config(cfg_path)
     with pytest.raises(ConfigError, match=r"Available sources: \(none\)"):
         cfg.get_source("mondo")
+
+
+def test_namespace_map_parses_and_defaults_empty(tmp_path: Path):
+    cfg_path = _write(
+        tmp_path / "obohog.toml",
+        """
+        [source.mondo]
+        type = "git-file"
+        repo = "https://github.com/monarch-initiative/mondo"
+        file = "src/ontology/mondo-edit.obo"
+        namespace_map = { TBD = "MONDO" }
+
+        [source.pato]
+        type = "git-file"
+        repo = "https://github.com/pato-ontology/pato"
+        file = "pato.obo"
+        """,
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.sources["mondo"].namespace_map == {"TBD": "MONDO"}
+    assert cfg.sources["pato"].namespace_map == {}
+
+
+def test_namespace_map_rejects_non_prefixes(tmp_path: Path):
+    cfg_path = _write(
+        tmp_path / "obohog.toml",
+        """
+        [source.mondo]
+        type = "git-file"
+        repo = "https://github.com/monarch-initiative/mondo"
+        file = "mondo.obo"
+        namespace_map = { "TBD:0000001" = "MONDO" }
+        """,
+    )
+    with pytest.raises(ConfigError, match="CURIE prefixes"):
+        load_config(cfg_path)

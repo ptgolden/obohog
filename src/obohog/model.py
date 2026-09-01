@@ -185,6 +185,9 @@ BUILD_META = pa.schema(
         ("first_commit_seq", pa.int32()),
         ("last_commit_seq", pa.int32()),
         ("n_commits", pa.int32()),
+        # JSON object, sorted keys ({"TBD": "MONDO"}); None when no mapping.
+        # Part of build identity: a changed map forces a full rebuild.
+        ("namespace_map", pa.string()),
     ]
 )
 
@@ -211,6 +214,7 @@ class BuildMeta:
     first_commit_seq: int | None
     last_commit_seq: int | None
     n_commits: int
+    namespace_map: str | None = None  # JSON, sorted keys; None = no mapping
 
 
 def read_build_meta(artifact_dir: Path | str) -> BuildMeta | None:
@@ -233,6 +237,8 @@ def read_build_meta(artifact_dir: Path | str) -> BuildMeta | None:
         first_commit_seq=row["first_commit_seq"],
         last_commit_seq=row["last_commit_seq"],
         n_commits=row["n_commits"],
+        # Absent in artifacts built before namespace mapping existed.
+        namespace_map=row.get("namespace_map"),
     )
 
 

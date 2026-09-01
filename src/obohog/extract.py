@@ -17,9 +17,10 @@ this dates pre-window content to the window's first commit.)
 import enum
 import multiprocessing
 import os
+import json
 import re
 import shutil
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import timezone
@@ -86,7 +87,8 @@ def _extract_snapshot_url(message: str) -> str | None:
 
 
 def extract(
-    src: GitSource, path: str, out_dir: Path, *, limit: int | None = None
+    src: GitSource, path: str, out_dir: Path, *, limit: int | None = None,
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> BuildReport:
     """Build an artifact under ``out_dir`` from ``path``'s history in ``src``.
 
@@ -96,7 +98,10 @@ def extract(
     versions = list(src.iter_file_history(path))
     if limit is not None:
         versions = versions[-limit:]
-    return build(versions, src.read_blob, out_dir, source_path=path, tags=src.read_tags())
+    return build(
+        versions, src.read_blob, out_dir, source_path=path,
+        tags=src.read_tags(), namespace_map=namespace_map,
+    )
 
 
 def build(
@@ -106,6 +111,7 @@ def build(
     *,
     source_path: str,
     tags: Iterable[TagRef] = (),
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> BuildReport:
     """Serial in-process build: the parallel path minus chunking and workers."""
     commits: list[dict] = []
@@ -113,7 +119,7 @@ def build(
     events: list[dict] = []
     skipped: list[dict] = []
 
-    state = DocumentState()
+    state = DocumentState(namespace_map)
     seqs: list[int] = []
     seq_dates: list[tuple[int, object]] = []  # (seq, naive-UTC date) for tag mapping
     for version in versions:
@@ -137,7 +143,7 @@ def build(
     _write_build_meta(
         Path(out_dir), source_path=source_path,
         first=seqs[0] if seqs else None, last=seqs[-1] if seqs else None,
-        n=len(seqs),
+        n=len(seqs), namespace_map=namespace_map,
     )
 
     return BuildReport(
@@ -276,8 +282,17 @@ def _version() -> str:
     return __version__
 
 
+def _nsmap_json(namespace_map: "Mapping[str, str] | None") -> str | None:
+    """The map's canonical JSON form (sorted keys), None when empty —
+    the representation stored in build_meta and compared on resume."""
+    if not namespace_map:
+        return None
+    return json.dumps(dict(namespace_map), sort_keys=True)
+
+
 def _write_build_meta(
-    out: Path, *, source_path: str, first: int | None, last: int | None, n: int
+    out: Path, *, source_path: str, first: int | None, last: int | None, n: int,
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> None:
     """Record what the artifact now covers. ALWAYS the final write of a build.
 
@@ -294,6 +309,7 @@ def _write_build_meta(
         first_commit_seq=first,
         last_commit_seq=last,
         n_commits=n,
+        namespace_map=_nsmap_json(namespace_map),
     )
     model.write_table([asdict(meta)], model.BUILD_META, out, "build_meta")
 
@@ -310,6 +326,7 @@ def build_parallel(
     limit: int | None = None,
     progress: bool = False,
     update: bool = False,
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> BuildReport:
     """Build the artifact from a local clone using a pool of parsing workers.
 
@@ -344,7 +361,9 @@ def build_parallel(
 
     os.environ["GIT_NO_LAZY_FETCH"] = "1"
 
-    plan = plan_build(out, full, limit=limit, update=update)
+    plan = plan_build(
+        out, full, limit=limit, update=update, namespace_map=namespace_map,
+    )
     if plan.resume is not None:
         _clear_aborted_parts(out, plan.resume.last)
     if plan.mode is BuildMode.UP_TO_DATE:
@@ -353,10 +372,12 @@ def build_parallel(
         return _build_update(
             clone_path, obo_path, out, full, tags, plan.resume,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
+            namespace_map=namespace_map,
         )
     return _build_full(
         clone_path, obo_path, out, full[plan.offset:], tags,
         jobs=jobs, chunk_size=chunk_size, progress=progress,
+        namespace_map=namespace_map,
     )
 
 
@@ -378,7 +399,8 @@ class BuildPlan:
 
 
 def plan_build(
-    out: Path, full: list, *, limit: int | None, update: bool
+    out: Path, full: list, *, limit: int | None, update: bool,
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> BuildPlan:
     """Decide how a run over the walk ``full`` should treat the artifact at ``out``.
 
@@ -394,7 +416,7 @@ def plan_build(
             if (out / "commits.parquet").exists()
             else []
         )
-        resume = _validate_resume(meta, commit_rows, full)
+        resume = _validate_resume(meta, commit_rows, full, namespace_map)
         if resume is not None:
             mode = (
                 BuildMode.UP_TO_DATE
@@ -407,7 +429,8 @@ def plan_build(
 
 
 def _validate_resume(
-    meta: "model.BuildMeta | None", commit_rows: list[dict], full: list
+    meta: "model.BuildMeta | None", commit_rows: list[dict], full: list,
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> _ResumePlan | None:
     """Check that an artifact with this metadata can be extended by this walk.
 
@@ -419,6 +442,10 @@ def _validate_resume(
     exactly when the previously built prefix is unchanged.
     """
     if meta is None or meta.schema_version != model.SCHEMA_VERSION:
+        return None
+    if meta.namespace_map != _nsmap_json(namespace_map):
+        # Term identity is baked in at extraction; a different mapping
+        # means the existing rows are keyed under the wrong ids.
         return None
     last = meta.last_commit_seq
     if last is None or last >= len(full):
@@ -456,6 +483,7 @@ def _build_full(
     jobs: int | None,
     chunk_size: int | None,
     progress: bool,
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> BuildReport:
     """Build the artifact from scratch over ``windowed``."""
     _reset_part_tables(out)
@@ -470,6 +498,7 @@ def _build_full(
 
     results = _run_chunks(
         clone_path, windowed, out, chunks, jobs=jobs, progress=progress, total=n,
+        namespace_map=namespace_map,
     )
 
     # Guarantee the core tables exist even if this (degenerate) build produced no
@@ -484,7 +513,7 @@ def _build_full(
         out, source_path=obo_path,
         first=windowed[0].commit.seq if windowed else None,
         last=windowed[-1].commit.seq if windowed else None,
-        n=n,
+        n=n, namespace_map=namespace_map,
     )
 
     return BuildReport(
@@ -508,6 +537,7 @@ def _build_update(
     jobs: int | None,
     chunk_size: int | None,
     progress: bool,
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> BuildReport:
     """Append the walk's commits after ``resume.last`` to an existing artifact.
 
@@ -533,6 +563,7 @@ def _build_update(
     results = _run_chunks(
         clone_path, tail, out, chunks,
         jobs=jobs, progress=progress, total=n, prefix=f"inc-{last + 1:07d}-",
+        namespace_map=namespace_map,
     )
 
     new_commit_rows = [_commit_row(v.commit) for v in new_versions]
@@ -554,7 +585,7 @@ def _build_update(
         out, source_path=obo_path,
         first=resume.meta.first_commit_seq,
         last=full[-1].commit.seq,
-        n=len(all_commits),
+        n=len(all_commits), namespace_map=namespace_map,
     )
 
     return BuildReport(
@@ -654,6 +685,7 @@ def _run_chunks(
     progress: bool,
     total: int,
     prefix: str = "",
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> "list[ChunkResult]":
     """Run ``_build_chunk`` over ``chunks`` in a spawn-based process pool."""
     # "spawn" (not fork): workers parse with fastobo's threaded runtime, and
@@ -671,6 +703,7 @@ def _run_chunks(
                 pool.submit(
                     _build_chunk, clone_path, versions, str(out),
                     c.id, c.start, c.end, ticks, prefix,
+                    dict(namespace_map) if namespace_map else None,
                 )
                 for c in chunks
             ]
@@ -721,6 +754,7 @@ def _build_chunk(
     end: int,
     ticks=None,
     prefix: str = "",
+    namespace_map: dict[str, str] | None = None,
 ) -> "ChunkResult":
     """Worker: apply ``windowed[start:end]`` to the document state, stream part-files.
 
@@ -734,7 +768,7 @@ def _build_chunk(
     os.dup2(os.open(os.devnull, os.O_WRONLY), 2)
 
     src = GitSource(clone_path)
-    state = _seed_state(src, windowed, start)
+    state = _seed_state(src, windowed, start, namespace_map)
     writer = _PartWriter(Path(out_dir), chunk_id, prefix)
     skipped: list[dict] = []
 
@@ -812,7 +846,8 @@ class _PartWriter:
 
 
 def _seed_state(
-    src: GitSource, windowed: list[FileVersion], start: int
+    src: GitSource, windowed: list[FileVersion], start: int,
+    namespace_map: "Mapping[str, str] | None" = None,
 ) -> DocumentState:
     """Document state as of the version before ``start``.
 
@@ -820,9 +855,10 @@ def _seed_state(
     against nothing, so every term appears as created.
     """
     if start == 0:
-        return DocumentState()
+        return DocumentState(namespace_map)
     try:
         blob = src.read_blob(windowed[start - 1].blob_oid)
     except GitError:
-        return DocumentState()  # missing seed blob → first diff treats all as new
-    return DocumentState.from_blob(blob)
+        # missing seed blob → first diff treats all as new
+        return DocumentState(namespace_map)
+    return DocumentState.from_blob(blob, namespace_map)

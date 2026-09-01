@@ -18,6 +18,10 @@ storage = "./data"
 type = "git-file"
 repo = "https://github.com/monarch-initiative/mondo"
 file = "src/ontology/mondo-edit.obo"
+# Early Mondo terms used the TBD: prefix (Sept-Oct 2017). Index that era
+# under MONDO: so each term is one continuous identity across the rename;
+# the as-written spelling stays recorded as a synthetic `id:` clause.
+namespace_map = { TBD = "MONDO" }
 
 [source.pato]
 type = "git-file"
@@ -52,3 +56,5 @@ acronym = "EXO"
 # Optional per-source overrides (any type):
 #   clone_dir = "/some/other/place"   # default: {storage}/{name}/clone
 #   db_dir    = "/some/other/place"   # default: {storage}/{name}/db
+#   namespace_map = { OLD = "NEW" }   # canonicalize term-id CURIE prefixes
+#                                     # (changing it forces a full rebuild)

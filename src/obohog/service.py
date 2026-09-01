@@ -175,6 +175,8 @@ class TimelineOut(BaseModel):
 
 class StateOut(BaseModel):
     term_id: str
+    written_id: str  # the id as spelled in the file at this ref (namespace
+    # mapping can canonicalize it away from term_id — e.g. early-MONDO TBD:)
     ref: str
     commit_seq: int
     clauses: list[dict[str, str]]  # {"tag": ..., "value": ...}
@@ -529,11 +531,16 @@ def get_state(db: HistoryDB, term_id: str, at: str) -> StateOut | None:
     clauses = db.term_at(term_id, seq)
     if not clauses:
         return None
+    # A synthetic id clause records the file's own spelling when namespace
+    # mapping canonicalized it; it renders as the stanza's id line, not a
+    # second clause.
+    written_id = next((v for p, v in clauses if p == "id"), term_id)
     return StateOut(
         term_id=term_id,
+        written_id=written_id,
         ref=at,
         commit_seq=seq,
-        clauses=[{"tag": p, "value": v} for p, v in clauses],
+        clauses=[{"tag": p, "value": v} for p, v in clauses if p != "id"],
     )
 
 

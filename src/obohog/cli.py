@@ -231,7 +231,7 @@ def source_sync(
     report = build_parallel(
         clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
         chunk_size=(chunk_size or None), limit=limit, progress=progress,
-        update=not rebuild,
+        update=not rebuild, namespace_map=source.namespace_map or None,
     )
     if report.mode is BuildMode.UP_TO_DATE:
         console.print(

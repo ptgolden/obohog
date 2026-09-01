@@ -11,12 +11,29 @@ import hashlib
 import io
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import fastobo
 
 # A stanza header line, e.g. "[Term]\n" or "[Typedef]\n", at the start of a line.
 _STANZA_RE = re.compile(rb"(?m)^\[[^\]\n]+\]\n")
+
+
+def map_term_id(term_id: str, namespace_map: Mapping[str, str] | None) -> str:
+    """Canonicalize a term id's CURIE prefix per a source's ``namespace_map``.
+
+    ``{"TBD": "MONDO"}`` makes ``TBD:0000001`` and ``MONDO:0000001`` the
+    same term, so a wholesale prefix rename in the file's history reads as
+    one continuous identity instead of a mass death-and-birth. Applied only
+    to term *ids* — CURIEs inside clause values keep their as-written text.
+    """
+    if not namespace_map:
+        return term_id
+    prefix, sep, rest = term_id.partition(":")
+    if sep and prefix in namespace_map:
+        return f"{namespace_map[prefix]}:{rest}"
+    return term_id
 
 
 @dataclass(frozen=True)
@@ -133,14 +150,16 @@ def clause_delta(
     return added, removed
 
 
-def split_document(data: bytes) -> tuple[bytes, dict[str, bytes]]:
+def split_document(
+    data: bytes, namespace_map: Mapping[str, str] | None = None
+) -> tuple[bytes, dict[str, bytes]]:
     """Split an OBO document into a reusable parse context and per-term stanzas.
 
     Returns ``(context, {term_id: stanza_bytes})`` where ``context`` is the header
     plus every non-``[Term]`` stanza (typedefs, instances) — everything needed to
     parse any single term stanza in isolation. This is a cheap byte-level scan, no
     fastobo, so it lets the extractor find which terms changed without parsing the
-    whole file.
+    whole file. Keys are canonical ids (see :func:`map_term_id`).
     """
     matches = list(_STANZA_RE.finditer(data))
     if not matches:
@@ -153,7 +172,7 @@ def split_document(data: bytes) -> tuple[bytes, dict[str, bytes]]:
         if match.group().strip() == b"[Term]":
             term_id = _stanza_id(stanza)
             if term_id is not None:
-                terms[term_id] = stanza
+                terms[map_term_id(term_id, namespace_map)] = stanza
                 continue
         context.append(stanza)
     return b"".join(context), terms
@@ -175,8 +194,31 @@ def stanza_hash(stanza: bytes) -> bytes:
     return hashlib.sha1(stanza).digest()
 
 
+def term_state_of(
+    frame: fastobo.term.TermFrame,
+    namespace_map: Mapping[str, str] | None = None,
+) -> TermState:
+    """A frame's :class:`TermState` under a source's ``namespace_map``.
+
+    When the mapping actually changes the id, the as-written id is kept as
+    a synthetic ``id:`` clause — so the file's original spelling stays a
+    recorded, diffable part of the term's history (its removal marks the
+    commit that renamed the namespace), and TBD-era snapshots reconstruct
+    with the id line the file really had.
+    """
+    raw_id = str(frame.id)
+    term_id = map_term_id(raw_id, namespace_map)
+    clauses = clauses_of(frame)
+    if term_id != raw_id:
+        id_clause = Clause("id", raw_id, ParsedValue(raw_id, (), None))
+        clauses = tuple(sorted((*clauses, id_clause)))
+    return TermState(term_id, clauses, hash_clauses(clauses))
+
+
 def parse_stanzas(
-    context: bytes, stanzas: dict[str, bytes]
+    context: bytes,
+    stanzas: dict[str, bytes],
+    namespace_map: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, TermState], list[str]]:
     """Parse the given term stanzas (with ``context``), isolating any failures.
 
@@ -186,7 +228,7 @@ def parse_stanzas(
     """
     parsed: dict[str, TermState] = {}
     failed: list[str] = []
-    _parse_batch(context, stanzas, list(stanzas), parsed, failed)
+    _parse_batch(context, stanzas, list(stanzas), parsed, failed, namespace_map)
     return parsed, failed
 
 
@@ -196,6 +238,7 @@ def _parse_batch(
     ids: list[str],
     parsed: dict[str, TermState],
     failed: list[str],
+    namespace_map: Mapping[str, str] | None = None,
 ) -> None:
     if not ids:
         return
@@ -210,15 +253,14 @@ def _parse_batch(
             failed.append(ids[0])
             return
         mid = len(ids) // 2
-        _parse_batch(context, stanzas, ids[:mid], parsed, failed)
-        _parse_batch(context, stanzas, ids[mid:], parsed, failed)
+        _parse_batch(context, stanzas, ids[:mid], parsed, failed, namespace_map)
+        _parse_batch(context, stanzas, ids[mid:], parsed, failed, namespace_map)
         return
     wanted = set(ids)
     for frame in frames:
-        term_id = str(frame.id)
+        term_id = map_term_id(str(frame.id), namespace_map)
         if term_id in wanted:
-            clauses = clauses_of(frame)
-            parsed[term_id] = TermState(term_id, clauses, hash_clauses(clauses))
+            parsed[term_id] = term_state_of(frame, namespace_map)
 
 
 @dataclass(frozen=True)
@@ -259,12 +301,15 @@ class DocumentState:
       its content changes again.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, namespace_map: Mapping[str, str] | None = None) -> None:
         self._terms: dict[str, TermState] = {}
         self._raw: dict[str, bytes] = {}
+        self._namespace_map = namespace_map
 
     @classmethod
-    def from_blob(cls, blob: bytes) -> "DocumentState":
+    def from_blob(
+        cls, blob: bytes, namespace_map: Mapping[str, str] | None = None
+    ) -> "DocumentState":
         """Full state of one document version, for seeding a mid-walk start.
 
         Per-stanza parse failures are isolated and simply omitted — not
@@ -272,9 +317,9 @@ class DocumentState:
         (and re-reported) once at the start of each seeded walk rather
         than silently carried.
         """
-        state = cls()
-        context, stanzas = split_document(blob)
-        parsed, _failed = parse_stanzas(context, stanzas)
+        state = cls(namespace_map)
+        context, stanzas = split_document(blob, namespace_map)
+        parsed, _failed = parse_stanzas(context, stanzas, namespace_map)
         for term_id, term in parsed.items():
             state._terms[term_id] = term
             state._raw[term_id] = stanza_hash(stanzas[term_id])
@@ -289,12 +334,13 @@ class DocumentState:
         from ∅ to its full clause set — which is the story we want in the
         events table.
         """
-        context, stanzas = split_document(blob)
+        context, stanzas = split_document(blob, self._namespace_map)
         cur_hash = {mid: stanza_hash(s) for mid, s in stanzas.items()}
         changed_ids = [mid for mid in stanzas if cur_hash[mid] != self._raw.get(mid)]
         removed_ids = self._raw.keys() - stanzas.keys()
         parsed, failed_ids = parse_stanzas(
-            context, {mid: stanzas[mid] for mid in changed_ids}
+            context, {mid: stanzas[mid] for mid in changed_ids},
+            self._namespace_map,
         )
         failed = [(term_id, "ParseError") for term_id in failed_ids]
         for term_id in failed_ids:
@@ -331,7 +377,11 @@ class DocumentState:
         return CommitDelta(changed=changed, removed=removed_terms, failed=failed)
 
 
-def parse_terms(data: bytes, threads: int = 1) -> dict[str, TermState]:
+def parse_terms(
+    data: bytes,
+    threads: int = 1,
+    namespace_map: Mapping[str, str] | None = None,
+) -> dict[str, TermState]:
     """Parse one OBO document into ``{term_id: TermState}`` for its term frames.
 
     Non-term frames (typedefs, instances) and the header are ignored — the index
@@ -346,7 +396,6 @@ def parse_terms(data: bytes, threads: int = 1) -> dict[str, TermState]:
     result: dict[str, TermState] = {}
     for frame in doc:
         if isinstance(frame, fastobo.term.TermFrame):
-            term_id = str(frame.id)
-            clauses = clauses_of(frame)
-            result[term_id] = TermState(term_id, clauses, hash_clauses(clauses))
+            state = term_state_of(frame, namespace_map)
+            result[state.term_id] = state
     return result

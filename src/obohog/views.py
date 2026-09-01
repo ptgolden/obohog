@@ -450,9 +450,13 @@ def render_state(term_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
         console.print(f"[yellow]{term_id} has no snapshot at or before {at}[/]")
         return
     console.print(f"[bold cyan]{term_id}[/] as of {at}:")
-    console.print(Text(f"  id: {term_id}"))
+    # A synthetic id clause carries the file's own spelling when namespace
+    # mapping canonicalized it — it IS the id line, not a clause.
+    written_id = next((v for t, v in clauses if t == "id"), term_id)
+    console.print(Text(f"  id: {written_id}"))
     for tag, value in clauses:
-        console.print(Text(f"  {tag}: {value}"))
+        if tag != "id":
+            console.print(Text(f"  {tag}: {value}"))
 
 
 def _date(value: object) -> str:

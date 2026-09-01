@@ -11,7 +11,7 @@
   </div>
 {#- .term-state pre is whitespace-sensitive: keep the stanza lines flush left. -#}
 <pre>[Term]
-id: {{ state.term_id }}
+id: {{ state.written_id }}
 {% for c in state.clauses %}{{ c.tag }}: {{ c.value }}
 {% endfor %}</pre>
   <p class="dim state-disclaimer">This stanza is reconstructed from normalized
