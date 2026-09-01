@@ -128,15 +128,21 @@ form.search input:not([type="search"]), form.search select {
   background: var(--bg);
   color: var(--fg);
 }
+/* Filled accent; color: var(--bg) flips with the scheme, keeping the
+   label dark-on-light-blue in dark mode and white-on-blue in light. */
 form.search button {
-  padding: 0.25rem 0.9rem;
-  border: 1px solid var(--line);
+  padding: 0.4rem 1.3rem;
+  border: 1px solid var(--accent);
   border-radius: 6px;
-  background: var(--bg);
-  color: var(--fg);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.9rem;
+  font-weight: 600;
   cursor: pointer;
 }
-form.search button:hover { border-color: var(--accent); color: var(--accent); }
+form.search button:hover { filter: brightness(1.1); }
+form.search .reset { color: var(--dim); }
+form.search .reset:hover { color: var(--accent); }
 
 /* Reconstructed term stanza (state page + inline expand) */
 .state-link { font-size: 0.85rem; }
