@@ -259,6 +259,9 @@ def test_commit_view_pages_by_term(wide_db):
 
 
 def test_date_order_sections_cap_terms(wide_db, monkeypatch):
+    # Browsing (q=None) stops *consuming* the commit at the cap: the
+    # page ends there, more_terms comes from a SQL count, and the
+    # cursor resumes past the capped commit.
     monkeypatch.setattr(service, "SECTION_TERM_CAP", 2)
     page = service.search(wide_db, STYLE, SearchParams(order="date"))
     (section,) = page.sections
@@ -266,6 +269,37 @@ def test_date_order_sections_cap_terms(wide_db, monkeypatch):
         "MONDO:0000001", "MONDO:0000002",
     ]
     assert section.more_terms == 1
+    assert page.next_cursor == str(section.commit.commit_seq)
+    rest = service.search(
+        wide_db, STYLE, SearchParams(order="date", after=page.next_cursor)
+    )
+    assert rest.sections == []
+    assert rest.next_cursor is None
+
+
+def test_date_order_cap_respects_filters_in_more_terms(wide_db, monkeypatch):
+    # The tail count runs under the same filters as the stream (here a
+    # tag narrowing), so more_terms counts eligible terms, not all of
+    # the commit's terms.
+    monkeypatch.setattr(service, "SECTION_TERM_CAP", 1)
+    page = service.search(
+        wide_db, STYLE, SearchParams(order="date", tag="name")
+    )
+    (section,) = page.sections
+    assert [t.term_id for t in section.terms] == ["MONDO:0000001"]
+    assert section.more_terms == 2
+
+
+def test_date_order_query_path_consumes_whole_section(wide_db, monkeypatch):
+    # With a delta filter the SQL more_terms count would be approximate,
+    # so consumption is NOT capped: the whole section streams, the
+    # render cap slices it, and the page isn't truncated.
+    monkeypatch.setattr(service, "SECTION_TERM_CAP", 2)
+    page = service.search(wide_db, STYLE, SearchParams(q="term", order="date"))
+    (section,) = page.sections
+    assert len(section.terms) == 2
+    assert section.more_terms == 1
+    assert page.next_cursor is None
 
 
 # ---------------------------------------------------------------------------

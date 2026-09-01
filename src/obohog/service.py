@@ -12,6 +12,7 @@ machinery), so a future MCP server stays a page of thin wrappers.
 """
 
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime
 from itertools import groupby
 from typing import Generic, Iterator, Literal, TypeVar
@@ -379,7 +380,11 @@ def _commit_sections(
     style: SourceStyle,
     full: bool,
     term_cap: int | None = None,
+    tail_more_terms: int = 0,
 ) -> list[CommitSectionOut]:
+    """``tail_more_terms`` overrides the last section's ``more_terms``:
+    when consumption was capped (see :func:`_take_page`) the hidden
+    remainder never reached ``groups``, so it can't be counted here."""
     sections = []
     for _, run in groupby(groups, key=lambda g: g.head.commit_seq):
         entries = list(run)
@@ -398,6 +403,10 @@ def _commit_sections(
                 ],
             )
         )
+    if tail_more_terms and sections:
+        sections[-1] = sections[-1].model_copy(
+            update={"more_terms": tail_more_terms}
+        )
     return sections
 
 
@@ -415,26 +424,53 @@ def _parse_after(after: str | None, order: str) -> str | int | None:
 
 
 def _take_page(
-    groups: Iterator[render.PairedCommit], order: str, limit: int
-) -> tuple[list[render.PairedCommit], str | None]:
+    groups: Iterator[render.PairedCommit],
+    order: str,
+    limit: int,
+    *,
+    section_cap: int | None = None,
+) -> tuple[list[render.PairedCommit], str | None, bool]:
     """Consume up to ``limit`` sections; return them + the resume cursor.
 
     Wraps :func:`obohog.render.take_sections`, converting its truncation
     out-param into the ``next_cursor`` contract: the section key of the
     last emitted section when the limit actually cut something off.
     Pages are additionally bounded by :data:`PAGE_OP_BUDGET`.
+
+    ``section_cap`` bounds *within* a section: at that many groups the
+    stream is abandoned mid-section and the page ends there — a
+    whole-release commit costs at most a cap's worth of pairing instead
+    of its full 100k+ events. The returned flag says the final section
+    was cut off this way; its remaining groups appear on no page (the
+    keyset cursor resumes strictly after the section), deliberately —
+    they're exactly what the render cap already hid, reachable through
+    the commit view. The caller owes the section a true ``more_terms``
+    count when the flag is set.
     """
     section_key = (
         (lambda g: g.term_id) if order == "term"
         else (lambda g: g.head.commit_seq)
     )
     truncated = [False]
-    taken = list(render.take_sections(
+    stream = render.take_sections(
         groups, limit, section_key, truncated, op_budget=PAGE_OP_BUDGET,
-    ))
-    if truncated[0] and taken:
-        return taken, str(section_key(taken[-1]))
-    return taken, None
+    )
+    taken: list[render.PairedCommit] = []
+    tail_capped = False
+    current: object = object()
+    in_section = 0
+    for g in stream:
+        key = section_key(g)
+        if key != current:
+            current, in_section = key, 0
+        in_section += 1
+        if section_cap is not None and in_section > section_cap:
+            tail_capped = True
+            break
+        taken.append(g)
+    if (truncated[0] or tail_capped) and taken:
+        return taken, str(section_key(taken[-1])), tail_capped
+    return taken, None, tail_capped
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +595,10 @@ def search(
     """One page of search results — the CLI ``search`` pipeline, paged.
 
     Same stages as the CLI: SQL candidates → pair by (term, commit) →
-    clause-aware delta filter on edits → section cutoff. ``counts`` are
+    clause-aware delta filter on edits → section cutoff. Date-ordered
+    browsing additionally stops consuming a whole-release-sized commit
+    at :data:`SECTION_TERM_CAP` terms — the page ends there and the
+    rest is only reachable through the commit view. ``counts`` are
     the SQL candidates — an upper bound (``approximate=True``) when a
     query ran the delta filter, exact when browsing without one.
 
@@ -606,7 +645,18 @@ def search(
             )
             if g.ops
         )
-    taken, next_cursor = _take_page(filtered, params.order, params.limit)
+    # Browsing (no delta filter) also caps *consumption* of a section at
+    # the render cap: what streams past it would be paired and thrown
+    # away. Only then — the SQL term count that backs ``more_terms`` is
+    # exact only when every event group is a keeper.
+    section_cap = (
+        SECTION_TERM_CAP
+        if params.order == "date" and params.q is None
+        else None
+    )
+    taken, next_cursor, tail_capped = _take_page(
+        filtered, params.order, params.limit, section_cap=section_cap
+    )
     counts_out = CountsOut(
         events=counts.events,
         terms=counts.terms,
@@ -619,9 +669,17 @@ def search(
             next_cursor=next_cursor,
             counts=counts_out,
         )
+    tail_more_terms = 0
+    if tail_capped:
+        seq = taken[-1].head.commit_seq
+        in_commit = replace(filters, since_seq=seq, until_seq=seq)
+        tail_more_terms = (
+            db.search_counts(None, in_commit).terms - SECTION_TERM_CAP
+        )
     return PageOut(
         sections=_commit_sections(
-            taken, style, params.full, term_cap=SECTION_TERM_CAP
+            taken, style, params.full,
+            term_cap=SECTION_TERM_CAP, tail_more_terms=tail_more_terms,
         ),
         next_cursor=next_cursor,
         counts=counts_out,
@@ -645,7 +703,7 @@ def diff(
     counts = db.range_counts(ref_a, ref_b, filters)
     events = db.iter_range_events(ref_a, ref_b, filters, after=after or None)
     groups = render.pair_by_term_and_commit(events)
-    taken, next_cursor = _take_page(groups, "term", limit)
+    taken, next_cursor, _ = _take_page(groups, "term", limit)
     return PageOut(
         sections=_term_sections(taken, style, full),
         next_cursor=next_cursor,
