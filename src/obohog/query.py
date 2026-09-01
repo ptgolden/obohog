@@ -6,7 +6,7 @@ can point at local paths or HTTP URLs, so a hosted artifact needs no server.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator, NamedTuple, Sequence
 
@@ -819,14 +819,21 @@ class HistoryDB:
         per op — the paired-partner and same-group events pulled in by the
         semi-join don't show unless their own delta involves the query.
         """
-        where, params = self._search_where(query, filters)
-        if query is not None:
+        if query is None:
+            where, params = self._search_where(None, filters)
+        else:
+            # The semi-join picks candidate groups by text alone: any
+            # ``has`` term narrowing already lives in the outer WHERE,
+            # so repeating it inside would just re-scan events.
             outer, outer_params = self._search_where(None, filters)
+            inner, inner_params = self._search_where(
+                query, replace(filters, has=())
+            )
             where = (
                 f"{outer} AND (e.term_id, e.commit_seq) IN "
-                f"(SELECT e.term_id, e.commit_seq FROM events e WHERE {where})"
+                f"(SELECT e.term_id, e.commit_seq FROM events e WHERE {inner})"
             )
-            params = [*outer_params, *params]
+            params = [*outer_params, *inner_params]
         return self._iter_term_changes(
             where, params, order=order, reverse=reverse, after=after,
         )
