@@ -12,7 +12,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-SCHEMA_VERSION = "1"
+# Bump whenever the artifact schema changes shape, so build_meta records
+# which schema an artifact was built with.
+#   1 — initial schema
+#   2 — events gained body/qualifiers/comment decomposition columns
+SCHEMA_VERSION = "2"
 
 
 class Operation(enum.StrEnum):
@@ -72,6 +76,14 @@ EVENTS = pa.schema(
         ("predicate", pa.string()),
         ("value", pa.string()),
         ("operation", pa.string()),  # Operation value
+        # Structural decomposition of `value`, captured at parse time from
+        # the fastobo clause object (see obo.decompose_clause). Invariant:
+        # body + " {qualifiers}" + " ! comment" == value, byte for byte.
+        # `value` stays stored as the primitive record; these columns let
+        # query/render skip fastobo entirely.
+        ("body", pa.string()),
+        ("qualifiers", pa.list_(pa.string())),
+        ("comment", pa.string()),  # nullable: absent trailing `!` comment
     ]
 )
 

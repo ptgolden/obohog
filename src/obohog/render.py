@@ -7,16 +7,16 @@ rendering the pair as an inline ``~`` line with intra-value diff highlighting
 (git ``--word-diff`` style). Unpaired events render as ``+`` / ``-`` as before.
 """
 
-import io
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from difflib import SequenceMatcher
+from cydifflib import SequenceMatcher
 from typing import Iterable
 
 import fastobo
 from rich.text import Text
 
+from .obo import ParsedValue, decompose_clause
 from .query import Change
 
 PAIR_THRESHOLD = 0.5
@@ -101,31 +101,36 @@ def pair_events(
         adds = [c for c in group if c.operation == "add"]
         removes = [c for c in group if c.operation == "remove"]
 
-        # Parse each event's body once so both passes can reuse it. ``None``
-        # means fastobo couldn't parse — those events skip pass 1 and are
-        # matched only in pass 2.
-        r_bodies = [_parsed_body(predicate, r.value) for r in removes]
-        a_bodies = [_parsed_body(predicate, a.value) for a in adds]
-
         used_r: set[int] = set()
         used_a: set[int] = set()
 
-        # Pass 1: pair by matching parsed body.
-        for i, rb in enumerate(r_bodies):
-            if rb is None or i in used_r:
+        # Pass 1: pair by matching parsed body. Each Change carries its
+        # value's decomposition from the artifact; ``None`` (possible only
+        # on hand-built Changes, e.g. in tests) skips pass 1 and is matched
+        # only in pass 2.
+        for i, r in enumerate(removes):
+            rp = r.parsed
+            if rp is None or i in used_r:
                 continue
             candidates = [
-                j for j, ab in enumerate(a_bodies)
-                if ab == rb and j not in used_a
+                j for j, a in enumerate(adds)
+                if a.parsed is not None and a.parsed.body == rp.body
+                and j not in used_a
             ]
             if not candidates:
                 continue
-            best_j = max(
-                candidates,
-                key=lambda j: SequenceMatcher(
-                    None, removes[i].value, adds[j].value, autojunk=False
-                ).ratio(),
-            )
+            if len(candidates) == 1:
+                # The overwhelmingly common case — and max() would still
+                # compute the (expensive) similarity score just to select
+                # the only element.
+                best_j = candidates[0]
+            else:
+                best_j = max(
+                    candidates,
+                    key=lambda j: SequenceMatcher(
+                        None, removes[i].value, adds[j].value, autojunk=False
+                    ).ratio(),
+                )
             used_r.add(i)
             used_a.add(best_j)
             ops.append(Edit(predicate=predicate, before=removes[i], after=adds[best_j]))
@@ -160,12 +165,6 @@ def pair_events(
     return ops
 
 
-def _parsed_body(predicate: str, value: str) -> str | None:
-    """The fastobo-parsed body of a clause value, or ``None`` if unparseable."""
-    pv = parse_clause_value(predicate, value)
-    return pv.body if pv is not None else None
-
-
 def _sort_key(op: Op) -> tuple[str, int, str]:
     """Stable within-commit order: by predicate, then kind, then value."""
     if isinstance(op, Edit):
@@ -181,21 +180,6 @@ def _truncate(s: str, cap: int | None) -> str:
     return s[: cap - 1] + ELLIPSIS
 
 
-@dataclass(frozen=True)
-class ParsedValue:
-    """A clause value split into its OBO-structural parts.
-
-    ``body`` is everything except the ``{qualifiers}`` block and the ``!`` name
-    comment — the parts that carry the clause's semantic identity. ``qualifiers``
-    preserves the original order (use ``Counter`` for order-independent
-    comparison). ``comment`` is the trailing ``!`` text, ``None`` if absent.
-    """
-
-    body: str
-    qualifiers: tuple[str, ...]
-    comment: str | None
-
-
 _STANZA_TEMPLATE = "format-version: 1.2\n\n[Term]\nid: TMP:0000001\n{tag}: {value}\n"
 
 
@@ -207,10 +191,21 @@ def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
     even panics on) them; when that happens we fall back to lexical
     rendering. fastobo already handles the tricky parts (quoted values with
     escapes, ``!`` inside strings, nested brackets), so we don't hand-parse.
+
+    Keep ``threads=1``. fastobo's default (``threads=0``) starts one thread
+    per logical core on every call, and setting up that pool costs ~19x more
+    than parsing does when the "document" is a single synthetic one-clause
+    stanza. Same reasoning as :mod:`obohog.obo`.
     """
     stanza = _STANZA_TEMPLATE.format(tag=predicate, value=value)
     try:
-        doc = fastobo.load(io.BytesIO(stanza.encode()))
+        doc = fastobo.loads(stanza, threads=1)
+    except (KeyboardInterrupt, SystemExit):
+        # The bare ``except`` below is here to absorb fastobo's Rust panics
+        # (``BaseException``, not ``Exception``). Interpreter control flow
+        # must not get absorbed with them — swallowing KeyboardInterrupt in
+        # a function this hot makes the CLI unkillable by ^C.
+        raise
     except BaseException:  # fastobo can panic, not just raise
         return None
     frames = list(doc)
@@ -219,31 +214,9 @@ def parse_clause_value(predicate: str, value: str) -> ParsedValue | None:
     for clause in frames[0]:
         if clause.raw_tag() == "id":
             continue
-        return _clause_to_parsed(clause)
+        _, _, serialized = str(clause).partition(": ")
+        return decompose_clause(clause, serialized)
     return None
-
-
-def _clause_to_parsed(clause) -> ParsedValue:
-    """Split ``str(clause)`` into body / qualifiers / comment.
-
-    fastobo gives us the qualifier list and comment as parsed structures.
-    Peeling them off ``str(clause)`` (which fastobo serializes deterministically)
-    leaves the "body" — the value-carrying prefix — intact for every clause
-    kind, including ``def:`` whose trailing ``[xref, xref]`` list belongs to
-    the body, not the qualifier block.
-    """
-    _, _, body = str(clause).partition(": ")
-    comment = clause.comment
-    qualifiers = tuple(str(q) for q in (clause.qualifiers or []))
-    if comment is not None:
-        marker = f" ! {comment}"
-        if body.endswith(marker):
-            body = body[: -len(marker)]
-    if qualifiers:
-        marker = " {" + ", ".join(qualifiers) + "}"
-        if body.endswith(marker):
-            body = body[: -len(marker)]
-    return ParsedValue(body=body, qualifiers=qualifiers, comment=comment)
 
 
 def _matches(text: str, query: str, regex: bool, ignore_case: bool) -> bool:
@@ -285,12 +258,12 @@ def edit_delta_matches(
     the query only appears there, the edit's delta doesn't actually
     involve the query.
 
-    Fallback: if either side can't be parsed via fastobo, return ``True``
+    Fallback: if either side couldn't be parsed via fastobo, return ``True``
     (safe default; preserves current behavior on the historical malformed
     clauses fastobo rejects).
     """
-    before = parse_clause_value(edit.predicate, edit.before.value)
-    after = parse_clause_value(edit.predicate, edit.after.value)
+    before = edit.before.parsed
+    after = edit.after.parsed
     if before is None or after is None:
         return True
 
@@ -324,7 +297,7 @@ def render_op(op: Op, truncate: int | None = DEFAULT_TRUNCATE) -> Text:
     if isinstance(op, Remove):
         return _render_plain(op.predicate, op.change.value, "-", "bold red", truncate)
     if isinstance(op, Edit):
-        return _render_edit(op.predicate, op.before.value, op.after.value, truncate)
+        return _render_edit(op, truncate)
     raise TypeError(f"unknown op: {op!r}")
 
 
@@ -335,11 +308,12 @@ def _render_plain(predicate: str, value: str, marker: str, style: str, cap: int 
     return line
 
 
-def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Text:
+def _render_edit(edit: Edit, cap: int | None) -> Text:
     """Render a paired remove/add as one ``~`` line, structure-aware.
 
-    Parses both sides via fastobo into ``(body, qualifiers, ! comment)`` and
-    picks a rendering that matches the shape of the change:
+    Reads the pairing-time fastobo parses off the ``Edit`` —
+    ``(body, qualifiers, ! comment)`` per side — and picks a rendering
+    that matches the shape of the change:
 
     * ``body`` + qualifier set identical, only ``!`` comment differs →
       render shared form plain and the comment change as one bracketed
@@ -353,11 +327,12 @@ def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Te
       then each qualifier on its own indented sub-line with a ``-``/``+``/``~``
       marker or dim if kept. Reads like an axiom-annotation diff, not a
       run-together sentence.
-    * Everything else (including any case where fastobo can't parse either
-      side) → the token-level word-diff fallback.
+    * Everything else (including any case where fastobo couldn't parse
+      either side) → the token-level word-diff fallback.
     """
-    b = parse_clause_value(predicate, before)
-    a = parse_clause_value(predicate, after)
+    predicate = edit.predicate
+    b = edit.before.parsed
+    a = edit.after.parsed
 
     if b is not None and a is not None:
         body_same = b.body == a.body
@@ -373,7 +348,7 @@ def _render_edit(predicate: str, before: str, after: str, cap: int | None) -> Te
         if not quals_multiset_same:
             return _render_qualifier_block(predicate, b, a, cap)
 
-    return _render_token_diff(predicate, before, after, cap)
+    return _render_token_diff(predicate, edit.before.value, edit.after.value, cap)
 
 
 def _render_comment_only(

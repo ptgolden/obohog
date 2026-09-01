@@ -7,12 +7,30 @@ can point at local paths or HTTP URLs, so a hosted artifact needs no server.
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator, NamedTuple
 
 import duckdb
+
+from .obo import ParsedValue
+
+
+class EventCounts(NamedTuple):
+    """Result-set scope for an events query: totals by three grains."""
+
+    events: int
+    terms: int
+    commits: int
 
 
 class ArtifactNotFound(Exception):
     """Raised when an artifact directory lacks the core history tables."""
+
+
+def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
+    """Convert the artifact's decomposition columns into a ParsedValue."""
+    return ParsedValue(
+        body=body, qualifiers=tuple(qualifiers or ()), comment=comment
+    )
 
 
 def _wrap_branch_commits(raw) -> tuple["BranchCommit", ...]:
@@ -42,7 +60,13 @@ class BranchCommit:
 
 @dataclass(frozen=True)
 class Change:
-    """One clause add/remove, joined to the commit that made it."""
+    """One clause add/remove, joined to the commit that made it.
+
+    ``parsed`` is the value's structural decomposition, read from the
+    artifact's body/qualifiers/comment columns. It is always present on
+    event rows; ``None`` only on synthetic commit-header rows (see
+    :meth:`HistoryDB.commit_events`) whose value is a placeholder.
+    """
 
     commit_seq: int
     committed_date: object
@@ -55,6 +79,7 @@ class Change:
     value: str
     branch_commits: tuple[BranchCommit, ...] = ()
     snapshot_url: str | None = None
+    parsed: ParsedValue | None = None
 
 
 @dataclass(frozen=True)
@@ -147,7 +172,8 @@ class HistoryDB:
             SELECT c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url
+                   c.branch_commits, c.snapshot_url,
+                   e.body, e.qualifiers, e.comment
             FROM events e
             JOIN commits c USING (commit_seq)
             WHERE {where}
@@ -160,6 +186,7 @@ class HistoryDB:
                 *row[:9],
                 branch_commits=_wrap_branch_commits(row[9]),
                 snapshot_url=row[10],
+                parsed=_wrap_parsed(*row[11:14]),
             )
             for row in rows
         ]
@@ -255,7 +282,8 @@ class HistoryDB:
             params.append(namespace)
         rows = self.con.execute(
             f"""
-            SELECT e.term_id, s.name, e.operation, e.predicate, e.value
+            SELECT e.term_id, s.name, e.operation, e.predicate, e.value,
+                   e.body, e.qualifiers, e.comment
             FROM events e
             LEFT JOIN term_snapshots s
               ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
@@ -272,9 +300,10 @@ class HistoryDB:
                     commit_seq, date, sha, author, pr, message, op, pred, val,
                     branch_commits=branch_commits,
                     snapshot_url=snapshot_url,
+                    parsed=_wrap_parsed(body, qualifiers, comment),
                 ),
             )
-            for term_id, name, op, pred, val in rows
+            for term_id, name, op, pred, val, body, qualifiers, comment in rows
         ]
         return head, events
 
@@ -312,23 +341,14 @@ class HistoryDB:
             raise KeyError(f"could not resolve ref {ref!r} to a commit")
         return row[0]
 
-    def range_events(
+    def _range_where(
         self,
         ref_a: str,
         ref_b: str,
         term_id: str | None = None,
         namespace: str | None = None,
-    ) -> list[TermChange]:
-        """Events in ``(lo, hi]``, one row per clause change.
-
-        ``lo``/``hi`` are the two refs (any of tag, short sha, HEAD, or
-        commit_seq — via :meth:`resolve_ref`), sorted so order doesn't matter.
-        Optionally restricted to one term (``term_id``) or one CURIE
-        prefix (``namespace``, e.g. ``"MONDO"``). Rows are ordered by
-        ``(term_id, commit_seq, operation, predicate, value)`` so grouping
-        by term (then by commit within term) feeds directly into the render
-        pipeline.
-        """
+    ) -> tuple[str, list[object]]:
+        """WHERE clause + params for events in the range ``(lo, hi]``."""
         lo, hi = sorted((self.resolve_ref(ref_a), self.resolve_ref(ref_b)))
         where = "e.commit_seq > ? AND e.commit_seq <= ?"
         params: list[object] = [lo, hi]
@@ -338,37 +358,10 @@ class HistoryDB:
         if namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
             params.append(namespace)
-        rows = self.con.execute(
-            f"""
-            SELECT e.term_id, s.name,
-                   c.commit_seq, c.committed_date, c.sha, c.author_name,
-                   c.pr_number, c.message,
-                   e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url
-            FROM events e
-            JOIN commits c USING (commit_seq)
-            LEFT JOIN term_snapshots s
-              ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
-            WHERE {where}
-            ORDER BY e.term_id, c.commit_seq, e.operation, e.predicate, e.value
-            """,
-            params,
-        ).fetchall()
-        return [
-            TermChange(
-                term_id=term_id,
-                name=name,
-                change=Change(
-                    seq, date, sha, author, pr, message, op, pred, val,
-                    branch_commits=_wrap_branch_commits(bc),
-                    snapshot_url=snapshot_url,
-                ),
-            )
-            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc, snapshot_url in rows
-        ]
+        return where, params
 
-    def search_events(
-        self,
+    @staticmethod
+    def _search_where(
         query: str,
         term_id: str | None = None,
         predicate: str | None = None,
@@ -376,13 +369,8 @@ class HistoryDB:
         regex: bool = False,
         ignore_case: bool = False,
         namespace: str | None = None,
-    ) -> list[TermChange]:
-        """Events whose clause ``value`` matches ``query``.
-
-        "Which commits added or removed a clause matching this?" —
-        analogous to ``git log -S<string>`` (default substring mode) or
-        ``git log -G<pattern>`` (``regex=True``) at the file-line level,
-        but on our clause-event granularity.
+    ) -> tuple[str, list[object]]:
+        """WHERE clause + params for events whose ``value`` matches ``query``.
 
         * ``regex=False`` (default): substring match via DuckDB's
           ``contains()`` — no LIKE wildcard escape logic to write.
@@ -398,10 +386,6 @@ class HistoryDB:
         supplied ``commit_seq`` (resolve external refs via
         :meth:`resolve_ref` in the caller), ``namespace`` restricts to
         term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
-
-        Rows come back ordered ``(term_id, commit_seq, operation,
-        predicate, value)`` so grouping-by-term-then-commit feeds the
-        render pipeline directly.
         """
         if regex:
             if ignore_case:
@@ -426,34 +410,143 @@ class HistoryDB:
         if namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
             params.append(namespace)
-        rows = self.con.execute(
+        return where, params
+
+    def _iter_term_changes(
+        self,
+        where: str,
+        params: list[object],
+        batch_size: int = 10_000,
+        order: str = "term",
+        reverse: bool = False,
+    ) -> Iterator[TermChange]:
+        """Stream ``TermChange`` rows for a WHERE over events, in render order.
+
+        Rows are ordered ``(term_id, commit_seq, operation, predicate,
+        value)`` so grouping-by-term-then-commit feeds the render pipeline
+        directly — and so ``(term_id, commit_seq)`` works as a resume
+        cursor for paged consumers. DuckDB produces sorted results
+        incrementally, so the first batch is available almost immediately
+        regardless of total result size; Change construction is amortized
+        across consumption instead of paid up front.
+
+        ``order`` picks the stream's grouping spine:
+
+        * ``"term"`` — ``(term_id, commit_seq, ...)``: per-term sections,
+          each term's history chronological. The default everywhere.
+        * ``"date"`` — ``(commit_seq DESC, term_id, ...)``: newest commit
+          first, terms grouped within each commit — the ``git log`` shape.
+          A consumer that stops after N commit groups (``--limit``) makes
+          DuckDB produce only a prefix of the sort.
+
+        ``reverse`` flips the commit-time direction within the chosen
+        spine (``git log --reverse`` analog): date order becomes oldest
+        first; term order keeps its A→Z sections but lists each term's
+        history newest first.
+        """
+        direction = {
+            ("term", False): "ASC", ("term", True): "DESC",
+            ("date", False): "DESC", ("date", True): "ASC",
+        }[(order, reverse)]
+        order_by = {
+            "term": f"e.term_id, c.commit_seq {direction}, e.operation, e.predicate, e.value",
+            "date": f"c.commit_seq {direction}, e.term_id, e.operation, e.predicate, e.value",
+        }[order]
+        cur = self.con.execute(
             f"""
             SELECT e.term_id, s.name,
                    c.commit_seq, c.committed_date, c.sha, c.author_name,
                    c.pr_number, c.message,
                    e.operation, e.predicate, e.value,
-                   c.branch_commits, c.snapshot_url
+                   c.branch_commits, c.snapshot_url,
+                   e.body, e.qualifiers, e.comment
             FROM events e
             JOIN commits c USING (commit_seq)
             LEFT JOIN term_snapshots s
               ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
             WHERE {where}
-            ORDER BY e.term_id, c.commit_seq, e.operation, e.predicate, e.value
+            ORDER BY {order_by}
             """,
             params,
-        ).fetchall()
-        return [
-            TermChange(
-                term_id=term_id,
-                name=name,
-                change=Change(
-                    seq, date, sha, author, pr, message, op, pred, val,
-                    branch_commits=_wrap_branch_commits(bc),
-                    snapshot_url=snapshot_url,
-                ),
-            )
-            for term_id, name, seq, date, sha, author, pr, message, op, pred, val, bc, snapshot_url in rows
-        ]
+        )
+        while True:
+            rows = cur.fetchmany(batch_size)
+            if not rows:
+                return
+            for (term_id, name, seq, date, sha, author, pr, message, op, pred,
+                 val, bc, snapshot_url, body, qualifiers, comment) in rows:
+                yield TermChange(
+                    term_id=term_id,
+                    name=name,
+                    change=Change(
+                        seq, date, sha, author, pr, message, op, pred, val,
+                        branch_commits=_wrap_branch_commits(bc),
+                        snapshot_url=snapshot_url,
+                        parsed=_wrap_parsed(body, qualifiers, comment),
+                    ),
+                )
+
+    def _count_events(self, where: str, params: list[object]) -> EventCounts:
+        row = self.con.execute(
+            f"""
+            SELECT count(*), count(DISTINCT e.term_id), count(DISTINCT e.commit_seq)
+            FROM events e
+            WHERE {where}
+            """,
+            params,
+        ).fetchone()
+        return EventCounts(*row)
+
+    def iter_range_events(self, ref_a: str, ref_b: str, **filters) -> Iterator[TermChange]:
+        """Stream events in ``(lo, hi]``, one row per clause change.
+
+        ``lo``/``hi`` are the two refs (any of tag, short sha, HEAD, or
+        commit_seq — via :meth:`resolve_ref`), sorted so order doesn't
+        matter. Filters as in :meth:`_range_where`.
+        """
+        return self._iter_term_changes(*self._range_where(ref_a, ref_b, **filters))
+
+    def range_events(self, ref_a: str, ref_b: str, **filters) -> list[TermChange]:
+        """Materialized :meth:`iter_range_events`."""
+        return list(self.iter_range_events(ref_a, ref_b, **filters))
+
+    def range_counts(self, ref_a: str, ref_b: str, **filters) -> "EventCounts":
+        """Event/term/commit counts for a range — exact (no post-filter)."""
+        return self._count_events(*self._range_where(ref_a, ref_b, **filters))
+
+    def iter_search_events(
+        self, query: str, order: str = "term", reverse: bool = False, **filters
+    ) -> Iterator[TermChange]:
+        """Stream events whose clause ``value`` matches ``query``.
+
+        "Which commits added or removed a clause matching this?" —
+        analogous to ``git log -S<string>`` (default substring mode) or
+        ``git log -G<pattern>`` (``regex=True``) at the file-line level,
+        but on our clause-event granularity. Match semantics and filters
+        as in :meth:`_search_where`; ``order``/``reverse`` as in
+        :meth:`_iter_term_changes`.
+
+        Note these are *candidate* rows: the CLI's clause-aware delta
+        filter (see ``obohog.render.edit_delta_matches``) further drops
+        paired edits whose changed portion doesn't contain the query.
+        """
+        return self._iter_term_changes(
+            *self._search_where(query, **filters), order=order, reverse=reverse
+        )
+
+    def search_events(self, query: str, **filters) -> list[TermChange]:
+        """Materialized :meth:`iter_search_events`."""
+        return list(self.iter_search_events(query, **filters))
+
+    def search_counts(self, query: str, **filters) -> "EventCounts":
+        """Candidate event/term/commit counts for a search.
+
+        Counts SQL-level value matches — an upper bound on what survives
+        the delta filter. Cheap (~fraction of a second on millions of
+        events), so callers can show scope up front and paged consumers
+        can size result sets.
+        """
+        return self._count_events(*self._search_where(query, **filters))
 
     def releases(self) -> list[tuple[str, int, object]]:
         if not self._has_releases():

@@ -238,6 +238,9 @@ def _event_rows(
             "predicate": clause.predicate,
             "value": clause.value,
             "operation": str(operation),
+            "body": clause.parsed.body,
+            "qualifiers": list(clause.parsed.qualifiers),
+            "comment": clause.parsed.comment,
         }
         for clause in clauses
     ]

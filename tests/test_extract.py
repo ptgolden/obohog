@@ -399,3 +399,66 @@ def test_commit_events_namespace_filter(artifact: Path):
     assert head_a is not None and head_b is not None
     assert events_a == events_b
     assert events_empty == []
+
+
+def test_events_carry_recomposable_decomposition(artifact: Path):
+    # Every events row stores body/qualifiers/comment alongside value, and
+    # the decomposition recomposes to value exactly (the invariant that
+    # makes the parsed columns trustworthy without re-parsing).
+    rows = duckdb.connect().execute(
+        f"SELECT value, body, qualifiers, comment "
+        f"FROM read_parquet('{artifact}/events.parquet')"
+    ).fetchall()
+    assert rows
+    for value, body, qualifiers, comment in rows:
+        assert body is not None
+        recomposed = body
+        if qualifiers:
+            recomposed += " {" + ", ".join(qualifiers) + "}"
+        if comment is not None:
+            recomposed += " ! " + comment
+        assert recomposed == value
+
+
+def test_iter_search_events_matches_materialized(artifact: Path):
+    db = HistoryDB(artifact)
+    assert list(db.iter_search_events("illness")) == db.search_events("illness")
+
+
+def test_search_counts_match_candidate_rows(artifact: Path):
+    db = HistoryDB(artifact)
+    hits = db.search_events("illness")
+    counts = db.search_counts("illness")
+    assert counts.events == len(hits)
+    assert counts.terms == len({tc.term_id for tc in hits})
+    assert counts.commits == len({tc.change.commit_seq for tc in hits})
+
+
+def test_range_counts_match_rows(artifact: Path):
+    db = HistoryDB(artifact)
+    hits = db.range_events("v1.0", "HEAD")
+    counts = db.range_counts("v1.0", "HEAD")
+    assert counts.events == len(hits)
+    assert counts.terms == len({tc.term_id for tc in hits})
+    assert counts.commits == len({tc.change.commit_seq for tc in hits})
+
+
+def test_iter_search_events_date_order(artifact: Path):
+    db = HistoryDB(artifact)
+    hits = list(db.iter_search_events("illness", order="date"))
+    seqs = [tc.change.commit_seq for tc in hits]
+    assert seqs == sorted(seqs, reverse=True)
+    # Same rows as term order, differently arranged.
+    assert sorted(map(repr, hits)) == sorted(map(repr, db.search_events("illness")))
+
+
+def test_iter_search_events_reverse_orders(artifact: Path):
+    db = HistoryDB(artifact)
+    date_rev = [tc.change.commit_seq for tc in
+                db.iter_search_events("illness", order="date", reverse=True)]
+    assert date_rev == sorted(date_rev)
+    term_rev = list(db.iter_search_events("illness", order="term", reverse=True))
+    # A->Z term sections, newest-first within each.
+    for _, grp in __import__("itertools").groupby(term_rev, key=lambda tc: tc.term_id):
+        seqs = [tc.change.commit_seq for tc in grp]
+        assert seqs == sorted(seqs, reverse=True)
