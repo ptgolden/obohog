@@ -161,7 +161,10 @@ class PageOut(BaseModel, Generic[S]):
     # Section key of the last section on this page, when more remain:
     # pass back as `after` to resume. None on the final page.
     next_cursor: str | None
-    counts: CountsOut
+    # None only when the caller opted out (`with_counts=False`) — the
+    # counts scan costs as much as the page itself, so consumers that
+    # don't display them (the HTMX load-more fragment) skip it.
+    counts: CountsOut | None
 
 
 class TermHeaderOut(BaseModel):
@@ -617,7 +620,11 @@ def get_state(db: HistoryDB, term_id: str, at: str) -> StateOut | None:
 
 
 def search(
-    db: HistoryDB, style: SourceStyle, params: SearchParams
+    db: HistoryDB,
+    style: SourceStyle,
+    params: SearchParams,
+    *,
+    with_counts: bool = True,
 ) -> PageOut[TermSectionOut] | PageOut[CommitSectionOut]:
     """One page of search results — the CLI ``search`` pipeline, paged.
 
@@ -628,7 +635,9 @@ def search(
     :data:`SECTION_TERM_CAP` terms, the rest reachable only through the
     commit view. ``counts`` are
     the SQL candidates — an upper bound (``approximate=True``) when a
-    query ran the delta filter, exact when browsing without one.
+    query ran the delta filter, exact when browsing without one; pass
+    ``with_counts=False`` to skip them (they cost a scan and never
+    change while paging one query).
 
     ``has`` clauses narrow the *term* axis: only events of terms
     satisfying every clause are eligible; everything else (q, tag,
@@ -648,14 +657,19 @@ def search(
         namespace=params.namespace,
         has=tuple(parse_has_clause(h) for h in params.has),
     )
-    # Surfaces an invalid regex here, before the stream starts.
-    counts = db.search_counts(params.q, filters)
-    counts_out = CountsOut(
-        events=counts.events,
-        terms=counts.terms,
-        commits=counts.commits,
-        approximate=params.q is not None,
-    )
+    # The counts scan costs about as much as the page itself, and they
+    # don't change while paging one query — ``with_counts=False`` lets
+    # continuation fetches skip it. (When run, it also surfaces an
+    # invalid regex before the stream starts.)
+    counts_out = None
+    if with_counts:
+        counts = db.search_counts(params.q, filters)
+        counts_out = CountsOut(
+            events=counts.events,
+            terms=counts.terms,
+            commits=counts.commits,
+            approximate=params.q is not None,
+        )
 
     if params.order == "date" and params.q is None:
         # Browse: plan the page's commit skeleton first (see

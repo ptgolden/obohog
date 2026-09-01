@@ -218,7 +218,8 @@ def search_results(
 ):
     db, style = handle
     t0 = time.perf_counter()
-    page = service.search(db, style, params)
+    # The fragment renders sections only — counts stay on the full page.
+    page = service.search(db, style, params, with_counts=False)
     return templates.TemplateResponse(
         request,
         "partials/search_results.html",

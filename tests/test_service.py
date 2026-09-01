@@ -114,6 +114,16 @@ def test_search_op_budget_bounds_pages(db, monkeypatch):
     ]
 
 
+def test_search_without_counts_skips_the_scan(db):
+    page = service.search(
+        db, STYLE, SearchParams(q="SHARED"), with_counts=False
+    )
+    assert page.counts is None
+    assert [s.term_id for s in page.sections] == [
+        "MONDO:0000001", "MONDO:0000002", "MONDO:0000003", "MONDO:0000004",
+    ]
+
+
 def test_search_bad_date_cursor_raises_invalid_cursor(db):
     with pytest.raises(InvalidCursor, match="not valid"):
         service.search(
