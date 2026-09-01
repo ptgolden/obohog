@@ -47,6 +47,17 @@ a:hover { text-decoration: underline; }
 h1 { font-size: 1.4rem; }
 h1 .name, h3 .name, h4 .name { font-weight: normal; }
 .dim { color: var(--dim); }
+/* In the outline and the screen reader, not on the screen. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 .empty { color: var(--dim); font-style: italic; }
 .error { color: var(--del); }
 

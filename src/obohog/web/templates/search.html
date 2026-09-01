@@ -2,7 +2,8 @@
 {% block title %}{{ src }} — search — obohog{% endblock %}
 {% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
 {% block content %}
-<h1>Search {{ src }}</h1>
+{# nav already says where you are; keep the h1 for the outline only #}
+<h1 class="visually-hidden">Search {{ src }}</h1>
 {# The match select's labels conjugate with the group legend: finite
    verbs after "changes where", participles after "…that ever had". #}
 {% macro match_select(name, current, verbs) -%}
