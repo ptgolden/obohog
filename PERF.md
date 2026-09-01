@@ -114,18 +114,17 @@ sync, not as a one-off. Compaction must respect extract's incremental
 file-naming scheme (`{chunk}-{batch}.parquet` resumption) — study that
 before wiring in.
 
-**Plan-then-fetch generalizes to delta searches** (prototype, on best
-layout): one match-scan returns `(term_id, commit_seq, n)` candidate
-pairs (53 ms) — counts derive from it for free, the page plan is
-Python over the pairs, and a commit-bounded fetch joined against the
-page's pairs (an Arrow-registered relation) pulls only the page's wide
-rows (49 ms; term-order variant 56 ms). Estimated end-to-end: cold
-page ~140 ms (vs 244), and with the pairs memoized per (q, filters) a
-load-more page ~90 ms (vs 197) — no scans at all, just the bounded
-fetch. Stacked with the layout change: the original 0.45 s query lands
-around 0.09–0.14 s. Behavior delta to accept: pages plan by candidate
-commits, so a page can render fewer than `limit` sections after the
-delta filter drops groups (cursor semantics unchanged).
+**Plan-then-fetch generalizes to delta searches** — SHIPPED (1131606,
+after the layout change shipped in d655a71 with `obohog source
+compact` for pre-existing artifacts): one memoized candidate scan
+serves counts, the page plan, and (via a commit-bounded, pair-joined
+fetch) every page of the query. Measured end-to-end on compacted
+mondo: cold first page 165 ms, warm 100 ms, load-more 64 ms (vs
+392/271 ms before this round); walking all 11 pages of the typical
+query costs 2.0 s total. Behavior delta shipped with it: pages plan by
+candidate sections, so the delta filter can leave fewer than `limit`
+on a page (cursor semantics unchanged; the empty-state renders only on
+final pages).
 
 Trap for the implementation: never `executemany` the pairs into a temp
 table — 2.5k inserts cost 600 ms. `con.register()` an Arrow table
