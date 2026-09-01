@@ -18,10 +18,12 @@ from obohog.render import (
     edit_delta_matches,
     Add,
     Edit,
+    PairedCommit,
     Remove,
     _tokenize,
     pair_events,
     render_op,
+    take_sections,
 )
 
 _STANZA_TEMPLATE = "format-version: 1.2\n\n[Term]\nid: TMP:0000001\n{tag}: {value}\n"
@@ -599,3 +601,56 @@ def test_edit_delta_matches_unparseable_falls_through_to_true():
     # historical malformed clauses stay visible in search results.
     weird = 'not a real OBO clause {{{ garbage'
     assert edit_delta_matches(_edit(weird, weird), "anything") is True
+
+
+# ---------------------------------------------------------------------------
+# take_sections: the section limit and the op budget.
+
+
+def _section_group(term_id: str, n_ops: int) -> PairedCommit:
+    # Only .ops (for the budget) and the section key (term_id here) are
+    # consulted; head is never touched.
+    return PairedCommit(term_id, None, None, ops=[object()] * n_ops)
+
+
+def _take(groups, limit, op_budget=None):
+    truncated = [False]
+    taken = list(take_sections(
+        iter(groups), limit, lambda g: g.term_id, truncated,
+        op_budget=op_budget,
+    ))
+    return taken, truncated[0]
+
+
+def test_take_sections_limit_only_unchanged():
+    groups = [_section_group(t, 1) for t in ("A", "A", "B", "C")]
+    taken, truncated = _take(groups, 2)
+    assert [g.term_id for g in taken] == ["A", "A", "B"]
+    assert truncated is True
+
+
+def test_take_sections_untruncated_when_stream_ends_first():
+    groups = [_section_group(t, 5) for t in ("A", "B")]
+    taken, truncated = _take(groups, 10, op_budget=100)
+    assert len(taken) == 2
+    assert truncated is False
+
+
+def test_take_sections_op_budget_stops_new_sections():
+    groups = [_section_group(t, 3) for t in ("A", "B", "C")]
+    # After A (3 ops) the budget of 5 isn't spent; after B (6 ops) it
+    # is, so C never starts.
+    taken, truncated = _take(groups, 100, op_budget=5)
+    assert [g.term_id for g in taken] == ["A", "B"]
+    assert truncated is True
+
+
+def test_take_sections_op_budget_keeps_sections_atomic():
+    # One section far over budget still streams whole: the budget only
+    # refuses to *start* a section, so pages concatenate to the unpaged
+    # stream.
+    groups = [_section_group("A", 10) for _ in range(5)]
+    groups += [_section_group("B", 1)]
+    taken, truncated = _take(groups, 100, op_budget=10)
+    assert [g.term_id for g in taken] == ["A"] * 5
+    assert truncated is True

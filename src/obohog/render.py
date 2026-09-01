@@ -349,6 +349,8 @@ def take_sections(
     limit: int,
     section_key,
     truncated: list[bool],
+    *,
+    op_budget: int | None = None,
 ) -> Iterator[PairedCommit]:
     """Pass groups through until ``limit`` distinct sections have completed.
 
@@ -357,17 +359,26 @@ def take_sections(
     the underlying stream at the section boundary — with a streaming
     source this abandons the query after only a prefix has been fetched.
     Sets ``truncated[0]`` when the limit actually cut something off.
+
+    ``op_budget`` bounds a page by content, not just section count: once
+    that many ops have passed through, no *new* section starts. Sections
+    stay atomic — the one in progress always completes, so a single
+    section larger than the budget still streams whole — which keeps the
+    cursor contract intact: pages still concatenate to exactly the
+    unpaged stream, there are just more of them.
     """
     current = object()
     seen = 0
+    ops_out = 0
     for g in groups:
         key = section_key(g)
         if key != current:
             current = key
             seen += 1
-            if seen > limit:
+            if seen > limit or (op_budget is not None and ops_out >= op_budget):
                 truncated[0] = True
                 return
+        ops_out += len(g.ops)
         yield g
 
 

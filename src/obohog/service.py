@@ -32,6 +32,12 @@ from .views import SourceStyle, pr_title_from_merge
 # Bounded-by-default paging: a page holds at most this many *sections*
 # (a term for term-ordered streams, a commit for date-ordered ones).
 DEFAULT_PAGE = 50
+# Content bound per page: stop opening new sections once this many ops
+# have streamed. A section limit alone misprices sources whose commits
+# are whole-release imports (VBO: 30 commits, 1.16M events — a 50-commit
+# "page" was the entire history); ~10k ops is a fraction of a second of
+# pairing work. Sections stay atomic, so pages still concatenate.
+PAGE_OP_BUDGET = 10_000
 MAX_PAGE = 500
 # Date-ordered search sections render at most this many terms per commit;
 # a monster commit (20k+ terms) would otherwise dominate its whole page.
@@ -416,13 +422,16 @@ def _take_page(
     Wraps :func:`obohog.render.take_sections`, converting its truncation
     out-param into the ``next_cursor`` contract: the section key of the
     last emitted section when the limit actually cut something off.
+    Pages are additionally bounded by :data:`PAGE_OP_BUDGET`.
     """
     section_key = (
         (lambda g: g.term_id) if order == "term"
         else (lambda g: g.head.commit_seq)
     )
     truncated = [False]
-    taken = list(render.take_sections(groups, limit, section_key, truncated))
+    taken = list(render.take_sections(
+        groups, limit, section_key, truncated, op_budget=PAGE_OP_BUDGET,
+    ))
     if truncated[0] and taken:
         return taken, str(section_key(taken[-1]))
     return taken, None

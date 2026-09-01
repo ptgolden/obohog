@@ -88,6 +88,31 @@ def test_search_next_cursor_set_when_truncated(db):
     assert page.next_cursor == page.sections[-1].term_id
 
 
+def test_search_op_budget_bounds_pages(db, monkeypatch):
+    # A tiny budget turns the 500-section limit into one-section pages;
+    # sections stay atomic, so the walk still reproduces the unpaged
+    # stream exactly.
+    unpaged = service.search(db, STYLE, SearchParams(order="date", limit=500))
+    monkeypatch.setattr(service, "PAGE_OP_BUDGET", 1)
+    collected = []
+    after = None
+    pages = 0
+    while True:
+        page = service.search(
+            db, STYLE, SearchParams(order="date", limit=500, after=after)
+        )
+        assert len(page.sections) == 1
+        collected.extend(page.sections)
+        pages += 1
+        if page.next_cursor is None:
+            break
+        after = page.next_cursor
+    assert pages == len(unpaged.sections) == 4
+    assert [s.model_dump() for s in collected] == [
+        s.model_dump() for s in unpaged.sections
+    ]
+
+
 def test_search_bad_date_cursor_raises_invalid_cursor(db):
     with pytest.raises(InvalidCursor, match="not valid"):
         service.search(
