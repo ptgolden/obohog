@@ -400,6 +400,49 @@ def test_render_op_edit_qualifier_value_edited_pairs_as_tilde_subline():
     assert _removed_qualifiers(text) == []
 
 
+def test_render_op_edit_repeated_key_qualifiers_diff_as_set():
+    # A repeated key (source=) is a set: swapping members renders as -/+
+    # lines, never as similarity-paired ~ edits (DOID:9409 → MEDGEN:8349
+    # would read as a value edit that never happened). Real case:
+    # MONDO:0004782's UMLS xref in mondo 3a6ab90.
+    changes = [
+        _change(
+            "remove", "xref",
+            'UMLS:C0011848 {source="DOID:9409", source="MONDO:equivalentTo", '
+            'source="NCIT:C43263"}',
+        ),
+        _change(
+            "add", "xref",
+            'UMLS:C0011848 {source="MEDGEN:8349", source="MONDO:equivalentTo", '
+            'source="MONDO:MEDGEN"}',
+        ),
+    ]
+    text = render_op(pair_events(changes)[0])
+    assert _first_line(text) == "~ xref: UMLS:C0011848"
+    assert _kept_qualifiers(text) == ['source="MONDO:equivalentTo"']
+    assert _removed_qualifiers(text) == [
+        'source="DOID:9409"', 'source="NCIT:C43263"',
+    ]
+    assert _added_qualifiers(text) == [
+        'source="MEDGEN:8349"', 'source="MONDO:MEDGEN"',
+    ]
+    assert _edited_qualifiers(text) == []
+
+
+def test_render_op_edit_key_repeated_on_one_side_still_diffs_as_set():
+    # One value before, two after, none kept: even though exactly one was
+    # removed and one of the adds could pair with it, the key isn't
+    # single-valued on both sides — set semantics win over pairing.
+    changes = [
+        _change("remove", "xref", 'X:1 {source="A:1"}'),
+        _change("add", "xref", 'X:1 {source="B:1", source="C:1"}'),
+    ]
+    text = render_op(pair_events(changes)[0])
+    assert _removed_qualifiers(text) == ['source="A:1"']
+    assert _added_qualifiers(text) == ['source="B:1"', 'source="C:1"']
+    assert _edited_qualifiers(text) == []
+
+
 def test_render_op_edit_body_diff_plus_qualifier_edit():
     # Both body and qualifier value changed: body word-diffs on the top line,
     # qualifier edit indented as a ~ sub-line.

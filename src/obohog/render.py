@@ -488,42 +488,56 @@ def _head(pv: ParsedValue) -> str:
     return f"{pv.body} {{{', '.join(pv.qualifiers)}}}"
 
 
+def _qual_key(q: str) -> str:
+    """The qualifier's key — ``source`` in ``source="DOID:9409"``."""
+    return q.split("=", 1)[0]
+
+
 def _qualifier_block_view(
     tag: str, before: ParsedValue, after: ParsedValue, cap: int | None
 ) -> OpView:
     """Body + comment on the top line, then the qualifier diff as sub-lines.
 
-    The qualifier list diffs as a sequence: kept qualifiers become context
-    lines, inserts ``+``, deletes ``-``. A ``replace`` opcode gets
-    sub-paired by similarity so a qualifier whose value was edited (same
-    ``key`` on both sides, different value) shows as one ``~`` line with an
-    inline word-diff, rather than a ``-`` / ``+`` pair.
+    Qualifiers diff as a multiset, grouped by key. Kept qualifiers become
+    context lines. Within a key, one removed and one added value pair into
+    a single ``~`` line with an inline word-diff — but only when the key is
+    single-valued on both sides, where the change really is "this value was
+    edited". A repeated key (``source=...``) is a set, and its changes
+    render as plain ``-``/``+`` lines: pairing across set members by
+    similarity manufactures value edits that never happened
+    (``DOID:9409 → MEDGEN:8349`` for what was a drop and an unrelated add).
     """
     head = _body_spans(before.body, after.body, cap)
     head.extend(_comment_tail_spans(before.comment, after.comment, cap))
 
+    kept = Counter(before.qualifiers) & Counter(after.qualifiers)
+    removed = Counter(before.qualifiers) - Counter(after.qualifiers)
+    added = Counter(after.qualifiers) - Counter(before.qualifiers)
+    b_keys = Counter(_qual_key(q) for q in before.qualifiers)
+    a_keys = Counter(_qual_key(q) for q in after.qualifiers)
+
+    def take(key: str, source: tuple[str, ...], pool: Counter) -> list[str]:
+        """This key's share of ``pool``, in ``source`` order (multiset-aware)."""
+        out = []
+        for q in source:
+            if _qual_key(q) == key and pool[q] > 0:
+                pool[q] -= 1
+                out.append(q)
+        return out
+
     quals: list[QualLine] = []
-    matcher = SequenceMatcher(None, before.qualifiers, after.qualifiers, autojunk=False)
-    for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
-        if opcode == "equal":
-            for q in before.qualifiers[i1:i2]:
-                quals.append(QualLine("context", [Span("same", _truncate(q, cap))]))
-        elif opcode == "delete":
-            for q in before.qualifiers[i1:i2]:
-                quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
-        elif opcode == "insert":
-            for q in after.qualifiers[j1:j2]:
-                quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
-        elif opcode == "replace":
-            removes = list(before.qualifiers[i1:i2])
-            adds = list(after.qualifiers[j1:j2])
-            pairs, unpaired_r, unpaired_a = _pair_strings(removes, adds)
-            for r, a in pairs:
-                quals.append(QualLine("edit", _word_diff_spans(r, a, cap)))
-            for q in unpaired_r:
-                quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
-            for q in unpaired_a:
-                quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
+    for key in dict.fromkeys(map(_qual_key, (*before.qualifiers, *after.qualifiers))):
+        for q in take(key, after.qualifiers, kept):
+            quals.append(QualLine("context", [Span("same", _truncate(q, cap))]))
+        dels = take(key, before.qualifiers, removed)
+        ins = take(key, after.qualifiers, added)
+        if dels and ins and b_keys[key] == 1 and a_keys[key] == 1:
+            quals.append(QualLine("edit", _word_diff_spans(dels[0], ins[0], cap)))
+            continue
+        for q in dels:
+            quals.append(QualLine("del", [Span("same", _truncate(q, cap))]))
+        for q in ins:
+            quals.append(QualLine("ins", [Span("same", _truncate(q, cap))]))
     return OpView("edit", tag, head, quals)
 
 
@@ -550,40 +564,6 @@ def _comment_tail_spans(
     if after:
         spans.append(Span("ins", _truncate(after, cap)))
     return spans
-
-
-def _pair_strings(
-    removes: list[str], adds: list[str], threshold: float = 0.4
-) -> tuple[list[tuple[str, str]], list[str], list[str]]:
-    """Greedy similarity pairing of removed/added strings.
-
-    Used for qualifier sub-pairing inside a ``replace`` opcode: a qualifier
-    whose value changed (e.g. ``source="X"`` → ``source="Y"``) usually pairs
-    with its highest-similarity counterpart, letting us render it as one
-    ``~`` line instead of separate ``-`` / ``+`` lines. Threshold is lower
-    than the top-level pair threshold because we've already narrowed to a
-    single ``replace`` region and want to catch smaller-similarity same-key
-    edits.
-    """
-    scored: list[tuple[float, int, int]] = []
-    for i, r in enumerate(removes):
-        for j, a in enumerate(adds):
-            ratio = SequenceMatcher(None, r, a, autojunk=False).ratio()
-            if ratio >= threshold:
-                scored.append((ratio, i, j))
-    scored.sort(reverse=True)
-    used_r: set[int] = set()
-    used_a: set[int] = set()
-    pairs: list[tuple[str, str]] = []
-    for _, i, j in scored:
-        if i in used_r or j in used_a:
-            continue
-        used_r.add(i)
-        used_a.add(j)
-        pairs.append((removes[i], adds[j]))
-    unpaired_r = [q for i, q in enumerate(removes) if i not in used_r]
-    unpaired_a = [q for j, q in enumerate(adds) if j not in used_a]
-    return pairs, unpaired_r, unpaired_a
 
 
 def _word_diff_spans(before: str, after: str, cap: int | None) -> list[Span]:
