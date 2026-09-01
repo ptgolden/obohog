@@ -47,6 +47,17 @@ a:hover { text-decoration: underline; }
 h1 { font-size: 1.4rem; }
 h1 .name, h3 .name, h4 .name { font-weight: normal; }
 .dim { color: var(--dim); }
+/* In the outline and the screen reader, not on the screen. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 .empty { color: var(--dim); font-style: italic; }
 .error { color: var(--del); }
 
@@ -70,9 +81,40 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .status-stale { color: var(--edit); }
 .status-not-built { color: var(--dim); }
 
-/* Search form */
-form.search { margin: 0.75rem 0 1.5rem; }
-form.search .query, form.search .filters {
+/* Search form: two side-by-side axes (event filter | term selector),
+   then a shared filter row. */
+form.search {
+  margin: 0.75rem 0 1.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+form.search .axes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+form.search .axis {
+  flex: 1;
+  min-width: 20rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+form.search .axis legend {
+  padding: 0 0.35rem;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+/* Each axis reads as a sentence: [field] [verb] [text]. */
+form.search .clause {
+  display: flex;
+  gap: 0.4rem;
+  align-items: stretch;
+}
+form.search .clause select { padding: 0.3rem; }
+form.search .knobs, form.search .filters, form.search .case-row {
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
@@ -80,12 +122,14 @@ form.search .query, form.search .filters {
   color: var(--dim);
   font-size: 0.85rem;
 }
-form.search .filters { margin-top: 0.5rem; }
-form.search .query label { white-space: nowrap; }
+form.search .knobs { margin-top: 0.5rem; }
+form.search .filters { margin-top: 0.75rem; }
+form.search .case-row { margin-top: 0.6rem; }
+form.search .knobs label, form.search .filters label { white-space: nowrap; }
 form.search input[type="search"] {
   flex: 1;
-  max-width: 34rem;
-  min-width: 14rem;
+  min-width: 8rem;
+  box-sizing: border-box;
   padding: 0.45rem 0.6rem;
   font-size: 1rem;
   border: 1px solid var(--line);
@@ -100,15 +144,35 @@ form.search input:not([type="search"]), form.search select {
   background: var(--bg);
   color: var(--fg);
 }
+/* Filled accent; color: var(--bg) flips with the scheme, keeping the
+   label dark-on-light-blue in dark mode and white-on-blue in light. */
 form.search button {
-  padding: 0.25rem 0.9rem;
+  padding: 0.4rem 1.3rem;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+form.search button:hover { filter: brightness(1.1); }
+form.search .actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+/* Same shape as the submit, none of its weight. */
+form.search .reset {
+  padding: 0.4rem 1.3rem;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--bg);
-  color: var(--fg);
-  cursor: pointer;
+  color: var(--dim);
+  font-size: 0.9rem;
 }
-form.search button:hover { border-color: var(--accent); color: var(--accent); }
+form.search .reset:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Reconstructed term stanza (state page + inline expand) */
 .state-link { font-size: 0.85rem; }

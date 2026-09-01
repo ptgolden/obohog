@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from obohog.query import HistoryDB, RangeFilters, SearchFilters
+from obohog.query import (
+    ClauseSyntaxError,
+    HasClause,
+    HistoryDB,
+    RangeFilters,
+    SearchFilters,
+    parse_has_clause,
+)
 
 
 @pytest.fixture(scope="module")
@@ -166,3 +173,174 @@ def test_search_since_until_seq_window(db):
         )
     )
     assert {tc.change.commit_seq for tc in rows} == {1, 2}
+
+
+# ---------------------------------------------------------------------------
+# Term-set predicates: ``has`` clause parsing and membership.
+# Lifecycle fixture membership cheat sheet (see conftest):
+#   ~diabetes   ever {T1, T3, T4, EX}   now {T1, T4, EX}
+#   xref~DOID   ever {T2, T3, T4}       now {T2, T3}
+
+T1, T2, T3, T4 = (f"MONDO:000000{i}" for i in (1, 2, 3, 4))
+EX = "EX:0000001"
+
+
+@pytest.fixture(scope="module")
+def ldb(lifecycle_artifact: Path):
+    db = HistoryDB(lifecycle_artifact)
+    yield db
+    db.close()
+
+
+def _filters(*raw_clauses, **fkw) -> SearchFilters:
+    return SearchFilters(
+        has=tuple(parse_has_clause(r) for r in raw_clauses), **fkw
+    )
+
+
+def _members(db, *raw_clauses, **fkw) -> set[str]:
+    f = _filters(*raw_clauses, **fkw)
+    return {tc.term_id for tc in db.iter_search_events(None, f)}
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("name~diabetes", HasClause("ever", "name", "substring", "diabetes")),
+    ("~diabetes", HasClause("ever", None, "substring", "diabetes")),
+    ("=diabetes mellitus", HasClause("ever", None, "exact", "diabetes mellitus")),
+    ("now:xref=XXX:1234567", HasClause("now", "xref", "exact", "XXX:1234567")),
+    ("ever:~/dia.*/", HasClause("ever", None, "regex", "dia.*")),
+    ("synonym~a=b", HasClause("ever", "synonym", "substring", "a=b")),
+    ("def=x~y", HasClause("ever", "def", "exact", "x~y")),
+    ("~/", HasClause("ever", None, "substring", "/")),
+    ("synonym~", HasClause("ever", "synonym", "substring", "")),
+    ("now:name~x", HasClause("now", "name", "substring", "x")),
+])
+def test_parse_has_clause_forms(raw, expected):
+    assert parse_has_clause(raw) == expected
+
+
+@pytest.mark.parametrize("raw, hint", [
+    ("~//", "empty regex"),
+    ("=", "needs a value"),
+    ("diabetes", "needs '~'"),
+    ("during:name~x", "reserved"),
+    ("foo:name~x", "unknown quantifier"),
+    ("", "empty clause"),
+])
+def test_parse_has_clause_errors(raw, hint):
+    with pytest.raises(ClauseSyntaxError, match=hint):
+        parse_has_clause(raw)
+
+
+def test_ever_vs_now_membership(ldb):
+    # T3's matching synonym was removed and never re-added: ever only.
+    # T1's was removed then re-added: present now.
+    assert _members(ldb, "~diabetes") == {T1, T3, T4, EX}
+    assert _members(ldb, "now:~diabetes") == {T1, T4, EX}
+
+
+def test_dates_clip_events_not_membership(ldb):
+    # Membership is timeless: ever {T1, T3, T4, EX}. The date window only
+    # clips which of their events show — at c3 that's T1's synonym
+    # re-add, T4's xref removal, and EX's creation; T3 sat c3 out.
+    rows = list(
+        ldb.iter_search_events(None, _filters("~diabetes", since_seq=3))
+    )
+    assert all(tc.change.commit_seq == 3 for tc in rows)
+    assert {tc.term_id for tc in rows} == {T1, T4, EX}
+    # T4's c3 event is its xref removal — no 'diabetes' in it: eligible
+    # terms' events show whether or not they match any clause.
+    assert {tc.change.tag for tc in rows if tc.term_id == T4} == {"xref"}
+
+
+def test_now_means_head_even_with_dates(ldb):
+    # 'now' is a fact about HEAD: membership stays {T1, T4, EX} under an
+    # until bound; the bound clips display (only T1 has events <= c1).
+    rows = list(
+        ldb.iter_search_events(None, _filters("now:~diabetes", until_seq=1))
+    )
+    assert {tc.term_id for tc in rows} == {T1}
+    assert all(tc.change.commit_seq <= 1 for tc in rows)
+
+
+def test_clauses_intersect(ldb):
+    assert _members(ldb, "~diabetes", "xref~DOID") == {T3, T4}
+    assert _members(ldb, "~diabetes", "now:xref~DOID") == {T3}
+
+
+def test_membership_narrowings(ldb):
+    assert _members(ldb, "~diabetes", namespace="MONDO") == {T1, T3, T4}
+    assert _members(ldb, "~diabetes", term_id=T3) == {T3}
+
+
+def test_exact_regex_and_ignore_case_clauses(ldb):
+    # Exact matches the body: only EX's name is exactly "diabetes".
+    assert _members(ldb, "name=diabetes") == {EX}
+    assert _members(ldb, "~/dia.*mell.*/") == {T1}
+    assert _members(ldb, "~DIABETES") == set()
+    assert _members(ldb, "~DIABETES", ignore_case=True) == {T1, T3, T4, EX}
+
+
+def test_full_timelines_stream_nonmatching_events(ldb):
+    rows = list(ldb.iter_search_events(None, _filters("~diabetes")))
+    # T3 qualifies via its synonym; its xref events ride along anyway.
+    assert any(tc.term_id == T3 and tc.change.tag == "xref" for tc in rows)
+    # T1's name never matched the clause but its add event is present.
+    assert any(tc.term_id == T1 and tc.change.tag == "name" for tc in rows)
+
+
+def test_query_composes_with_has(ldb):
+    # "changes to xrefs containing DOID among terms that have ever had
+    # 'diabetes'": T2's DOID:9 is excluded (not a member); EX has no
+    # xrefs; T3's add and T4's add + remove show.
+    f = _filters("~diabetes", tag="xref")
+    rows = list(ldb.iter_search_events("DOID", f))
+    assert {tc.term_id for tc in rows} == {T3, T4}
+    assert all(tc.change.tag == "xref" for tc in rows)
+    assert {
+        (tc.term_id, tc.change.operation) for tc in rows
+    } == {(T3, "add"), (T4, "add"), (T4, "remove")}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_has_after_resumes_and_concatenates(ldb, reverse):
+    f = _filters("~diabetes")
+    full = list(ldb.iter_search_events(None, f, reverse=reverse))
+    keys = _section_keys(full, "term")
+    assert len(keys) >= 3
+    for i, key in enumerate(keys):
+        later = set(keys[i + 1 :])
+        rest = list(
+            ldb.iter_search_events(None, f, reverse=reverse, after=key)
+        )
+        assert rest == [tc for tc in full if tc.term_id in later]
+
+
+def test_has_counts_are_exact(ldb):
+    f = _filters("~diabetes")
+    counts = ldb.search_counts(None, f)
+    rows = list(ldb.iter_search_events(None, f))
+    assert counts.terms == 4
+    assert counts.events == len(rows)
+    assert counts.commits == len({tc.change.commit_seq for tc in rows})
+
+
+# ---------------------------------------------------------------------------
+# Whole-group streaming: a text match pulls in its (term, commit) group.
+
+
+def test_search_streams_whole_groups_for_matching_commits(requalified_artifact):
+    db = HistoryDB(requalified_artifact)
+    try:
+        rows = list(db.iter_search_events("NCIT"))
+        # "NCIT" textually matches two events (c0's xref add, c1's xref
+        # remove) — but both groups arrive whole: c0's name+xref adds,
+        # c1's remove plus both adds (the requalified partner and the
+        # unrelated MEDGEN xref). The op filter, not the SQL, decides
+        # what shows.
+        assert len(rows) == 5
+        last_seq = max(tc.change.commit_seq for tc in rows)
+        c1 = [tc.change for tc in rows if tc.change.commit_seq == last_seq]
+        assert sorted(c.operation for c in c1) == ["add", "add", "remove"]
+    finally:
+        db.close()

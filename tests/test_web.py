@@ -476,3 +476,148 @@ def test_search_form_has_date_inputs(client):
     html = client.get("/onto/search").text
     assert 'type="date" name="since"' in html
     assert 'type="date" name="until"' in html
+
+
+# ---------------------------------------------------------------------------
+# Term-histories mode (has clauses / scope=terms), over the lifecycle
+# fixture: ~diabetes ever {T1, T3, T4, EX}, now {T1, T4, EX};
+# xref~DOID ever {T2, T3, T4}.
+
+
+@pytest.fixture(scope="module")
+def lclient(
+    lifecycle_artifact: Path, tmp_path_factory: pytest.TempPathFactory
+):
+    base = tmp_path_factory.mktemp("web-life")
+    cfg = Config(
+        path=base / "obohog.toml",
+        storage=base,
+        sources={"life": _source("life", base, lifecycle_artifact)},
+    )
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        yield client
+
+
+def test_api_has_clauses_intersect_with_full_histories(lclient):
+    body = lclient.get(
+        "/api/v1/sources/life/search",
+        params=[("has", "~diabetes"), ("has", "xref~DOID")],
+    ).json()
+    assert [s["term_id"] for s in body["sections"]] == [
+        "MONDO:0000003", "MONDO:0000004",
+    ]
+    assert body["counts"]["terms"] == 2
+    assert body["counts"]["approximate"] is False
+    # Full history: T3 qualified via its synonym; xref events render too.
+    t3_tags = {
+        op["tag"]
+        for g in body["sections"][0]["commits"]
+        for op in g["ops"]
+    }
+    assert "xref" in t3_tags
+
+
+def test_api_has_error_mapping(lclient):
+    bad_clause = lclient.get(
+        "/api/v1/sources/life/search", params={"has": "="}
+    )
+    assert bad_clause.status_code == 400
+    assert "needs a value" in bad_clause.json()["detail"]
+
+
+def test_api_has_composes_with_event_filter(lclient):
+    body = lclient.get(
+        "/api/v1/sources/life/search",
+        params={"q": "DOID", "tag": "xref", "has": "~diabetes",
+                "order": "term"},
+    ).json()
+    assert [s["term_id"] for s in body["sections"]] == [
+        "MONDO:0000003", "MONDO:0000004",
+    ]
+    by_date = lclient.get(
+        "/api/v1/sources/life/search",
+        params={"has": "~diabetes", "order": "date"},
+    )
+    assert by_date.status_code == 200
+
+
+def test_term_axis_form_translates_to_clause(lclient):
+    r = lclient.get(
+        "/life/search", params={"tq": "diabetes", "order": "term"}
+    )
+    assert r.status_code == 200
+    assert "(full histories)" in r.text
+    # ever-membership: all four, T2 absent.
+    for tid in ("EX:0000001", "MONDO:0000001", "MONDO:0000003",
+                "MONDO:0000004"):
+        assert tid in r.text
+    assert "MONDO:0000002" not in r.text
+    # The form re-renders from the raw dialect: the term-axis text
+    # survives translation into the has clause.
+    assert 'name="tq" value="diabetes"' in r.text
+
+
+def test_term_axis_quantifier_now(lclient):
+    r = lclient.get(
+        "/life/search",
+        params={"tq": "diabetes", "quantifier": "now", "order": "term"},
+    )
+    assert '<option value="now" selected>' in r.text
+    assert "MONDO:0000003" not in r.text  # removed, never re-added
+    assert "MONDO:0000001" in r.text  # removed then re-added
+
+
+def test_both_axes_compose_in_the_form(lclient):
+    # "changes to xrefs containing DOID among terms that ever had
+    # 'diabetes'" — the canonical two-axis query, straight from the form.
+    r = lclient.get(
+        "/life/search",
+        params={"q": "DOID", "tag": "xref", "tq": "diabetes",
+                "order": "term"},
+    )
+    assert "MONDO:0000003" in r.text
+    assert "MONDO:0000004" in r.text
+    assert "MONDO:0000002" not in r.text  # has DOID:9 but never diabetes
+    assert "(full histories)" not in r.text  # q set: ordinary counts line
+
+
+def test_term_axis_compound_url_ands(lclient):
+    r = lclient.get(
+        "/life/search",
+        params=[
+            ("tq", "diabetes"), ("has", "xref~DOID"), ("order", "term"),
+        ],
+    )
+    assert "MONDO:0000003" in r.text
+    assert "MONDO:0000004" in r.text
+    assert "EX:0000001" not in r.text  # no xref: intersected away
+
+
+def test_term_axis_load_more_repeats_has_params(lclient):
+    r = lclient.get(
+        "/life/search",
+        params=[
+            ("tq", "diabetes"), ("has", "xref~DOID"), ("order", "term"),
+            ("limit", "1"),
+        ],
+    )
+    assert 'hx-trigger="revealed"' in r.text
+    # doseq: both clauses survive into the fragment URL.
+    assert r.text.count("has=") >= 2
+    # And the fragment route accepts them and resumes past the cursor.
+    frag = lclient.get(
+        "/life/search/results",
+        params=[
+            ("has", "~diabetes"), ("has", "xref~DOID"),
+            ("limit", "1"), ("after", "MONDO:0000003"),
+        ],
+    )
+    assert frag.status_code == 200
+    assert "MONDO:0000004" in frag.text
+
+
+def test_has_error_page_is_html_400(lclient):
+    r = lclient.get("/life/search", params={"has": "="})
+    assert r.status_code == 400
+    assert "needs a value" in r.text

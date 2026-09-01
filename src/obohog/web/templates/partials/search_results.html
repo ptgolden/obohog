@@ -6,7 +6,7 @@
     {{ m.commit_section(s, src) }}
   {%- endif -%}
 {%- else -%}
-{%- if not params.after %}<p class="empty">No matching events.</p>{% endif -%}
+{%- if not params.after %}<p class="empty">No matching {{ 'terms' if params.has and not params.q else 'events' }}.</p>{% endif -%}
 {%- endfor -%}
 {%- if page.next_cursor %}
 <div class="load-more"

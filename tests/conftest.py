@@ -125,6 +125,125 @@ def paged_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return out
 
 
+@pytest.fixture(scope="session")
+def lifecycle_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A built artifact whose clause values come and go across commits.
+
+    Exercises term-set ("has ever / now") membership: a matching value
+    removed and never re-added (ever but not now), one removed then
+    re-added (both), xrefs with their own lifecycle for intersection
+    tests, and a non-MONDO term for namespace narrowing.
+
+    * c0  T1 alpha + synonym "diabetes mellitus"; T2 beta + xref DOID:9
+    * c1  T1 synonym removed; T3 gamma created with synonym
+          "old diabetes label" + xref DOID:1
+    * c2  T3 synonym removed; T4 delta created with synonym "diabetes"
+          + xref DOID:2
+    * c3  T1 synonym re-added; T4 xref removed; EX:0000001 "diabetes"
+          created
+
+    Membership for ``~diabetes``: ever {T1, T3, T4, EX}, now {T1, T4,
+    EX}; for ``xref~DOID``: ever {T2, T3, T4}, now {T2, T3}.
+    """
+    from obohog.extract import extract
+    from obohog.gitsource import GitSource
+
+    base = tmp_path_factory.mktemp("lifecycle")
+    repo = base / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    t1_syn = 'synonym: "diabetes mellitus" EXACT []'
+    t1 = _term("MONDO:0000001", "name: alpha", t1_syn)
+    t1_bare = _term("MONDO:0000001", "name: alpha")
+    t2 = _term("MONDO:0000002", "name: beta", "xref: DOID:9")
+    t3 = _term(
+        "MONDO:0000003",
+        "name: gamma",
+        'synonym: "old diabetes label" EXACT []',
+        "xref: DOID:1",
+    )
+    t3_bare = _term("MONDO:0000003", "name: gamma", "xref: DOID:1")
+    t4 = _term(
+        "MONDO:0000004",
+        "name: delta",
+        'synonym: "diabetes" EXACT []',
+        "xref: DOID:2",
+    )
+    t4_bare = _term(
+        "MONDO:0000004", "name: delta", 'synonym: "diabetes" EXACT []'
+    )
+    ex = _term("EX:0000001", "name: diabetes")
+
+    def commit(terms: list[str], msg: str, date: str) -> None:
+        _write(repo, "onto.obo", HEADER + "\n".join(terms))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", msg, date=date)
+
+    commit([t1, t2], "c0 seed", "2022-01-01T00:00:00+00:00")
+    commit([t1_bare, t2, t3], "c1 strip T1, add T3", "2022-01-02T00:00:00+00:00")
+    commit(
+        [t1_bare, t2, t3_bare, t4],
+        "c2 strip T3, add T4",
+        "2022-01-03T00:00:00+00:00",
+    )
+    commit(
+        [t1, t2, t3_bare, t4_bare, ex],
+        "c3 restore T1, strip T4 xref, add EX",
+        "2022-01-04T00:00:00+00:00",
+    )
+
+    out = base / "artifact"
+    with GitSource(repo) as src:
+        extract(src, "onto.obo", out)
+    return out
+
+
+@pytest.fixture(scope="session")
+def requalified_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A built artifact where one commit requalifies an xref.
+
+    c1 rewrites T1's UMLS xref qualifier set — ``NCIT:4`` and ``DOID:9``
+    out, ``MEDGEN:8`` and ``MONDO:M`` in, ``KEEP:1`` kept — and adds an
+    unrelated ``xref: MEDGEN:8`` clause in the same commit. A search for
+    ``NCIT`` matches only the *removed* side, so this is the shape that
+    demands whole-group streaming: without the add partner the edit
+    renders as a fake whole-clause deletion. (Modeled on MONDO:0004782's
+    UMLS:C0011848 xref in mondo commit 3a6ab90.)
+    """
+    from obohog.extract import extract
+    from obohog.gitsource import GitSource
+
+    base = tmp_path_factory.mktemp("requalified")
+    repo = base / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    def commit(terms: list[str], msg: str, date: str) -> None:
+        _write(repo, "onto.obo", HEADER + "\n".join(terms))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", msg, date=date)
+
+    before = _term(
+        "MONDO:0000001",
+        "name: alpha",
+        'xref: UMLS:1 {source="DOID:9", source="KEEP:1", source="NCIT:4"}',
+    )
+    after = _term(
+        "MONDO:0000001",
+        "name: alpha",
+        'xref: MEDGEN:8',
+        'xref: UMLS:1 {source="KEEP:1", source="MEDGEN:8", source="MONDO:M"}',
+    )
+    commit([before], "c0 seed", "2023-01-01T00:00:00+00:00")
+    commit([after], "c1 requalify", "2023-01-02T00:00:00+00:00")
+
+    out = base / "artifact"
+    with GitSource(repo) as src:
+        extract(src, "onto.obo", out)
+    return out
+
+
 @pytest.fixture
 def bad_then_removed_repo(tmp_path: Path) -> Path:
     """A repo where an unparseable term appears, then is removed the next commit.

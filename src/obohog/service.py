@@ -20,7 +20,13 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import model, render
 from .config import AnySource, Config
-from .query import Change, HistoryDB, RangeFilters, SearchFilters
+from .query import (
+    Change,
+    HistoryDB,
+    RangeFilters,
+    SearchFilters,
+    parse_has_clause,
+)
 from .views import SourceStyle, pr_title_from_merge
 
 # Bounded-by-default paging: a page holds at most this many *sections*
@@ -241,6 +247,11 @@ class SearchParams(BaseModel):
     limit: int = Field(default=DEFAULT_PAGE, ge=1, le=MAX_PAGE)
     after: str | None = None
     full: bool = False
+    # Term-set predicates, each a ``[quantifier:]tag OP value`` clause;
+    # repeats AND-compose. Narrows the term axis: only events of terms
+    # satisfying every clause are eligible. Composes with everything
+    # else — q/tag/dates keep picking which of those events show.
+    has: list[str] = Field(default_factory=list)
 
     @field_validator(
         "q", "term", "tag", "namespace", "since", "until", "after", mode="before"
@@ -250,6 +261,18 @@ class SearchParams(BaseModel):
         """HTML forms submit untouched fields as empty strings; an empty
         filter means "no filter", not "match the empty string"."""
         return None if value == "" else value
+
+    @field_validator("has", mode="before")
+    @classmethod
+    def _has_blanks_dropped(cls, value):
+        """The list analog of ``_blank_is_absent``: blank clauses (an
+        untouched form field, a stray ``has=``) are absent, and a bare
+        string is a one-clause list."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        return [v for v in value if v.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +546,12 @@ def search(
     clause-aware delta filter on edits → section cutoff. ``counts`` are
     the SQL candidates — an upper bound (``approximate=True``) when a
     query ran the delta filter, exact when browsing without one.
+
+    ``has`` clauses narrow the *term* axis: only events of terms
+    satisfying every clause are eligible; everything else (q, tag,
+    dates, order) keeps picking which of those events show. With ``has``
+    and no ``q``, the eligible terms' histories stream whole — the
+    "term histories" browse.
     """
     filters = SearchFilters(
         term_id=params.term,
@@ -534,6 +563,7 @@ def search(
         match=params.match,
         ignore_case=params.ignore_case,
         namespace=params.namespace,
+        has=tuple(parse_has_clause(h) for h in params.has),
     )
     # Surfaces an invalid regex here, before the stream starts.
     counts = db.search_counts(params.q, filters)

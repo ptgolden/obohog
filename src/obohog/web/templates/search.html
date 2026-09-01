@@ -2,35 +2,70 @@
 {% block title %}{{ src }} — search — obohog{% endblock %}
 {% block nav %}<a href="/{{ src }}/search">{{ src }}</a>{% endblock %}
 {% block content %}
-<h1>Search {{ src }}</h1>
+{# nav already says where you are; keep the h1 for the outline only #}
+<h1 class="visually-hidden">Search {{ src }}</h1>
+{# The match select's labels conjugate with the group legend: finite
+   verbs after "changes where", participles after "…that ever had". #}
+{% macro match_select(name, current, verbs) -%}
+<select name="{{ name }}">
+  <option value="substring" {% if current == 'substring' %}selected{% endif %}>{{ verbs[0] }}</option>
+  <option value="exact" {% if current == 'exact' %}selected{% endif %}>{{ verbs[1] }}</option>
+  <option value="regex" {% if current == 'regex' %}selected{% endif %}>{{ verbs[2] }}</option>
+</select>
+{%- endmacro %}
+{% macro tag_select(name, picked) -%}
+<select name="{{ name }}">
+  <option value="">any field</option>
+  {% for p in facets.tags %}
+  <option value="{{ p }}"{% if picked == p %} selected{% endif %}>{{ p }}</option>
+  {% endfor %}
+  {% if picked and picked not in facets.tags %}
+  <option value="{{ picked }}" selected>{{ picked }}</option>
+  {% endif %}
+</select>
+{%- endmacro %}
 <form class="search" method="get" action="/{{ src }}/search">
-  <div class="query">
-    <input type="search" name="q" value="{{ params.q or '' if params else '' }}"
-           placeholder="search clause values" autofocus>
-    <label>match
-      <select name="match">
-        <option value="substring" {% if not params or params.match == 'substring' %}selected{% endif %}>substring</option>
-        <option value="exact" {% if params and params.match == 'exact' %}selected{% endif %}>exact</option>
-        <option value="regex" {% if params and params.match == 'regex' %}selected{% endif %}>regex</option>
-      </select>
-    </label>
+  {# Two independent axes: the event filter picks which changes show;
+     the term selector picks whose changes are eligible. Both blank in a
+     group means "no constraint on this axis". #}
+  <div class="axes">
+    <fieldset class="axis">
+      <legend>changes where</legend>
+      <div class="clause">
+        {{ tag_select('tag', form.tag if form else none) }}
+        {{ match_select('match', form.match if form else 'substring',
+                        ['contains', 'is exactly', 'matches regex']) }}
+        <input type="search" name="q" value="{{ form.q or '' if form else '' }}"
+               autofocus>
+      </div>
+    </fieldset>
+    <fieldset class="axis">
+      <legend>among terms that
+        <select name="quantifier">
+          <option value="ever" {% if not form or form.quantifier == 'ever' %}selected{% endif %}>ever had</option>
+          <option value="now" {% if form and form.quantifier == 'now' %}selected{% endif %}>currently have</option>
+        </select>
+      </legend>
+      <div class="clause">
+        {{ tag_select('ttag', form.ttag if form else none) }}
+        {{ match_select('tmatch', form.tmatch if form else 'substring',
+                        ['containing', 'exactly', 'matching regex']) }}
+        <input type="search" name="tq" value="{{ form.tq or '' if form else '' }}">
+      </div>
+      <div class="knobs">
+        <label>term <input name="term" size="14"
+          value="{{ form.term or '' if form else '' }}"></label>
+      </div>
+    </fieldset>
+  </div>
+  {# One flag, both axes: it lowercases both sides of every text match
+     above (all three modes), so it sits under the pair, not per-group. #}
+  <div class="case-row">
     <label><input type="checkbox" name="ignore_case" value="true"
-      {% if params and params.ignore_case %}checked{% endif %}> ignore case</label>
+      {% if form and form.ignore_case %}checked{% endif %}> ignore case in text matches</label>
   </div>
   <div class="filters">
-    {% set picked_tag = params.tag if params else none %}
-    <label>tag
-      <select name="tag">
-        <option value="">any</option>
-        {% for p in facets.tags %}
-        <option value="{{ p }}"{% if picked_tag == p %} selected{% endif %}>{{ p }}</option>
-        {% endfor %}
-        {% if picked_tag and picked_tag not in facets.tags %}
-        <option value="{{ picked_tag }}" selected>{{ picked_tag }}</option>
-        {% endif %}
-      </select>
-    </label>
-    {% set picked_namespace = params.namespace if params else none %}
+    {% set picked_namespace = form.namespace if form else none %}
     <label>namespace
       <select name="namespace">
         <option value="">any</option>
@@ -42,30 +77,40 @@
         {% endif %}
       </select>
     </label>
-    <label>term <input name="term" size="14"
-      value="{{ params.term or '' if params else '' }}"></label>
     <label>from <input type="date" name="since"
-      value="{{ params.since or '' if params else '' }}"></label>
+      value="{{ form.since or '' if form else '' }}"></label>
     <label>to <input type="date" name="until"
-      value="{{ params.until or '' if params else '' }}"></label>
+      value="{{ form.until or '' if form else '' }}"></label>
     <label>order
       <select name="order">
-        <option value="term" {% if params and params.order == 'term' %}selected{% endif %}>by term</option>
-        <option value="newest" {% if not params or (params.order == 'date' and not params.reverse) %}selected{% endif %}>newest first</option>
-        <option value="oldest" {% if params and params.order == 'date' and params.reverse %}selected{% endif %}>oldest first</option>
+        {# raw API-dialect links (order=date&reverse=…) map back onto the
+           form's combined newest/oldest values #}
+        <option value="term" {% if form and form.order == 'term' %}selected{% endif %}>by term</option>
+        <option value="newest" {% if not form or form.order == 'newest' or (form.order == 'date' and not form.reverse) %}selected{% endif %}>newest first</option>
+        <option value="oldest" {% if form and (form.order == 'oldest' or (form.order == 'date' and form.reverse)) %}selected{% endif %}>oldest first</option>
       </select>
     </label>
+  </div>
+  <div class="actions">
     <button type="submit">search</button>
+    {# the bare URL renders the quiet form — that IS the reset #}
+    <a class="reset" href="/{{ src }}/search">reset</a>
   </div>
 </form>
 
 {% if page %}
+{% if params.has and not params.q and params.order == 'term' %}
+<p class="dim">{{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} (full histories) —
+  {{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
+  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
+{% else %}
 {# counts are the SQL scan's upper bound (paired edits whose delta doesn't
    involve the query render nothing) — shown as a plain scale summary,
    deliberately unqualified #}
 <p class="dim">{{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
   {{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} and
   {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}</p>
+{% endif %}
 <div id="results">
   {% include 'partials/search_results.html' %}
 </div>

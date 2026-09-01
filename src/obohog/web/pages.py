@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import field_validator
 
 from .. import service
 from .api import Handle
@@ -103,11 +104,28 @@ def state_page(
 
 def _fragment_query_string(params: service.SearchParams) -> str:
     """The current search restated as a query string, minus the cursor —
-    the load-more sentinel appends its own ``after``."""
+    the load-more sentinel appends its own ``after``. ``doseq`` so the
+    repeatable ``has`` param survives as ``has=…&has=…``."""
     fields = params.model_dump(exclude_defaults=True, exclude={"after"})
+    enc = lambda v: str(v).lower() if isinstance(v, bool) else v  # noqa: E731
     return urlencode(
-        {k: (str(v).lower() if isinstance(v, bool) else v) for k, v in fields.items()}
+        {
+            k: [enc(x) for x in v] if isinstance(v, list) else enc(v)
+            for k, v in fields.items()
+        },
+        doseq=True,
     )
+
+
+def _form_clause(quantifier: str, tag: str | None, match: str, q: str | None) -> str:
+    """The form's single predicate, spelled as a ``has`` clause."""
+    prefix = "now:" if quantifier == "now" else ""
+    value = q or ""
+    if match == "exact":
+        return f"{prefix}{tag or ''}={value}"
+    if match == "regex":
+        return f"{prefix}{tag or ''}~/{value}/"
+    return f"{prefix}{tag or ''}~{value}"
 
 
 class _FormParams(service.SearchParams):
@@ -119,12 +137,32 @@ class _FormParams(service.SearchParams):
     by default, ``reverse`` makes it oldest-first). The form defaults to
     newest-first — the git-log shape — where the API defaults to term
     order.
+
+    The form's two text axes: the inherited q/match/tag describe the
+    *event filter* (which changes show), while ``tq``/``tmatch``/
+    ``ttag`` + ``quantifier`` describe the *term selector* (whose
+    changes are eligible), translated into a leading ``has`` clause.
+    Hand-written ``has=`` params AND-compose after it.
     """
 
     order: Literal["term", "date", "newest", "oldest"] = "newest"
+    quantifier: Literal["ever", "now"] = "ever"
+    tq: str | None = None
+    tmatch: Literal["substring", "exact", "regex"] = "substring"
+    ttag: str | None = None
+
+    @field_validator("tq", "ttag", mode="before")
+    @classmethod
+    def _blank_is_absent_here_too(cls, value):
+        return None if value == "" else value
 
     def to_search_params(self) -> service.SearchParams:
-        data = self.model_dump()
+        data = self.model_dump(exclude={"quantifier", "tq", "tmatch", "ttag"})
+        if self.tq is not None or self.ttag is not None:
+            data["has"] = [
+                _form_clause(self.quantifier, self.ttag, self.tmatch, self.tq),
+                *data["has"],
+            ]
         if data["order"] == "newest":
             data["order"], data["reverse"] = "date", False
         elif data["order"] == "oldest":
@@ -143,6 +181,7 @@ def search_page(
     context: dict = {
         "src": src,
         "params": None,
+        "form": None,
         "page": None,
         "facets": request.app.state.registry.facets(src),
         "commit_noun": _commit_noun(style),
@@ -151,6 +190,9 @@ def search_page(
     # blank — run the search (a blank form browses everything, paged).
     if params is not None and request.url.query:
         sp = params.to_search_params()
+        # The form re-renders from the raw dialect (`form`): translation
+        # nulls q/tag in terms scope, so `sp` can't refill the inputs.
+        context["form"] = params
         context["params"] = sp
         context["page"] = service.search(db, style, sp)
         context["qs"] = _fragment_query_string(sp)

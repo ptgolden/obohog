@@ -8,7 +8,7 @@ can point at local paths or HTTP URLs, so a hosted artifact needs no server.
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import Iterator, NamedTuple, Sequence
 
 import duckdb
 
@@ -17,6 +17,88 @@ from .obo import ParsedValue
 
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+_QUANTIFIERS = ("ever", "now")  # "during" (as-of) is reserved, unimplemented
+
+
+class ClauseSyntaxError(ValueError):
+    """Raised when a ``has`` clause doesn't parse."""
+
+
+@dataclass(frozen=True)
+class HasClause:
+    """One parsed term-set predicate: ``[quantifier:]tag OP value``.
+
+    ``quantifier`` is ``"ever"`` (the term has at some point carried a
+    matching clause) or ``"now"`` (a matching clause is present at HEAD
+    — or as of the ``until`` bound, when one is given). ``tag=None``
+    means any tag; ``value=""`` (substring mode only) means any value.
+    """
+
+    quantifier: str  # "ever" | "now"
+    tag: str | None
+    match: str  # "substring" | "exact" | "regex"
+    value: str
+
+
+def parse_has_clause(raw: str) -> HasClause:
+    """Parse ``[quantifier:]tag OP value`` into a :class:`HasClause`.
+
+    The clause splits at its *first* ``~`` (contains) or ``=`` (exact
+    body match), so values may freely contain ``~``, ``=``, ``:``, and
+    ``/`` — OBO tags contain none of these. A ``~`` value wrapped in
+    slashes (``~/pat/``) is a regex over the full value; a substring
+    that itself starts and ends with ``/`` therefore needs ``=`` or a
+    regex spelling. Examples::
+
+        name~diabetes          ever: name contains "diabetes"
+        ~diabetes              ever: any tag contains "diabetes"
+        now:xref=XXX:1234567   present now: exact xref body
+        synonym~               ever had any synonym clause
+        ever:~/dia.*/          any tag matches the regex
+
+    Regex *validity* is not checked here — a bad pattern surfaces as
+    DuckDB's parse error on the first query that runs it.
+    """
+    clause = raw.strip()
+    if not clause:
+        raise ClauseSyntaxError("empty clause")
+    positions = [i for i in (clause.find("~"), clause.find("=")) if i != -1]
+    if not positions:
+        # No square brackets in the message: the CLI prints it through
+        # Rich, which would eat them as markup.
+        raise ClauseSyntaxError(
+            f"clause {clause!r} needs '~' (contains) or '=' (exact),"
+            " e.g. name~diabetes"
+        )
+    at = min(positions)
+    head, op, value = clause[:at].strip(), clause[at], clause[at + 1:]
+    if ":" in head:
+        quantifier, _, tag = head.partition(":")
+        quantifier, tag = quantifier.strip(), tag.strip()
+        if quantifier == "during":
+            raise ClauseSyntaxError(
+                "'during:' is reserved for as-of filtering; not supported yet"
+            )
+        if quantifier not in _QUANTIFIERS:
+            raise ClauseSyntaxError(
+                f"unknown quantifier {quantifier!r} (expected 'ever:' or 'now:')"
+            )
+    else:
+        quantifier, tag = "ever", head
+    if op == "=":
+        if not value:
+            raise ClauseSyntaxError(f"exact clause {clause!r} needs a value")
+        match = "exact"
+    elif len(value) >= 2 and value.startswith("/") and value.endswith("/"):
+        match, value = "regex", value[1:-1]
+        if not value:
+            raise ClauseSyntaxError(f"empty regex in clause {clause!r}")
+    else:
+        match = "substring"
+    return HasClause(
+        quantifier=quantifier, tag=tag or None, match=match, value=value
+    )
 
 
 class EventCounts(NamedTuple):
@@ -72,6 +154,11 @@ class SearchFilters:
     match: str = "substring"  # "substring" | "exact" | "regex"
     ignore_case: bool = False
     namespace: str | None = None
+    # Term-set predicates: restrict to terms satisfying every clause
+    # (see :func:`parse_has_clause`). A term-axis narrowing — it picks
+    # *whose* events are eligible; the other fields (and the query) pick
+    # which of those events show.
+    has: tuple[HasClause, ...] = ()
 
 
 def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
@@ -497,6 +584,14 @@ class HistoryDB:
         dates via :meth:`resolve_bound` in the caller), ``namespace``
         restricts to
         term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
+
+        ``has`` clauses narrow along the *term* axis: only events of
+        terms satisfying every clause (see :meth:`_has_subquery`) are
+        eligible. They compose freely with everything above — the
+        canonical shape is "changes to xrefs containing NCIT (query +
+        tag) among terms whose names have ever contained diabetes
+        (has)". With no query at all, the eligible terms' histories
+        stream whole (clipped only by the date window, if any).
         """
         if query is None:
             where = "TRUE"
@@ -531,7 +626,48 @@ class HistoryDB:
         if f.namespace is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
             params.append(f.namespace)
+        if f.has:
+            sub, sub_params = HistoryDB._has_subquery(f.has, f.ignore_case)
+            where += f" AND e.term_id IN {sub}"
+            params.extend(sub_params)
         return where, params
+
+    @staticmethod
+    def _has_subquery(
+        clauses: Sequence[HasClause], ignore_case: bool
+    ) -> tuple[str, list[object]]:
+        """A ``SELECT term_id`` subquery for terms satisfying every clause.
+
+        Per clause the WHERE comes from :meth:`_search_where` (a
+        clause-only :class:`SearchFilters`, so no recursion); clauses
+        combine by INTERSECT, so a term must satisfy all of them (AND).
+        Membership is deliberately timeless — no date bounds in here;
+        the outer WHERE's ``since_seq``/``until_seq`` clip which of the
+        eligible terms' events *show*, never who qualifies.
+
+        ``ever`` clauses match any event in history. ``now`` clauses
+        keep a term when some matching ``(term, tag, value)`` group's
+        last operation is an add — the clause is present at HEAD. The
+        arg_max can't tie because extraction diffs snapshots and so
+        never emits an add and a remove of the identical
+        ``(term, predicate, value)`` in one commit.
+        """
+        parts: list[str] = []
+        params: list[object] = []
+        for clause in clauses:
+            per = SearchFilters(
+                tag=clause.tag, match=clause.match, ignore_case=ignore_case
+            )
+            where, p = HistoryDB._search_where(clause.value or None, per)
+            select = f"SELECT e.term_id FROM events e WHERE {where}"
+            if clause.quantifier == "now":
+                select += (
+                    " GROUP BY e.term_id, e.predicate, e.value"
+                    " HAVING arg_max(e.operation, e.commit_seq) = 'add'"
+                )
+            parts.append(select)
+            params.extend(p)
+        return "(" + "\nINTERSECT\n".join(parts) + ")", params
 
     def _iter_term_changes(
         self,
@@ -671,13 +807,28 @@ class HistoryDB:
         as in :meth:`_search_where`; ``order``/``reverse``/``after`` as
         in :meth:`_iter_term_changes`.
 
-        Note these are *candidate* rows: the CLI's clause-aware delta
-        filter (see ``obohog.render.edit_delta_matches``) further drops
-        paired edits whose changed portion doesn't contain the query.
+        The stream carries **whole (term, commit) groups**: the text match
+        picks candidate groups via a semi-join, then every event of those
+        groups (under the same non-text narrowings) flows through. Pairing
+        needs both sides of an edit even when only one side's text matches
+        — a query hitting only the removed value must render as a ``~`` of
+        that clause, not as a fake whole-clause deletion.
+
+        These are *candidate* rows: the clause-aware op filter
+        (``obohog.render.filter_ops_by_delta_match``) re-matches the query
+        per op — the paired-partner and same-group events pulled in by the
+        semi-join don't show unless their own delta involves the query.
         """
+        where, params = self._search_where(query, filters)
+        if query is not None:
+            outer, outer_params = self._search_where(None, filters)
+            where = (
+                f"{outer} AND (e.term_id, e.commit_seq) IN "
+                f"(SELECT e.term_id, e.commit_seq FROM events e WHERE {where})"
+            )
+            params = [*outer_params, *params]
         return self._iter_term_changes(
-            *self._search_where(query, filters),
-            order=order, reverse=reverse, after=after,
+            where, params, order=order, reverse=reverse, after=after,
         )
 
     def search_events(

@@ -18,11 +18,13 @@ from .extract import BuildMode, build_parallel
 from .gitsource import GitSource
 from .query import (
     ArtifactNotFound,
+    ClauseSyntaxError,
     HistoryDB,
     RangeFilters,
     RefNotFound,
     SchemaMismatch,
     SearchFilters,
+    parse_has_clause,
 )
 from .views import (
     SourceStyle,
@@ -86,12 +88,14 @@ def _query_errors():
     """Turn expected bad-input failures into clean CLI errors.
 
     Covers a ref that resolves to nothing (``--at``, ``--since``, diff
-    refs) and a ``--regex`` pattern DuckDB rejects — user input, not
-    bugs, so no traceback.
+    refs), a ``--regex`` pattern DuckDB rejects, and a malformed
+    ``--has`` clause — user input, not bugs, so no traceback.
     """
     try:
         yield
-    except (RefNotFound, duckdb.InvalidInputException) as err:
+    except (
+        RefNotFound, duckdb.InvalidInputException, ClauseSyntaxError
+    ) as err:
         console.print(f"[red]{err}[/]")
         raise typer.Exit(1)
 
@@ -444,6 +448,17 @@ def search(
     ignore_case: bool = typer.Option(
         False, "--ignore-case", "-i", help="Case-insensitive match."
     ),
+    has: Optional[list[str]] = typer.Option(
+        None, "--has",
+        help="Term-axis predicate [quantifier:]tag OP value — ~ contains, "
+             "= exact, ~/re/ regex; quantifier ever (default, anywhere in "
+             "history) or now (present at HEAD). Repeat to AND. Restricts "
+             "results to terms satisfying every clause; QUERY and the "
+             "other filters pick which of those terms' events show — "
+             "without QUERY, their whole histories. (A substring that "
+             "itself starts and ends with '/' parses as a regex — use = "
+             "or escape it.)",
+    ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
     commits: bool = typer.Option(
         False, "--commits",
@@ -479,27 +494,39 @@ def search(
                 db.resolve_bound(until, end=True) if until is not None else None
             ),
             match=match, ignore_case=ignore_case, namespace=namespace,
+            has=tuple(parse_has_clause(h) for h in (has or ())),
         )
-        # An invalid --regex pattern surfaces here, on the first query
-        # that reaches regexp_matches; the later stream reuses the same
-        # pattern, so success here means the stream won't hit it.
+        # An invalid --regex pattern (in QUERY or a clause) surfaces here,
+        # on the first query that reaches regexp_matches; the later stream
+        # reuses the same pattern, so success here means the stream won't
+        # hit it.
         counts = db.search_counts(query, filters)
     if counts.events == 0:
-        if query is None:
-            console.print("[yellow]No events match those filters[/]")
-        else:
+        if query is not None:
             console.print(f'[yellow]No events matching[/] "{query}"')
+        elif has:
+            console.print("[yellow]No events from terms matching those clauses[/]")
+        else:
+            console.print("[yellow]No events match those filters[/]")
         db.close()
         return
-    # Provisional scope, printed before results start streaming. These are
-    # SQL-level candidate counts — an upper bound on what survives the
-    # clause-aware delta filter; the exact totals land in the footer.
-    scope = Text("Scanning ", style="dim")
-    scope.append_text(counts_phrase(
-        counts.events, counts.terms, counts.commits,
-        noun="candidate events", tail=" …",
-    ))
-    console.print(scope)
+    if query is None:
+        # No delta filter will run, so these counts are exact.
+        console.print(counts_phrase(
+            counts.events, counts.terms, counts.commits,
+            tail=" — full histories of matching terms" if has else "",
+        ))
+    else:
+        # Provisional scope, printed before results start streaming. These
+        # are SQL-level candidate counts — an upper bound on what survives
+        # the clause-aware delta filter; the exact totals land in the
+        # footer.
+        scope = Text("Scanning ", style="dim")
+        scope.append_text(counts_phrase(
+            counts.events, counts.terms, counts.commits,
+            noun="candidate events", tail=" …",
+        ))
+        console.print(scope)
     groups = render.pair_by_term_and_commit(
         db.iter_search_events(query, filters, order=order.value, reverse=reverse),
         order=order.value,

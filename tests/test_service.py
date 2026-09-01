@@ -241,3 +241,142 @@ def test_date_order_sections_cap_terms(wide_db, monkeypatch):
         "MONDO:0000001", "MONDO:0000002",
     ]
     assert section.more_terms == 1
+
+
+# ---------------------------------------------------------------------------
+# Term-histories mode (has clauses). Lifecycle fixture membership:
+#   ~diabetes   ever {T1, T3, T4, EX}   now {T1, T4, EX}
+#   xref~DOID   ever {T2, T3, T4}       now {T2, T3}
+
+
+@pytest.fixture(scope="module")
+def ldb(lifecycle_artifact: Path):
+    db = HistoryDB(lifecycle_artifact)
+    yield db
+    db.close()
+
+
+def test_has_pages_full_term_histories(ldb):
+    page = service.search(ldb, STYLE, SearchParams(has=["~diabetes"]))
+    assert [s.term_id for s in page.sections] == [
+        "EX:0000001", "MONDO:0000001", "MONDO:0000003", "MONDO:0000004",
+    ]
+    assert page.counts.terms == 4
+    assert page.counts.approximate is False
+    # Full history: T3 qualified via its synonym, but its xref events
+    # render too.
+    t3 = next(s for s in page.sections if s.term_id == "MONDO:0000003")
+    assert "xref" in {op.tag for g in t3.commits for op in g.ops}
+
+
+def test_has_clauses_intersect_and_now_differs(ldb):
+    both = service.search(
+        ldb, STYLE, SearchParams(has=["~diabetes", "xref~DOID"])
+    )
+    assert [s.term_id for s in both.sections] == [
+        "MONDO:0000003", "MONDO:0000004",
+    ]
+    now = service.search(ldb, STYLE, SearchParams(has=["now:~diabetes"]))
+    assert [s.term_id for s in now.sections] == [
+        "EX:0000001", "MONDO:0000001", "MONDO:0000004",
+    ]
+
+
+def test_has_pages_concatenate_to_unpaged(ldb):
+    unpaged = service.search(
+        ldb, STYLE, SearchParams(has=["~diabetes"], limit=500)
+    )
+    collected = []
+    after = None
+    pages = 0
+    while True:
+        page = service.search(
+            ldb, STYLE, SearchParams(has=["~diabetes"], limit=1, after=after)
+        )
+        collected.extend(page.sections)
+        pages += 1
+        if page.next_cursor is None:
+            break
+        after = page.next_cursor
+    assert pages == len(unpaged.sections) == 4
+    assert [s.model_dump() for s in collected] == [
+        s.model_dump() for s in unpaged.sections
+    ]
+
+
+def test_has_dates_clip_events_not_membership(ldb):
+    # Membership is timeless, but the window clips what shows: at c0
+    # only T1 has events, so only its section (only its c0 events)
+    # renders.
+    page = service.search(
+        ldb, STYLE, SearchParams(has=["~diabetes"], until="2022-01-01")
+    )
+    (section,) = page.sections
+    assert section.term_id == "MONDO:0000001"
+    assert [g.commit.commit_seq for g in section.commits] == [0]
+
+
+def test_has_composes_with_event_filter(ldb):
+    # "changes to xrefs containing DOID among terms that ever had
+    # 'diabetes'" — q and tag pick the events, has picks whose events.
+    page = service.search(
+        ldb, STYLE,
+        SearchParams(q="DOID", tag="xref", has=["~diabetes"], order="term"),
+    )
+    assert [s.term_id for s in page.sections] == [
+        "MONDO:0000003", "MONDO:0000004",
+    ]
+    assert page.counts.approximate is True  # q ran the delta filter
+    # Date order composes too, now that has is just a narrowing.
+    by_date = service.search(
+        ldb, STYLE, SearchParams(has=["~diabetes"], order="date")
+    )
+    seqs = [s.commit.commit_seq for s in by_date.sections]
+    assert seqs == sorted(seqs, reverse=True)
+
+
+def test_has_clause_syntax_error_propagates(ldb):
+    from obohog.query import ClauseSyntaxError
+
+    with pytest.raises(ClauseSyntaxError):
+        service.search(ldb, STYLE, SearchParams(has=["nonsense"]))
+
+
+def test_has_blank_clauses_are_absent():
+    assert SearchParams(has=["", "  ", "~x"]).has == ["~x"]
+    assert SearchParams(has=[""]).has == []  # falls back to event search
+    assert SearchParams(has="~x").has == ["~x"]  # bare string, one clause
+
+
+# ---------------------------------------------------------------------------
+# One-sided text matches still pair: the query hits only the removed side.
+
+
+def test_search_one_sided_match_renders_as_edit(requalified_artifact):
+    # c1 requalifies T1's UMLS xref (NCIT:4 out, MEDGEN:8 in) and adds an
+    # unrelated MEDGEN xref. "NCIT" matches only the removed value, but
+    # the result must be the ~ edit of that clause — not a fake deletion —
+    # and the unrelated add must not ride along.
+    db = HistoryDB(requalified_artifact)
+    try:
+        page = service.search(db, STYLE, SearchParams(q="NCIT"))
+        (section,) = page.sections
+        assert section.term_id == "MONDO:0000001"
+        first, second = section.commits  # chronological within the term
+        # c0: the term's creation — only the NCIT-bearing xref add shows.
+        (op0,) = first.ops
+        assert (op0.kind, op0.tag) == ("add", "xref")
+        assert "NCIT:4" in op0.after
+        # c1: one edit op; the requalification, with both raw sides.
+        (op1,) = second.ops
+        assert (op1.kind, op1.tag) == ("edit", "xref")
+        assert "NCIT:4" in op1.before
+        assert "MONDO:M" in op1.after
+        # The qualifier block diffs as a set: kept context, -/+ lines.
+        kinds = [q.kind for q in op1.quals]
+        assert kinds.count("del") == 2
+        assert kinds.count("ins") == 2
+        assert kinds.count("context") == 1
+        assert "edit" not in kinds
+    finally:
+        db.close()
