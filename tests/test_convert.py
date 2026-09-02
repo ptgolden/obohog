@@ -109,9 +109,14 @@ def test_cache_miss_with_broken_robot_raises(tmp_path: Path):
 
 
 def test_conversion_failure_captures_robots_error_line(tmp_path: Path):
-    # A failing conversion keeps ROBOT's first stderr line as `reason`, so
-    # skipped rows can say *why* a version was unconvertible.
-    fake_robot = ("/bin/sh", "-c", "echo 'FAKE PARSE ERROR: bad axiom' >&2; false")
+    # A failing conversion keeps ROBOT's first *meaningful* stderr line as
+    # `reason` — the JVM's "Picked up JAVA_TOOL_OPTIONS" notice (always
+    # present, since conversions cap the JVM to one core) doesn't count.
+    fake_robot = (
+        "/bin/sh", "-c",
+        "echo 'Picked up JAVA_TOOL_OPTIONS: -XX:ActiveProcessorCount=1' >&2; "
+        "echo 'FAKE PARSE ERROR: bad axiom' >&2; false",
+    )
     converter = RobotConverter(tmp_path / "converted", fake_robot, "test")
     with pytest.raises(ConversionError) as excinfo:
         converter.convert("def456", lambda: OFN_DOC)

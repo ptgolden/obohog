@@ -66,6 +66,23 @@ class Converter(Protocol):
     def convert(self, oid: str, read: Callable[[], bytes]) -> bytes: ...
 
 
+def _java_env() -> dict[str, str]:
+    """Subprocess env capping the JVM to one core.
+
+    Build parallelism lives in the process pool — workers already convert
+    concurrently — so ROBOT's default multi-threaded GC/parsing just stomps
+    on sibling workers. Measured on 8 concurrent CL conversions (16-core
+    M-series): capped is 2.2x faster wall clock on 2.3x less CPU, and a
+    lone conversion pays ~0.05 s. A user-set JAVA_TOOL_OPTIONS still wins:
+    it's appended after ours, and later JVM flags override earlier ones.
+    """
+    env = dict(os.environ)
+    ours = "-XX:ActiveProcessorCount=1"
+    existing = env.get("JAVA_TOOL_OPTIONS")
+    env["JAVA_TOOL_OPTIONS"] = f"{ours} {existing}" if existing else ours
+    return env
+
+
 class IdentityConverter:
     """The no-op converter for ``format = "obo"`` sources."""
 
@@ -134,11 +151,16 @@ class RobotConverter:
                     "--format", "obo",
                     "--output", str(out_path),
                 ],
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=_java_env(),
             )
             if result.returncode != 0 or not out_path.exists():
+                # Skip the JVM's "Picked up JAVA_TOOL_OPTIONS: ..." notice —
+                # always present given _java_env, never the failure's cause.
                 reason = next(
-                    (ln.strip() for ln in result.stderr.splitlines() if ln.strip()),
+                    (
+                        ln.strip() for ln in result.stderr.splitlines()
+                        if ln.strip() and not ln.startswith("Picked up ")
+                    ),
                     None,
                 )
                 raise ConversionError(
@@ -223,7 +245,9 @@ def find_robot(settings: ObohogSettings | None = None) -> tuple[tuple[str, ...],
             "Sources with format = \"owl\" need ROBOT (http://robot.obolibrary.org): "
             "install `robot` on PATH, or set ROBOT_JAR=/path/to/robot.jar in .env."
         )
-    result = subprocess.run([*command, "--version"], capture_output=True, text=True)
+    result = subprocess.run(
+        [*command, "--version"], capture_output=True, text=True, env=_java_env()
+    )
     if result.returncode != 0:
         raise ConversionError(
             f"`{' '.join(command)} --version` failed (exit {result.returncode})\n"
