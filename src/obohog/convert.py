@@ -45,7 +45,12 @@ from .settings import ObohogSettings, get_settings
 
 class ConversionError(RuntimeError):
     """Raised when ROBOT is unavailable or a conversion fails. Preserves
-    captured stderr in the message so failures aren't silent."""
+    captured stderr in the message so failures aren't silent; ``reason``
+    carries ROBOT's first error line, short enough for a ``skipped`` row."""
+
+    def __init__(self, message: str, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 
 class Converter(Protocol):
@@ -132,10 +137,15 @@ class RobotConverter:
                 capture_output=True, text=True,
             )
             if result.returncode != 0 or not out_path.exists():
+                reason = next(
+                    (ln.strip() for ln in result.stderr.splitlines() if ln.strip()),
+                    None,
+                )
                 raise ConversionError(
                     f"ROBOT conversion of blob {oid} failed "
                     f"(exit {result.returncode})\n"
-                    f"stderr: {result.stderr.strip()[-2000:]}"
+                    f"stderr: {result.stderr.strip()[-2000:]}",
+                    reason=reason[:160] if reason else None,
                 )
             data = out_path.read_bytes()
             os.replace(out_path, cached)

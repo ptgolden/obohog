@@ -74,6 +74,12 @@ class BuildReport:
     skipped: int = 0
 
 
+def _conversion_skip_label(err: ConversionError) -> str:
+    """The ``skipped.error`` value for an unconvertible version: the
+    category plus ROBOT's own first error line when one was captured."""
+    return f"ConversionFailed: {err.reason}" if err.reason else "ConversionFailed"
+
+
 def _extract_pr_number(message: str) -> int | None:
     if m := _PR_MERGE.match(message):
         return int(m.group(1))
@@ -136,13 +142,13 @@ def build(
             blob = converter.convert(
                 version.blob_oid, lambda: read_blob(version.blob_oid)
             )
-        except ConversionError:
+        except ConversionError as err:
             # An unconvertible version can't advance the state; its changes
             # fold into the next convertible commit, like a parse-failing
             # commit does.
             skipped.append(
                 {"commit_seq": version.commit.seq, "sha": version.commit.sha,
-                 "term_id": None, "error": "ConversionFailed"}
+                 "term_id": None, "error": _conversion_skip_label(err)}
             )
             continue
         delta = state.apply(blob)
@@ -915,12 +921,12 @@ def _build_chunk(
                  "term_id": None, "error": "BlobMissing"}
             )
             continue
-        except ConversionError:
+        except ConversionError as err:
             # An unconvertible version likewise can't advance the state; its
             # changes fold into the next convertible commit.
             skipped.append(
                 {"commit_seq": version.commit.seq, "sha": version.commit.sha,
-                 "term_id": None, "error": "ConversionFailed"}
+                 "term_id": None, "error": _conversion_skip_label(err)}
             )
             continue
         snaps, events, skips = _delta_rows(version, state.apply(blob))

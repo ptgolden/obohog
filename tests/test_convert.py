@@ -108,6 +108,16 @@ def test_cache_miss_with_broken_robot_raises(tmp_path: Path):
         converter.convert("def456", lambda: OFN_DOC)
 
 
+def test_conversion_failure_captures_robots_error_line(tmp_path: Path):
+    # A failing conversion keeps ROBOT's first stderr line as `reason`, so
+    # skipped rows can say *why* a version was unconvertible.
+    fake_robot = ("/bin/sh", "-c", "echo 'FAKE PARSE ERROR: bad axiom' >&2; false")
+    converter = RobotConverter(tmp_path / "converted", fake_robot, "test")
+    with pytest.raises(ConversionError) as excinfo:
+        converter.convert("def456", lambda: OFN_DOC)
+    assert excinfo.value.reason == "FAKE PARSE ERROR: bad axiom"
+
+
 def test_converter_change_clears_cache(tmp_path: Path):
     cache = tmp_path / "converted"
     old = _broken_converter(cache, version="1.0")

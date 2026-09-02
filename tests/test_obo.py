@@ -3,6 +3,7 @@
 from obohog.obo import (
     DocumentState,
     clause_delta,
+    describe_parse_failure,
     hash_clauses,
     parse_stanzas,
     parse_terms,
@@ -73,7 +74,19 @@ def test_parse_stanzas_isolates_bad_stanza():
     context, stanzas = split_document(_doc(good, bad))
     parsed, failed = parse_stanzas(context, stanzas)
     assert set(parsed) == {"MONDO:0000001"}
-    assert failed == ["MONDO:0000002"]
+    # The failure records *why* fastobo refused the stanza, not just that it
+    # did — here the grammar production it expected in place of WRONGSCOPE.
+    ((term_id, kind),) = failed
+    assert term_id == "MONDO:0000002"
+    assert kind.startswith("SyntaxError: expected")
+
+
+def test_describe_parse_failure_strips_batch_location():
+    # The "(<stdin>, line N)" suffix points into an assembled batch blob and
+    # varies with batching, so the recorded kind must not include it.
+    err = SyntaxError("expected QuotedString (<stdin>, line 41)")
+    assert describe_parse_failure(err) == "SyntaxError: expected QuotedString"
+    assert describe_parse_failure(RuntimeError("")) == "RuntimeError"
 
 
 def test_clause_delta_reports_addition():

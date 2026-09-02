@@ -220,17 +220,39 @@ def parse_stanzas(
     context: bytes,
     stanzas: dict[str, bytes],
     namespace_map: Mapping[str, str] | None = None,
-) -> tuple[dict[str, TermState], list[str]]:
+) -> tuple[dict[str, TermState], list[tuple[str, str]]]:
     """Parse the given term stanzas (with ``context``), isolating any failures.
 
-    Returns ``(parsed, failed_ids)``. A batch that fails to parse — fastobo may
-    raise *or panic* on a malformed historical clause — is bisected until the
-    offending stanza is isolated, so one bad term never sinks the whole batch.
+    Returns ``(parsed, failed)`` where ``failed`` pairs each failing term id
+    with why fastobo refused its stanza (see :func:`describe_parse_failure`).
+    A batch that fails to parse — fastobo may raise *or panic* on a malformed
+    historical clause — is bisected until the offending stanza is isolated,
+    so one bad term never sinks the whole batch.
     """
     parsed: dict[str, TermState] = {}
-    failed: list[str] = []
+    failed: list[tuple[str, str]] = []
     _parse_batch(context, stanzas, list(stanzas), parsed, failed, namespace_map)
     return parsed, failed
+
+
+# fastobo error locations point into the assembled batch blob ("(<stdin>,
+# line 41)"), which varies with batching and context size — meaningless to a
+# reader and unstable across builds, so it's stripped from the recorded kind.
+_PARSE_LOCATION_RE = re.compile(r"\s*\(<stdin>, line \d+\)\s*$")
+
+
+def describe_parse_failure(err: BaseException) -> str:
+    """A short, stable label for why a stanza failed to parse.
+
+    Grammar failures keep fastobo's expected-production message
+    (``"SyntaxError: expected QuotedString"``), cardinality violations keep
+    their exception name (``DuplicateClausesError``), and Rust panics land
+    as ``PanicException`` — so the ``skipped`` table's ``error`` column
+    groups by failure cause, not just "ParseError".
+    """
+    message = _PARSE_LOCATION_RE.sub("", str(err).split("\n", 1)[0]).strip()
+    name = type(err).__name__
+    return f"{name}: {message}"[:200] if message else name
 
 
 def _parse_batch(
@@ -238,7 +260,7 @@ def _parse_batch(
     stanzas: dict[str, bytes],
     ids: list[str],
     parsed: dict[str, TermState],
-    failed: list[str],
+    failed: list[tuple[str, str]],
     namespace_map: Mapping[str, str] | None = None,
 ) -> None:
     if not ids:
@@ -249,9 +271,9 @@ def _parse_batch(
         frames = [f for f in doc if isinstance(f, fastobo.term.TermFrame)]
     except (KeyboardInterrupt, SystemExit):
         raise
-    except BaseException:  # fastobo can panic, not just raise
+    except BaseException as err:  # fastobo can panic, not just raise
         if len(ids) == 1:
-            failed.append(ids[0])
+            failed.append((ids[0], describe_parse_failure(err)))
             return
         mid = len(ids) // 2
         _parse_batch(context, stanzas, ids[:mid], parsed, failed, namespace_map)
@@ -281,7 +303,8 @@ class CommitDelta:
     brand-new terms, whose delta is ∅ → full clause set. ``removed`` holds
     the last known state of terms that disappeared. ``failed`` records
     stanzas that couldn't be handled at this version, as ``(term_id, kind)``
-    with kind ``"ParseError"`` or ``"IdMismatch"``.
+    where kind is either a parse-failure label (see
+    :func:`describe_parse_failure`) or ``"IdMismatch"``.
     """
 
     changed: list[TermDelta]
@@ -339,14 +362,14 @@ class DocumentState:
         cur_hash = {mid: stanza_hash(s) for mid, s in stanzas.items()}
         changed_ids = [mid for mid in stanzas if cur_hash[mid] != self._raw.get(mid)]
         removed_ids = self._raw.keys() - stanzas.keys()
-        parsed, failed_ids = parse_stanzas(
+        parsed, failed = parse_stanzas(
             context, {mid: stanzas[mid] for mid in changed_ids},
             self._namespace_map,
         )
-        failed = [(term_id, "ParseError") for term_id in failed_ids]
-        for term_id in failed_ids:
+        failed = list(failed)
+        for term_id, _kind in failed:
             self._raw[term_id] = cur_hash[term_id]
-        failed_set = set(failed_ids)
+        failed_set = {term_id for term_id, _kind in failed}
 
         changed: list[TermDelta] = []
         for term_id in changed_ids:
