@@ -85,6 +85,54 @@ def obo_repo(tmp_path: Path) -> Path:
     return repo
 
 
+OFN_HEADER = (
+    "Prefix(:=<http://example.org/onto#>)\n"
+    "Prefix(rdfs:=<http://www.w3.org/2000/01/rdf-schema#>)\n"
+    "Prefix(obo:=<http://purl.obolibrary.org/obo/>)\n"
+    "Ontology(<http://example.org/onto.owl>\n"
+    "Import(<http://example.org/imports/missing.owl>)\n"
+)
+
+
+def _ofn(*axioms: str) -> str:
+    return OFN_HEADER + "\n".join(axioms) + "\n)\n"
+
+
+@pytest.fixture
+def ofn_repo(tmp_path: Path) -> Path:
+    """A git repo whose tracked file is OWL functional syntax (``onto.owl``),
+    evolving over three commits. Carries an unresolvable ``Import(...)``
+    like real ODK edit files, so conversion must strip it.
+
+    * c0  TST:0000001 "test term"
+    * c1  + TST:0000002 "second term", subclass of TST:0000001
+    * c2  TST:0000001 renamed to "renamed term"
+    """
+    repo = tmp_path / "ofn-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    label1 = 'AnnotationAssertion(rdfs:label obo:TST_0000001 "test term")'
+    decl1 = "Declaration(Class(obo:TST_0000001))"
+    _write(repo, "onto.owl", _ofn(decl1, label1))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c0 create", date="2021-01-01T00:00:00+00:00")
+
+    decl2 = "Declaration(Class(obo:TST_0000002))"
+    label2 = 'AnnotationAssertion(rdfs:label obo:TST_0000002 "second term")'
+    sub = "SubClassOf(obo:TST_0000002 obo:TST_0000001)"
+    _write(repo, "onto.owl", _ofn(decl1, label1, decl2, label2, sub))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1 add subclass", date="2021-01-02T00:00:00+00:00")
+
+    relabel1 = 'AnnotationAssertion(rdfs:label obo:TST_0000001 "renamed term")'
+    _write(repo, "onto.owl", _ofn(decl1, relabel1, decl2, label2, sub))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c2 rename label", date="2021-01-03T00:00:00+00:00")
+
+    return repo
+
+
 @pytest.fixture(scope="session")
 def paged_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A built artifact wide enough to page over.

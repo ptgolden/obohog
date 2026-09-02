@@ -150,7 +150,140 @@ def test_identity_converter_passes_bytes_through():
     )
 
 
+# --- wiring into builds ----------------------------------------------------
+
+
+class _FakeConverter:
+    """Identity conversion under a fake identity; optionally fails on
+    chosen blob OIDs to exercise the skip path."""
+
+    def __init__(self, bad_oids: set[str] = frozenset(), converter_id: str = "fake=1"):
+        self.bad_oids = set(bad_oids)
+        self.converter_id = converter_id
+
+    def convert(self, oid, read):
+        if oid in self.bad_oids:
+            raise ConversionError(f"cannot convert {oid}")
+        return read()
+
+
+OBO = "src/onto.obo"
+
+
+def test_conversion_failure_skips_commit_and_folds_forward(obo_repo, tmp_path: Path):
+    from obohog.extract import extract
+    from obohog.gitsource import GitSource
+
+    out = tmp_path / "artifact"
+    with GitSource(obo_repo) as src:
+        versions = list(src.iter_file_history(OBO))
+        # c1 adds the synonym; c2 is a pure rename with the same blob, so
+        # failing this OID skips both commits.
+        bad = versions[1].blob_oid
+        extract(src, OBO, out, converter=_FakeConverter({bad}))
+
+    import pyarrow.parquet as pq
+
+    skipped = pq.read_table(out / "skipped.parquet").to_pylist()
+    assert [(r["commit_seq"], r["error"]) for r in skipped] == [
+        (1, "ConversionFailed"),
+        (2, "ConversionFailed"),
+    ]
+    # The skipped commits' change (the synonym) folds into the next
+    # convertible commit rather than being lost.
+    events = pq.read_table(out / "events.parquet").to_pylist()
+    synonym_adds = [
+        e for e in events if e["predicate"] == "synonym" and e["operation"] == "add"
+    ]
+    assert [e["commit_seq"] for e in synonym_adds] == [3]
+
+
+def test_build_meta_records_converter_id(obo_repo, tmp_path: Path):
+    from obohog import model
+    from obohog.extract import extract
+    from obohog.gitsource import GitSource
+
+    fake_out, plain_out = tmp_path / "fake", tmp_path / "plain"
+    with GitSource(obo_repo) as src:
+        extract(src, OBO, fake_out, converter=_FakeConverter())
+    with GitSource(obo_repo) as src:
+        extract(src, OBO, plain_out)
+    assert model.read_build_meta(fake_out).converter_id == "fake=1"
+    assert model.read_build_meta(plain_out).converter_id == "obo"
+
+
+def test_converter_change_forces_full_rebuild(obo_repo, tmp_path: Path):
+    from obohog.extract import BuildMode, build_parallel, plan_build
+    from obohog.gitsource import GitSource
+
+    out = tmp_path / "artifact"
+    build_parallel(str(obo_repo), OBO, out, jobs=1)
+    with GitSource(obo_repo) as src:
+        full = list(src.iter_file_history(OBO))
+    same = plan_build(out, full, limit=None, update=True, converter_id="obo")
+    assert same.mode is BuildMode.UP_TO_DATE
+    changed = plan_build(out, full, limit=None, update=True, converter_id="robot=9.9")
+    assert changed.mode is BuildMode.FULL
+
+
 # --- end-to-end with a real ROBOT ------------------------------------------
+
+
+@pytest.mark.skipif(not _robot_available(), reason="ROBOT not installed")
+def test_owl_history_end_to_end(ofn_repo, tmp_path: Path):
+    from obohog import model
+    from obohog.extract import extract, build_parallel
+    from obohog.gitsource import GitSource
+    from obohog.query import HistoryDB
+
+    command, version = find_robot()
+    converter = RobotConverter(tmp_path / "cache", command, version)
+    serial_out, parallel_out = tmp_path / "serial", tmp_path / "parallel"
+    with GitSource(ofn_repo) as src:
+        extract(src, "onto.owl", serial_out, converter=converter)
+
+    meta = model.read_build_meta(serial_out)
+    assert meta.converter_id.startswith("robot=")
+
+    import pyarrow.parquet as pq
+
+    assert pq.read_table(serial_out / "skipped.parquet").to_pylist() == []
+    events = pq.read_table(serial_out / "events.parquet").to_pylist()
+    names = [
+        (e["commit_seq"], e["operation"], e["value"])
+        for e in events
+        if e["term_id"] == "TST:0000001" and e["predicate"] == "name"
+    ]
+    # Created at c0; label renamed (remove + add) at c2.
+    assert sorted(names) == [
+        (0, "add", "test term"),
+        (2, "add", "renamed term"),
+        (2, "remove", "test term"),
+    ]
+    is_a = [
+        (e["commit_seq"], e["operation"], e["body"])
+        for e in events
+        if e["term_id"] == "TST:0000002" and e["predicate"] == "is_a"
+    ]
+    # Created at c1. c2's rename of the *parent's* label also touches this
+    # clause: ROBOT writes the target label as a `!` comment
+    # ("is_a: TST:0000001 ! test term"), so the referencing stanza changes
+    # too — the render layer classifies exactly this as a target-label edit.
+    assert sorted(is_a) == [
+        (1, "add", "TST:0000001"),
+        (2, "add", "TST:0000001"),
+        (2, "remove", "TST:0000001"),
+    ]
+
+    # The parallel build (workers hit the now-warm conversion cache) must
+    # match the serial one exactly.
+    build_parallel(str(ofn_repo), "onto.owl", parallel_out, jobs=2, converter=converter)
+    ds, dp = HistoryDB(serial_out), HistoryDB(parallel_out)
+    cols = "term_id, commit_seq, operation, predicate, value"
+    q = f"SELECT {cols} FROM events"
+    assert sorted(ds.con.execute(q).fetchall()) == sorted(dp.con.execute(q).fetchall())
+    ds.close()
+    dp.close()
 
 
 @pytest.mark.skipif(not _robot_available(), reason="ROBOT not installed")

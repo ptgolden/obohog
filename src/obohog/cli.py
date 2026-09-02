@@ -13,6 +13,7 @@ from rich.text import Text
 
 from . import model, render, service
 from .config import ConfigError, SourceConfig, load_config
+from .convert import ConversionError, converter_for
 from .providers import get_provider
 from .extract import BuildMode, build_parallel
 from .gitsource import GitSource
@@ -227,11 +228,19 @@ def source_sync(
     history) or on --rebuild.
     """
     source = _resolve_source(name, config)
+    try:
+        # Before the (potentially long) clone/fetch, so a missing ROBOT
+        # for a format = "owl" source fails in the first second.
+        converter = converter_for(source)
+    except ConversionError as err:
+        console.print(f"[red]Error:[/] {err}")
+        raise typer.Exit(1)
     clone_path = get_provider(source, console).ensure_synced(source, since=since)
     report = build_parallel(
         clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
         chunk_size=(chunk_size or None), limit=limit, progress=progress,
         update=not rebuild, namespace_map=source.namespace_map or None,
+        converter=converter,
     )
     if report.mode is BuildMode.UP_TO_DATE:
         console.print(

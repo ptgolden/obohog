@@ -31,6 +31,7 @@ import duckdb
 import pyarrow.parquet as pq
 
 from . import model
+from .convert import ConversionError, Converter, IdentityConverter
 from .gitsource import CommitInfo, FileVersion, GitError, GitSource, TagRef
 from .obo import Clause, CommitDelta, DocumentState, TermState
 
@@ -90,6 +91,7 @@ def _extract_snapshot_url(message: str) -> str | None:
 def extract(
     src: GitSource, path: str, out_dir: Path, *, limit: int | None = None,
     namespace_map: "Mapping[str, str] | None" = None,
+    converter: Converter | None = None,
 ) -> BuildReport:
     """Build an artifact under ``out_dir`` from ``path``'s history in ``src``.
 
@@ -101,7 +103,7 @@ def extract(
         versions = versions[-limit:]
     return build(
         versions, src.read_blob, out_dir, source_path=path,
-        tags=src.read_tags(), namespace_map=namespace_map,
+        tags=src.read_tags(), namespace_map=namespace_map, converter=converter,
     )
 
 
@@ -113,8 +115,10 @@ def build(
     source_path: str,
     tags: Iterable[TagRef] = (),
     namespace_map: "Mapping[str, str] | None" = None,
+    converter: Converter | None = None,
 ) -> BuildReport:
     """Serial in-process build: the parallel path minus chunking and workers."""
+    converter = converter or IdentityConverter()
     commits: list[dict] = []
     snapshots: list[dict] = []
     events: list[dict] = []
@@ -128,7 +132,20 @@ def build(
         commits.append(row)
         seqs.append(version.commit.seq)
         seq_dates.append((version.commit.seq, row["committed_date"]))
-        delta = state.apply(read_blob(version.blob_oid))
+        try:
+            blob = converter.convert(
+                version.blob_oid, lambda: read_blob(version.blob_oid)
+            )
+        except ConversionError:
+            # An unconvertible version can't advance the state; its changes
+            # fold into the next convertible commit, like a parse-failing
+            # commit does.
+            skipped.append(
+                {"commit_seq": version.commit.seq, "sha": version.commit.sha,
+                 "term_id": None, "error": "ConversionFailed"}
+            )
+            continue
+        delta = state.apply(blob)
         snap_rows, event_rows, skip_rows = _delta_rows(version, delta)
         snapshots.extend(snap_rows)
         events.extend(event_rows)
@@ -145,6 +162,7 @@ def build(
         Path(out_dir), source_path=source_path,
         first=seqs[0] if seqs else None, last=seqs[-1] if seqs else None,
         n=len(seqs), namespace_map=namespace_map,
+        converter_id=converter.converter_id,
     )
 
     return BuildReport(
@@ -294,6 +312,7 @@ def _nsmap_json(namespace_map: "Mapping[str, str] | None") -> str | None:
 def _write_build_meta(
     out: Path, *, source_path: str, first: int | None, last: int | None, n: int,
     namespace_map: "Mapping[str, str] | None" = None,
+    converter_id: str = "obo",
 ) -> None:
     """Record what the artifact now covers. ALWAYS the final write of a build.
 
@@ -311,6 +330,7 @@ def _write_build_meta(
         last_commit_seq=last,
         n_commits=n,
         namespace_map=_nsmap_json(namespace_map),
+        converter_id=converter_id,
     )
     model.write_table([asdict(meta)], model.BUILD_META, out, "build_meta")
 
@@ -328,6 +348,7 @@ def build_parallel(
     progress: bool = False,
     update: bool = False,
     namespace_map: "Mapping[str, str] | None" = None,
+    converter: Converter | None = None,
 ) -> BuildReport:
     """Build the artifact from a local clone using a pool of parsing workers.
 
@@ -348,6 +369,7 @@ def build_parallel(
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    converter = converter or IdentityConverter()
 
     # The parent's `iter_file_history` uses `git log --follow`, which fires
     # rename detection and can need blobs for *former* paths of the tracked
@@ -364,6 +386,7 @@ def build_parallel(
 
     plan = plan_build(
         out, full, limit=limit, update=update, namespace_map=namespace_map,
+        converter_id=converter.converter_id,
     )
     if plan.resume is not None:
         _clear_aborted_parts(out, plan.resume.last)
@@ -373,13 +396,13 @@ def build_parallel(
         report = _build_update(
             clone_path, obo_path, out, full, tags, plan.resume,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
-            namespace_map=namespace_map,
+            namespace_map=namespace_map, converter=converter,
         )
     else:
         report = _build_full(
             clone_path, obo_path, out, full[plan.offset:], tags,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
-            namespace_map=namespace_map,
+            namespace_map=namespace_map, converter=converter,
         )
     # After build_meta commits: pure layout work, a failed compaction
     # leaves a valid (merely uncompacted) artifact.
@@ -407,6 +430,7 @@ class BuildPlan:
 def plan_build(
     out: Path, full: list, *, limit: int | None, update: bool,
     namespace_map: "Mapping[str, str] | None" = None,
+    converter_id: str = "obo",
 ) -> BuildPlan:
     """Decide how a run over the walk ``full`` should treat the artifact at ``out``.
 
@@ -422,7 +446,7 @@ def plan_build(
             if (out / "commits.parquet").exists()
             else []
         )
-        resume = _validate_resume(meta, commit_rows, full, namespace_map)
+        resume = _validate_resume(meta, commit_rows, full, namespace_map, converter_id)
         if resume is not None:
             mode = (
                 BuildMode.UP_TO_DATE
@@ -437,6 +461,7 @@ def plan_build(
 def _validate_resume(
     meta: "model.BuildMeta | None", commit_rows: list[dict], full: list,
     namespace_map: "Mapping[str, str] | None" = None,
+    converter_id: str = "obo",
 ) -> _ResumePlan | None:
     """Check that an artifact with this metadata can be extended by this walk.
 
@@ -452,6 +477,11 @@ def _validate_resume(
     if meta.namespace_map != _nsmap_json(namespace_map):
         # Term identity is baked in at extraction; a different mapping
         # means the existing rows are keyed under the wrong ids.
+        return None
+    if meta.converter_id != converter_id:
+        # A different conversion (ROBOT upgrade, changed strip rules) may
+        # serialize unchanged terms differently; appending would emit
+        # phantom diffs against the old build's snapshots.
         return None
     last = meta.last_commit_seq
     if last is None or last >= len(full):
@@ -490,8 +520,10 @@ def _build_full(
     chunk_size: int | None,
     progress: bool,
     namespace_map: "Mapping[str, str] | None" = None,
+    converter: Converter | None = None,
 ) -> BuildReport:
     """Build the artifact from scratch over ``windowed``."""
+    converter = converter or IdentityConverter()
     _reset_part_tables(out)
     n = len(windowed)
     jobs, chunks = _plan_chunks(n, jobs, chunk_size)
@@ -504,7 +536,7 @@ def _build_full(
 
     results = _run_chunks(
         clone_path, windowed, out, chunks, jobs=jobs, progress=progress, total=n,
-        namespace_map=namespace_map,
+        namespace_map=namespace_map, converter=converter,
     )
 
     # Guarantee the core tables exist even if this (degenerate) build produced no
@@ -520,6 +552,7 @@ def _build_full(
         first=windowed[0].commit.seq if windowed else None,
         last=windowed[-1].commit.seq if windowed else None,
         n=n, namespace_map=namespace_map,
+        converter_id=converter.converter_id,
     )
 
     return BuildReport(
@@ -544,6 +577,7 @@ def _build_update(
     chunk_size: int | None,
     progress: bool,
     namespace_map: "Mapping[str, str] | None" = None,
+    converter: Converter | None = None,
 ) -> BuildReport:
     """Append the walk's commits after ``resume.last`` to an existing artifact.
 
@@ -554,6 +588,7 @@ def _build_update(
     ``build_meta`` write). An aborted increment therefore leaves a consistent,
     merely stale artifact behind.
     """
+    converter = converter or IdentityConverter()
     last = resume.last
     old_commits = resume.commit_rows
     new_versions = full[last + 1:]
@@ -569,7 +604,7 @@ def _build_update(
     results = _run_chunks(
         clone_path, tail, out, chunks,
         jobs=jobs, progress=progress, total=n, prefix=f"inc-{last + 1:07d}-",
-        namespace_map=namespace_map,
+        namespace_map=namespace_map, converter=converter,
     )
 
     new_commit_rows = [_commit_row(v.commit) for v in new_versions]
@@ -592,6 +627,7 @@ def _build_update(
         first=resume.meta.first_commit_seq,
         last=full[-1].commit.seq,
         n=len(all_commits), namespace_map=namespace_map,
+        converter_id=converter.converter_id,
     )
 
     return BuildReport(
@@ -771,6 +807,7 @@ def _run_chunks(
     total: int,
     prefix: str = "",
     namespace_map: "Mapping[str, str] | None" = None,
+    converter: Converter | None = None,
 ) -> "list[ChunkResult]":
     """Run ``_build_chunk`` over ``chunks`` in a spawn-based process pool."""
     # "spawn" (not fork): workers parse with fastobo's threaded runtime, and
@@ -784,11 +821,14 @@ def _run_chunks(
             # each re-walk `git log --follow`. Pickle cost is small
             # (dataclasses of str/int/datetime) and pays for itself many times
             # over vs. per-worker subprocess overhead.
+            # The converter pickles cleanly (paths + strings, no live
+            # handles); workers share its on-disk cache via atomic writes.
             futures = [
                 pool.submit(
                     _build_chunk, clone_path, versions, str(out),
                     c.id, c.start, c.end, ticks, prefix,
                     dict(namespace_map) if namespace_map else None,
+                    converter,
                 )
                 for c in chunks
             ]
@@ -840,6 +880,7 @@ def _build_chunk(
     ticks=None,
     prefix: str = "",
     namespace_map: dict[str, str] | None = None,
+    converter: Converter | None = None,
 ) -> "ChunkResult":
     """Worker: apply ``windowed[start:end]`` to the document state, stream part-files.
 
@@ -852,8 +893,9 @@ def _build_chunk(
     # future), so silence it to keep the parent's progress bar clean.
     os.dup2(os.open(os.devnull, os.O_WRONLY), 2)
 
+    converter = converter or IdentityConverter()
     src = GitSource(clone_path)
-    state = _seed_state(src, windowed, start, namespace_map)
+    state = _seed_state(src, windowed, start, namespace_map, converter)
     writer = _PartWriter(Path(out_dir), chunk_id, prefix)
     skipped: list[dict] = []
 
@@ -862,13 +904,23 @@ def _build_chunk(
             ticks.put(1)  # one tick per commit
         version = windowed[i]
         try:
-            blob = src.read_blob(version.blob_oid)
+            blob = converter.convert(
+                version.blob_oid, lambda: src.read_blob(version.blob_oid)
+            )
         except GitError:
             # A blob absent from the (offline) clone can't be processed; skip the
             # commit and carry state forward rather than aborting the whole build.
             skipped.append(
                 {"commit_seq": version.commit.seq, "sha": version.commit.sha,
                  "term_id": None, "error": "BlobMissing"}
+            )
+            continue
+        except ConversionError:
+            # An unconvertible version likewise can't advance the state; its
+            # changes fold into the next convertible commit.
+            skipped.append(
+                {"commit_seq": version.commit.seq, "sha": version.commit.sha,
+                 "term_id": None, "error": "ConversionFailed"}
             )
             continue
         snaps, events, skips = _delta_rows(version, state.apply(blob))
@@ -933,17 +985,20 @@ class _PartWriter:
 def _seed_state(
     src: GitSource, windowed: list[FileVersion], start: int,
     namespace_map: "Mapping[str, str] | None" = None,
+    converter: Converter | None = None,
 ) -> DocumentState:
     """Document state as of the version before ``start``.
 
     Empty for the first chunk (``start == 0``): its first version diffs
     against nothing, so every term appears as created.
     """
+    converter = converter or IdentityConverter()
     if start == 0:
         return DocumentState(namespace_map)
+    seed = windowed[start - 1]
     try:
-        blob = src.read_blob(windowed[start - 1].blob_oid)
-    except GitError:
-        # missing seed blob → first diff treats all as new
+        blob = converter.convert(seed.blob_oid, lambda: src.read_blob(seed.blob_oid))
+    except (GitError, ConversionError):
+        # missing/unconvertible seed blob → first diff treats all as new
         return DocumentState(namespace_map)
     return DocumentState.from_blob(blob, namespace_map)
