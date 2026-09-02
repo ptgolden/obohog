@@ -107,68 +107,196 @@ def pair_events(
         adds = [c for c in group if c.operation == "add"]
         removes = [c for c in group if c.operation == "remove"]
 
-        used_r: set[int] = set()
-        used_a: set[int] = set()
+        if tag == "property_value":
+            # A property_value clause names its property first, and a
+            # release-style commit can rewrite dozens of them per term —
+            # the all-pairs matrix across *unrelated* properties is both
+            # the pairing pipeline's hottest spot (99% of a worst-case
+            # page's similarity work) and the cross-match bug pass 1
+            # exists to prevent, one level up. Block by the property's
+            # local name: mass respellings (http://purl.org/dc/terms/
+            # source -> terms:source -> dcterms:source) keep it, so they
+            # still pair; a leftover round across blocks catches any
+            # respelling the key normalization misses. Pass 1 loses
+            # nothing — equal bodies imply an identically spelled
+            # property, hence the same block.
+            by_key: dict[str, tuple[list[Change], list[Change]]] = {}
+            for r in removes:
+                by_key.setdefault(_property_key(r), ([], []))[0].append(r)
+            for a in adds:
+                by_key.setdefault(_property_key(a), ([], []))[1].append(a)
+            rest_r: list[Change] = []
+            rest_a: list[Change] = []
+            for sub_r, sub_a in by_key.values():
+                edits, ur, ua = _pair_by_body(tag, sub_r, sub_a)
+                ops.extend(edits)
+                # Pass 1.5: identical value past the property token — a
+                # pure respelling of the property. Ordered after the
+                # body pass so body-match precedence is unchanged;
+                # within a rest-group every assignment yields the same
+                # Edit multiset, so no similarity scoring is needed.
+                # This is what turns a prefix-migration commit's O(n²)
+                # storm into a dict lookup.
+                edits, ur, ua = _pair_by_rest(tag, ur, ua)
+                ops.extend(edits)
+                edits, ur, ua = _pair_by_similarity(tag, ur, ua, threshold)
+                ops.extend(edits)
+                rest_r.extend(ur)
+                rest_a.extend(ua)
+            edits, ur, ua = _pair_by_similarity(tag, rest_r, rest_a, threshold)
+            ops.extend(edits)
+            ops.extend(Remove(r) for r in ur)
+            ops.extend(Add(a) for a in ua)
+            continue
 
-        # Pass 1: pair by matching parsed body. Each Change carries its
-        # value's decomposition from the artifact; ``None`` (possible only
-        # on hand-built Changes, e.g. in tests) skips pass 1 and is matched
-        # only in pass 2.
-        for i, r in enumerate(removes):
-            rp = r.parsed
-            if rp is None or i in used_r:
-                continue
-            candidates = [
-                j for j, a in enumerate(adds)
-                if a.parsed is not None and a.parsed.body == rp.body
-                and j not in used_a
-            ]
-            if not candidates:
-                continue
-            if len(candidates) == 1:
-                # The overwhelmingly common case — and max() would still
-                # compute the (expensive) similarity score just to select
-                # the only element.
-                best_j = candidates[0]
-            else:
-                best_j = max(
-                    candidates,
-                    key=lambda j: SequenceMatcher(
-                        None, removes[i].value, adds[j].value, autojunk=False
-                    ).ratio(),
-                )
-            used_r.add(i)
-            used_a.add(best_j)
-            ops.append(Edit(tag=tag, before=removes[i], after=adds[best_j]))
-
-        # Pass 2: greedy lexical similarity for the leftovers.
-        scored: list[tuple[float, int, int]] = []
-        for i, r in enumerate(removes):
-            if i in used_r:
-                continue
-            for j, a in enumerate(adds):
-                if j in used_a:
-                    continue
-                ratio = SequenceMatcher(None, r.value, a.value, autojunk=False).ratio()
-                if ratio >= threshold:
-                    scored.append((ratio, i, j))
-        scored.sort(reverse=True)
-        for _, i, j in scored:
-            if i in used_r or j in used_a:
-                continue
-            used_r.add(i)
-            used_a.add(j)
-            ops.append(Edit(tag=tag, before=removes[i], after=adds[j]))
-
-        for i, r in enumerate(removes):
-            if i not in used_r:
-                ops.append(Remove(r))
-        for j, a in enumerate(adds):
-            if j not in used_a:
-                ops.append(Add(a))
+        edits, ur, ua = _pair_two_pass(tag, removes, adds, threshold)
+        ops.extend(edits)
+        ops.extend(Remove(r) for r in ur)
+        ops.extend(Add(a) for a in ua)
 
     ops.sort(key=_sort_key)
     return ops
+
+
+def _property_key(c: Change) -> str:
+    """Blocking key for property_value pairing: the property's local name.
+
+    ``terms:source``, ``dcterms:source`` and
+    ``http://purl.org/dc/terms/source`` all key to ``source`` — the part
+    of a property's spelling that survives prefix/IRI migrations.
+    """
+    body = c.parsed.body if c.parsed is not None else c.value
+    prop = body.split(" ", 1)[0]
+    return prop.rsplit("/", 1)[-1].rsplit(":", 1)[-1].lower()
+
+
+def _pair_two_pass(
+    tag: str, removes: list[Change], adds: list[Change], threshold: float
+) -> tuple[list[Op], list[Change], list[Change]]:
+    """The two pairing passes over one bucket; leftovers return unpaired."""
+    edits, removes, adds = _pair_by_body(tag, removes, adds)
+    more, removes, adds = _pair_by_similarity(tag, removes, adds, threshold)
+    return edits + more, removes, adds
+
+
+def _pair_by_body(
+    tag: str, removes: list[Change], adds: list[Change]
+) -> tuple[list[Op], list[Change], list[Change]]:
+    """Pass 1: pair by matching parsed body.
+
+    Each Change carries its value's decomposition from the artifact;
+    ``None`` (possible only on hand-built Changes, e.g. in tests) skips
+    this pass and is matched only by similarity. Ties within a body
+    group go to highest lexical similarity.
+    """
+    used_r: set[int] = set()
+    used_a: set[int] = set()
+    edits: list[Op] = []
+    for i, r in enumerate(removes):
+        rp = r.parsed
+        if rp is None or i in used_r:
+            continue
+        candidates = [
+            j for j, a in enumerate(adds)
+            if a.parsed is not None and a.parsed.body == rp.body
+            and j not in used_a
+        ]
+        if not candidates:
+            continue
+        if len(candidates) == 1:
+            # The overwhelmingly common case — and max() would still
+            # compute the (expensive) similarity score just to select
+            # the only element.
+            best_j = candidates[0]
+        else:
+            best_j = max(
+                candidates,
+                key=lambda j: SequenceMatcher(
+                    None, removes[i].value, adds[j].value, autojunk=False
+                ).ratio(),
+            )
+        used_r.add(i)
+        used_a.add(best_j)
+        edits.append(Edit(tag=tag, before=removes[i], after=adds[best_j]))
+    return (
+        edits,
+        [r for i, r in enumerate(removes) if i not in used_r],
+        [a for j, a in enumerate(adds) if j not in used_a],
+    )
+
+
+def _pair_by_rest(
+    tag: str, removes: list[Change], adds: list[Change]
+) -> tuple[list[Op], list[Change], list[Change]]:
+    """Pair events whose value is identical past the leading token.
+
+    Within one rest-group the pairing is order-arbitrary on purpose:
+    either the values are fully identical (any assignment is the same
+    Edit multiset) or they differ only in the property's spelling (all
+    assignments render the same respelling edit). Empty rests are left
+    for similarity — nothing meaningful to key on.
+    """
+    by_rest: dict[str, list[int]] = {}
+    for i, r in enumerate(removes):
+        rest = r.value.partition(" ")[2]
+        if rest:
+            by_rest.setdefault(rest, []).append(i)
+    edits: list[Op] = []
+    used_r: set[int] = set()
+    used_a: set[int] = set()
+    for j, a in enumerate(adds):
+        pending = by_rest.get(a.value.partition(" ")[2])
+        if pending:
+            i = pending.pop(0)
+            used_r.add(i)
+            used_a.add(j)
+            edits.append(Edit(tag=tag, before=removes[i], after=adds[j]))
+    return (
+        edits,
+        [r for i, r in enumerate(removes) if i not in used_r],
+        [a for j, a in enumerate(adds) if j not in used_a],
+    )
+
+
+def _pair_by_similarity(
+    tag: str, removes: list[Change], adds: list[Change], threshold: float
+) -> tuple[list[Op], list[Change], list[Change]]:
+    """Pass 2: greedy lexical similarity for the leftovers.
+
+    The add-outer loop reuses one matcher per add (set_seq1 keeps the
+    b-side tables), and the quick_ratio upper bounds skip the expensive
+    ratio() for clearly-dissimilar pairs — both are exact:
+    quick_ratio >= ratio always, so the surviving set (and the scored
+    tuples, sorted below) are identical to the naive all-pairs version.
+    """
+    used_r: set[int] = set()
+    used_a: set[int] = set()
+    edits: list[Op] = []
+    scored: list[tuple[float, int, int]] = []
+    for j, a in enumerate(adds):
+        sm = SequenceMatcher(None, "", a.value, autojunk=False)
+        for i, r in enumerate(removes):
+            sm.set_seq1(r.value)
+            if (
+                sm.real_quick_ratio() < threshold
+                or sm.quick_ratio() < threshold
+            ):
+                continue
+            ratio = sm.ratio()
+            if ratio >= threshold:
+                scored.append((ratio, i, j))
+    scored.sort(reverse=True)
+    for _, i, j in scored:
+        if i in used_r or j in used_a:
+            continue
+        used_r.add(i)
+        used_a.add(j)
+        edits.append(Edit(tag=tag, before=removes[i], after=adds[j]))
+    return (
+        edits,
+        [r for i, r in enumerate(removes) if i not in used_r],
+        [a for j, a in enumerate(adds) if j not in used_a],
+    )
 
 
 def _sort_key(op: Op) -> tuple[str, int, str]:

@@ -654,3 +654,43 @@ def test_take_sections_op_budget_keeps_sections_atomic():
     taken, truncated = _take(groups, 100, op_budget=10)
     assert [g.term_id for g in taken] == ["A"] * 5
     assert truncated is True
+
+
+# ---------------------------------------------------------------------------
+# property_value pairing: blocked by property local name, respellings
+# pair exactly, renamed properties still pair via the leftover round.
+
+
+def test_property_value_respelling_pairs_by_rest():
+    # A prefix migration (terms: -> dcterms:) pairs each value with its
+    # own respelling, not by lexical-similarity roulette.
+    changes = [
+        _change("remove", "property_value", 'terms:source "https://example.org/a" xsd:anyURI'),
+        _change("remove", "property_value", 'terms:source "https://example.org/b" xsd:anyURI'),
+        _change("add", "property_value", 'dcterms:source "https://example.org/a" xsd:anyURI'),
+        _change("add", "property_value", 'dcterms:source "https://example.org/b" xsd:anyURI'),
+    ]
+    ops = pair_events(changes)
+    assert all(isinstance(o, Edit) for o in ops) and len(ops) == 2
+    for o in ops:
+        assert o.before.value.split(" ", 1)[1] == o.after.value.split(" ", 1)[1]
+
+
+def test_property_value_renamed_property_pairs_in_leftover_round():
+    # Different local names land in different blocks, but the leftover
+    # similarity round still pairs a renamed property's clause.
+    changes = [
+        _change("remove", "property_value", 'ex:seeAlso "https://example.org/shared-value" xsd:anyURI'),
+        _change("add", "property_value", 'ex:related "https://example.org/shared-value" xsd:anyURI'),
+    ]
+    (op,) = pair_events(changes)
+    assert isinstance(op, Edit)
+
+
+def test_property_value_unrelated_stays_split():
+    changes = [
+        _change("remove", "property_value", 'ex:depth "1.5" xsd:float'),
+        _change("add", "property_value", 'dcterms:source "https://example.org/very-different" xsd:anyURI'),
+    ]
+    ops = pair_events(changes)
+    assert sorted(type(o).__name__ for o in ops) == ["Add", "Remove"]
