@@ -123,6 +123,17 @@ def test_conversion_failure_captures_robots_error_line(tmp_path: Path):
     assert excinfo.value.reason == "FAKE PARSE ERROR: bad axiom"
 
 
+def test_prune_keeps_only_named_oids(tmp_path: Path):
+    cache = tmp_path / "converted"
+    converter = _broken_converter(cache)
+    (cache / "aaa.obo").write_bytes(b"keep me")
+    (cache / "bbb.obo").write_bytes(b"drop me")
+    (cache / "ccc.12345.out.obo").write_bytes(b"orphaned temp")
+    (cache / "ddd.12345.in.owl").write_bytes(b"orphaned temp")
+    converter.prune(keep={"aaa"})
+    assert sorted(p.name for p in cache.iterdir()) == ["aaa.obo", "meta.json"]
+
+
 def test_converter_change_clears_cache(tmp_path: Path):
     cache = tmp_path / "converted"
     old = _broken_converter(cache, version="1.0")
@@ -180,6 +191,9 @@ class _FakeConverter:
         if oid in self.bad_oids:
             raise ConversionError(f"cannot convert {oid}")
         return read()
+
+    def prune(self, keep):
+        pass
 
 
 OBO = "src/onto.obo"
@@ -293,6 +307,9 @@ def test_owl_history_end_to_end(ofn_repo, tmp_path: Path):
     # The parallel build (workers hit the now-warm conversion cache) must
     # match the serial one exactly.
     build_parallel(str(ofn_repo), "onto.owl", parallel_out, jobs=2, converter=converter)
+    # A successful sync prunes the cache to the last built blob — the
+    # next incremental's seed — instead of accreting one file per commit.
+    assert len(list((tmp_path / "cache").glob("*.obo"))) == 1
     ds, dp = HistoryDB(serial_out), HistoryDB(parallel_out)
     cols = "term_id, commit_seq, operation, predicate, value"
     q = f"SELECT {cols} FROM events"

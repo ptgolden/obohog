@@ -110,9 +110,13 @@ Chosen stack:
   into an untracked `owl-axioms:` header line.
 - Results are cached per blob OID under `{storage}/{name}/converted`;
   ROBOT's output is deterministic, so the diff-scoped stanza scan works
-  unchanged on converted text. `build_meta.converter_id` records the
-  ROBOT version; a mismatch on incremental sync forces a full rebuild
-  so a converter upgrade can't manufacture phantom diffs.
+  unchanged on converted text. The cache's job is within-build
+  memoization (parallel chunks share seed conversions); a successful
+  sync prunes it to the last built blob — the next incremental's seed —
+  so it doesn't accrete a file per commit forever.
+  `build_meta.converter_id` records the ROBOT version; a mismatch on
+  incremental sync forces a full rebuild so a converter upgrade can't
+  manufacture phantom diffs.
 - ROBOT is found on PATH or via `ROBOT_JAR` in `.env`; it's a sync-time
   dependency only, and only for `format = "owl"` sources.
 

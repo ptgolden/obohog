@@ -38,7 +38,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Iterable, Protocol
 
 from .settings import ObohogSettings, get_settings
 
@@ -65,6 +65,8 @@ class Converter(Protocol):
 
     def convert(self, oid: str, read: Callable[[], bytes]) -> bytes: ...
 
+    def prune(self, keep: Iterable[str]) -> None: ...
+
 
 def _java_env() -> dict[str, str]:
     """Subprocess env capping the JVM to one core.
@@ -90,6 +92,9 @@ class IdentityConverter:
 
     def convert(self, oid: str, read: Callable[[], bytes]) -> bytes:
         return read()
+
+    def prune(self, keep: Iterable[str]) -> None:
+        pass
 
 
 # Bumped whenever strip_imports or the ROBOT invocation changes in a way
@@ -176,6 +181,26 @@ class RobotConverter:
             in_path.unlink(missing_ok=True)
             if out_path.exists():
                 out_path.unlink(missing_ok=True)
+
+    def prune(self, keep: Iterable[str]) -> None:
+        """Drop cached conversions except the ``keep`` blob OIDs.
+
+        Called after a successful build. The cache's job is within-build
+        memoization — chunk seeds and rebuild resumes — not permanent
+        storage: kept whole it grows a file per commit forever (~1 GB for
+        CL's history), while the next incremental sync needs exactly one
+        old conversion, the last built commit's blob. The cost is that a
+        rare same-converter ``--rebuild`` reconverts history. Also sweeps
+        temp files a crashed conversion may have left behind.
+        """
+        keep_names = {f"{oid}.obo" for oid in keep}
+        # "*.obo" also matches orphaned "<oid>.<pid>.out.obo" temp files;
+        # their names are never in keep_names, so they're swept here too.
+        for path in self._cache_dir.glob("*.obo"):
+            if path.name not in keep_names:
+                path.unlink(missing_ok=True)
+        for path in self._cache_dir.glob("*.in.owl"):
+            path.unlink(missing_ok=True)
 
 
 # A self-closing or one-line RDF/XML owl:imports element.

@@ -33,9 +33,10 @@ file = "src/ontology/pato-edit.obo"
 # rather than OBO. Each version is converted to OBO with ROBOT before
 # indexing — install `robot` on PATH or set ROBOT_JAR=/path/to/robot.jar
 # in .env (http://robot.obolibrary.org). Conversions are cached per blob
-# under {storage}/{name}/converted, so only new commits pay the ~1 s
-# conversion cost. Import declarations are stripped: obohog tracks the
-# edit file's own axioms, not its import closure.
+# under {storage}/{name}/converted during a build, then pruned to the
+# latest one, so only new commits ever pay the ~1 s conversion cost.
+# Import declarations are stripped: obohog tracks the edit file's own
+# axioms, not its import closure.
 [source.cl]
 type = "git-file"
 repo = "https://github.com/obophenotype/cell-ontology"
