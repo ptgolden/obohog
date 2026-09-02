@@ -39,6 +39,7 @@ def _source(clone_dir: Path) -> GitHubReleaseSource:
         asset="fake.obo",
         clone_dir=clone_dir,
         db_dir=clone_dir.parent / "db",
+        convert_dir=clone_dir.parent / "converted",
     )
 
 
@@ -219,6 +220,7 @@ def test_non_github_repo_url_raises(tmp_path: Path):
         asset="fake.obo",
         clone_dir=clone_dir,
         db_dir=clone_dir.parent / "db",
+        convert_dir=clone_dir.parent / "converted",
     )
     provider = GitHubReleaseProvider(Console(quiet=True))
     with pytest.raises(ValueError, match="github.com"):
@@ -244,6 +246,7 @@ def _bioportal_source(clone_dir: Path, acronym: str = "FAKE") -> BioPortalSource
         acronym=acronym,
         clone_dir=clone_dir,
         db_dir=clone_dir.parent / "db",
+        convert_dir=clone_dir.parent / "converted",
     )
 
 

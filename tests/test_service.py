@@ -253,6 +253,7 @@ def _source(name: str, base: Path, db_dir: Path) -> GitFileSource:
         file="onto.obo",
         clone_dir=base / name / "clone",
         db_dir=db_dir,
+        convert_dir=db_dir.parent / "converted",
     )
 
 

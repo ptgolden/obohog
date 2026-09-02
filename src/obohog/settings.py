@@ -45,6 +45,14 @@ class ObohogSettings(BaseSettings):
         description="BioPortal REST API key (BIOPORTAL_API_KEY in .env).",
     )
 
+    robot_jar: str | None = Field(
+        default=None,
+        description=(
+            "Path to robot.jar, used for format = \"owl\" sources when no "
+            "`robot` executable is on PATH (ROBOT_JAR in .env)."
+        ),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> ObohogSettings:

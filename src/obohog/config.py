@@ -42,9 +42,15 @@ Example (also shipped as ``obohog.toml.example``)::
     type = "bioportal"
     acronym = "EXO"
 
-Per-source paths (``clone_dir``, ``db_dir``) default to
-``{storage}/{name}/clone`` and ``{storage}/{name}/db`` respectively, and
-can be overridden by explicit fields in the source table.
+Per-source paths (``clone_dir``, ``db_dir``, ``convert_dir``) default to
+``{storage}/{name}/clone``, ``{storage}/{name}/db``, and
+``{storage}/{name}/converted`` respectively, and can be overridden by
+explicit fields in the source table.
+
+Every source type also accepts ``format`` (default ``"obo"``): declare
+``format = "owl"`` when the tracked file is an OWL serialization (OFN,
+RDF/XML, ...) and each version will be converted to OBO via ROBOT before
+extraction — see :mod:`obohog.convert`.
 """
 
 import tomllib
@@ -71,6 +77,12 @@ class _BaseSource(BaseModel):
     name: str
     clone_dir: Path
     db_dir: Path
+    convert_dir: Path
+    # The tracked file's serialization. "obo" flows straight into the
+    # extract pipeline; "owl" (any concrete syntax ROBOT can sniff — OFN,
+    # RDF/XML, ...) is converted to OBO first, per blob, with the results
+    # cached in ``convert_dir`` (see :mod:`obohog.convert`).
+    format: Literal["obo", "owl"] = "obo"
     # Term-id CURIE prefix canonicalization, e.g. {TBD = "MONDO"}: history
     # written under the old prefix indexes as the new one, so a wholesale
     # namespace rename keeps one continuous identity per term. Applied at
@@ -255,6 +267,7 @@ def _parse_source(
         "name": name,
         "clone_dir": section.get("clone_dir", default_root / "clone"),
         "db_dir": section.get("db_dir", default_root / "db"),
+        "convert_dir": section.get("convert_dir", default_root / "converted"),
         **section,
     }
     try:
