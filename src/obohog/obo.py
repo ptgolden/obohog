@@ -81,8 +81,18 @@ class TermState:
     content_hash: str
 
 
-def clauses_of(frame: fastobo.term.TermFrame) -> tuple[Clause, ...]:
-    """Canonical, order-independent clause set for a term frame."""
+# The stanza kinds we track: ontology terms and relations (typedefs).
+# Instances and the header stay parse context. Known fastobo limitation:
+# typedef clause objects don't expose trailing qualifiers or `!` comments
+# (str(clause) drops them, as of fastobo 0.14.1), so a qualifier-only edit
+# to a typedef clause produces no event; test_obo pins this behavior.
+_TRACKED_FRAMES = (fastobo.term.TermFrame, fastobo.typedef.TypedefFrame)
+
+
+def clauses_of(
+    frame: "fastobo.term.TermFrame | fastobo.typedef.TypedefFrame",
+) -> tuple[Clause, ...]:
+    """Canonical, order-independent clause set for a term or typedef frame."""
     out = []
     for clause in frame:
         tag, _, value = str(clause).partition(": ")
@@ -153,29 +163,30 @@ def clause_delta(
 def split_document(
     data: bytes, namespace_map: Mapping[str, str] | None = None
 ) -> tuple[bytes, dict[str, bytes]]:
-    """Split an OBO document into a reusable parse context and per-term stanzas.
+    """Split an OBO document into a reusable parse context and tracked stanzas.
 
-    Returns ``(context, {term_id: stanza_bytes})`` where ``context`` is the header
-    plus every non-``[Term]`` stanza (typedefs, instances) — everything needed to
-    parse any single term stanza in isolation. This is a cheap byte-level scan, no
-    fastobo, so it lets the extractor find which terms changed without parsing the
-    whole file. Keys are canonical ids (see :func:`map_term_id`).
+    Returns ``(context, {id: stanza_bytes})`` covering every ``[Term]`` and
+    ``[Typedef]`` stanza — the two tracked kinds; ``context`` is the header
+    plus anything else (instances), enough to parse any single stanza in
+    isolation. This is a cheap byte-level scan, no fastobo, so it lets the
+    extractor find which stanzas changed without parsing the whole file.
+    Keys are canonical ids (see :func:`map_term_id`).
     """
     matches = list(_STANZA_RE.finditer(data))
     if not matches:
         return data, {}
     context = [data[: matches[0].start()]]
-    terms: dict[str, bytes] = {}
+    tracked: dict[str, bytes] = {}
     for i, match in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(data)
         stanza = data[match.start() : end]
-        if match.group().strip() == b"[Term]":
+        if match.group().strip() in (b"[Term]", b"[Typedef]"):
             term_id = _stanza_id(stanza)
             if term_id is not None:
-                terms[map_term_id(term_id, namespace_map)] = stanza
+                tracked[map_term_id(term_id, namespace_map)] = stanza
                 continue
         context.append(stanza)
-    return b"".join(context), terms
+    return b"".join(context), tracked
 
 
 def _stanza_id(stanza: bytes) -> str | None:
@@ -195,7 +206,7 @@ def stanza_hash(stanza: bytes) -> bytes:
 
 
 def term_state_of(
-    frame: fastobo.term.TermFrame,
+    frame: "fastobo.term.TermFrame | fastobo.typedef.TypedefFrame",
     namespace_map: Mapping[str, str] | None = None,
 ) -> TermState:
     """A frame's :class:`TermState` under a source's ``namespace_map``.
@@ -268,7 +279,7 @@ def _parse_batch(
     blob = context + b"".join(stanzas[i] for i in ids)
     try:
         doc = fastobo.load(io.BytesIO(blob), threads=1)
-        frames = [f for f in doc if isinstance(f, fastobo.term.TermFrame)]
+        frames = [f for f in doc if isinstance(f, _TRACKED_FRAMES)]
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as err:  # fastobo can panic, not just raise

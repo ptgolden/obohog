@@ -45,7 +45,7 @@ def test_parallel_build_matches_single(obo_repo: Path, tmp_path: Path):
     build_parallel(str(obo_repo), OBO, parallel, jobs=3)
 
     ds, dp = HistoryDB(single), HistoryDB(parallel)
-    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    ev_cols = "term_id, commit_seq, operation, tag, value"
     sn_cols = "term_id, commit_seq, content_hash"
     assert _multiset(ds, "events", ev_cols) == _multiset(dp, "events", ev_cols)
     assert _multiset(ds, "term_snapshots", sn_cols) == _multiset(dp, "term_snapshots", sn_cols)
@@ -62,7 +62,7 @@ def test_full_parse_matches_diff_scoped(obo_repo: Path, tmp_path: Path):
     build_parallel(str(obo_repo), OBO, full, jobs=2, full_parse=True)
 
     df, dp = HistoryDB(fast), HistoryDB(full)
-    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    ev_cols = "term_id, commit_seq, operation, tag, value"
     sn_cols = "term_id, commit_seq, content_hash"
     assert _multiset(df, "events", ev_cols) == _multiset(dp, "events", ev_cols)
     assert _multiset(df, "term_snapshots", sn_cols) == _multiset(dp, "term_snapshots", sn_cols)
@@ -79,7 +79,7 @@ def test_chunk_size_does_not_change_output(obo_repo: Path, tmp_path: Path):
     build_parallel(str(obo_repo), OBO, many, jobs=2, chunk_size=1)
 
     ds, dm = HistoryDB(single), HistoryDB(many)
-    cols = "term_id, commit_seq, operation, predicate, value"
+    cols = "term_id, commit_seq, operation, tag, value"
     assert _multiset(ds, "events", cols) == _multiset(dm, "events", cols)
     ds.close()
     dm.close()
@@ -152,7 +152,7 @@ def test_build_matches_naive_full_parse_oracle(obo_repo: Path, tmp_path: Path):
             prev = current
 
     db = HistoryDB(out)
-    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    ev_cols = "term_id, commit_seq, operation, tag, value"
     assert sorted(events) == _multiset(db, "events", ev_cols)
     assert sorted(snapshots) == _multiset(
         db, "term_snapshots", "term_id, commit_seq, content_hash"
@@ -186,7 +186,7 @@ def _extend_repo(repo: Path) -> None:
 def _assert_same_artifact(a: Path, b: Path) -> None:
     da, db = HistoryDB(a), HistoryDB(b)
     checks = [
-        ("events", "term_id, commit_seq, operation, predicate, value, body, comment"),
+        ("events", "term_id, commit_seq, operation, tag, value, body, comment"),
         ("term_snapshots", "term_id, commit_seq, content_hash"),
         ("commits", "commit_seq, sha, pr_number, message"),
         ("releases", "tag, sha, commit_seq"),
@@ -278,7 +278,7 @@ def test_incremental_cleans_aborted_parts(obo_repo: Path, tmp_path: Path):
     # its starting seq (5) is beyond the recorded last_commit_seq (4).
     stray = {
         "term_id": "MONDO:9999999", "commit_seq": 99, "sha": "dead",
-        "predicate": "name", "value": "ghost", "operation": "add",
+        "tag": "name", "value": "ghost", "operation": "add",
         "body": "ghost", "qualifiers": [], "comment": None,
     }
     model.write_part([stray], model.EVENTS, out / "events" / "inc-0000005-000-0000.parquet")
@@ -727,7 +727,7 @@ def test_namespace_map_one_identity_across_rename(renamed_artifact: Path):
 
     # Creation records the as-written id as a clause.
     c0 = db.con.execute(
-        "SELECT operation, predicate, value FROM events"
+        "SELECT operation, tag, value FROM events"
         " WHERE term_id = 'MONDO:0000002' AND commit_seq = 0"
     ).fetchall()
     assert ("add", "id", "TBD:0000002") in c0
@@ -736,7 +736,7 @@ def test_namespace_map_one_identity_across_rename(renamed_artifact: Path):
     # are the id respelling — a remove/add pair the renderer pairs into
     # one ~ line. (alpha also has real content changes.)
     beta_rename = db.con.execute(
-        "SELECT operation, predicate, value FROM events"
+        "SELECT operation, tag, value FROM events"
         " WHERE term_id = 'MONDO:0000002' AND commit_seq = 1"
         " ORDER BY operation"
     ).fetchall()
@@ -748,9 +748,9 @@ def test_namespace_map_one_identity_across_rename(renamed_artifact: Path):
     # References inside values keep their as-written text and diff as the
     # genuine edits they were.
     alpha_rename = db.con.execute(
-        "SELECT operation, predicate, value FROM events"
+        "SELECT operation, tag, value FROM events"
         " WHERE term_id = 'MONDO:0000001' AND commit_seq = 1"
-        " ORDER BY predicate, operation"
+        " ORDER BY tag, operation"
     ).fetchall()
     assert ("remove", "is_a", "TBD:0000002") in alpha_rename
     assert ("add", "is_a", "MONDO:0000002") in alpha_rename
@@ -780,7 +780,7 @@ def test_namespace_map_parallel_build_matches_serial(
         str(renamed_ns_repo), "onto.obo", parallel, jobs=2, namespace_map=NSMAP
     )
     ds, dp = HistoryDB(single), HistoryDB(parallel)
-    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    ev_cols = "term_id, commit_seq, operation, tag, value"
     assert _multiset(ds, "events", ev_cols) == _multiset(dp, "events", ev_cols)
     ds.close()
     dp.close()
@@ -839,7 +839,7 @@ def test_compact_artifact_is_idempotent_and_preserves_rows(
     with GitSource(obo_repo) as src:
         extract(src, OBO, out)
     db = HistoryDB(out)
-    cols = "term_id, commit_seq, operation, predicate, value"
+    cols = "term_id, commit_seq, operation, tag, value"
     before = _multiset(db, "events", cols)
     snaps_before = _multiset(db, "term_snapshots", "term_id, commit_seq, content_hash")
     db.close()

@@ -47,9 +47,10 @@ Working end-to-end on the full Mondo history (7,487 commits, ~5 min build):
   relaxed (`--check false`) since historical versions are routinely
   legal OWL but illegal OBO.
 
-`[Typedef]` frames (relations) are not yet tracked — only `[Term]`
-stanzas are indexed, which also limits what an OWL-converted,
-relation-heavy ontology like RO would yield today. See `OWL-PLAN.md`.
+Both `[Term]` and `[Typedef]` stanzas are tracked, so relation
+ontologies like RO index meaningfully. (Caveat: fastobo drops
+qualifiers/comments on typedef clauses, so qualifier-only edits to
+relations aren't visible as events.)
 
 ## Try it
 

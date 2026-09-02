@@ -19,7 +19,10 @@ import pyarrow.parquet as pq
 # which schema an artifact was built with.
 #   1 — initial schema
 #   2 — events gained body/qualifiers/comment decomposition columns
-SCHEMA_VERSION = "2"
+#   3 — [Typedef] stanzas tracked alongside [Term]; the stored `predicate`
+#       columns renamed to `tag` (matching OBO-format terminology used
+#       everywhere above the storage layer)
+SCHEMA_VERSION = "3"
 
 
 class Operation(enum.StrEnum):
@@ -36,7 +39,7 @@ class Operation(enum.StrEnum):
 
 
 class ClauseRow(TypedDict):
-    predicate: str
+    tag: str
     value: str
 
 
@@ -74,7 +77,7 @@ class EventRow(TypedDict):
     term_id: str
     commit_seq: int
     sha: str
-    predicate: str
+    tag: str
     value: str
     operation: str
     body: str
@@ -96,7 +99,7 @@ class SkipRow(TypedDict):
     error: str
 
 
-_CLAUSE = pa.struct([("predicate", pa.string()), ("value", pa.string())])
+_CLAUSE = pa.struct([("tag", pa.string()), ("value", pa.string())])
 
 # For merge commits (typically GitHub PR merges), the sequence of commits on
 # the merged branch that landed as part of this merge. Each entry is
@@ -145,7 +148,7 @@ EVENTS = pa.schema(
         ("term_id", pa.string()),
         ("commit_seq", pa.int32()),
         ("sha", pa.string()),
-        ("predicate", pa.string()),
+        ("tag", pa.string()),
         ("value", pa.string()),
         ("operation", pa.string()),  # Operation value
         # Structural decomposition of `value`, captured at parse time from

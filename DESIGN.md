@@ -134,11 +134,17 @@ Chosen stack:
   commit message body).
 - **`releases`** — release tags mapped to commits: `tag`, `sha`, `date`, `commit_seq`.
   Enables "what changed between two releases".
-- **`term_snapshots`** — one row per (term, commit-where-it-changed):
+- **`term_snapshots`** — one row per (stanza, commit-where-it-changed),
+  covering both `[Term]` and `[Typedef]` frames (relations are history
+  too — for RO they're nearly the whole ontology; the id spaces don't
+  collide, so both share the `term_id` key). One caveat: fastobo
+  (0.14.x) drops trailing qualifiers and `!` comments on *typedef*
+  clauses, so qualifier-only edits to relations produce no events.
+  Columns:
   `term_id`, `commit_seq`, `sha`, `name`, `is_obsolete`, `replaced_by`,
-  `content_hash`, `clauses` (list<struct{predicate, value}> — canonical normalized
+  `content_hash`, `clauses` (list<struct{tag, value}> — canonical normalized
   frame), `frame_text` (canonical OBO serialization for exact reconstruction).
-- **`events`** — derived: `term_id`, `commit_seq`, `sha`, `predicate`, `value`,
+- **`events`** — derived: `term_id`, `commit_seq`, `sha`, `tag`, `value`,
   `operation` (add|remove), plus `value`'s structural decomposition — `body`,
   `qualifiers` (list), `comment` — captured from the live fastobo clause
   object at build time. `value` stays the primitive record; the decomposition
@@ -147,11 +153,10 @@ Chosen stack:
   running fastobo at all. Semantic events (term_created / term_obsoleted /
   term_merged) are just filtered views over this table.
 
-  Naming: the stored `predicate` columns (here and in `clauses`) predate a
-  vocabulary cleanup — everywhere above the storage layer (code, CLI, API, UI)
-  this field is called **tag**, matching OBO-format terminology (this is not
-  RDF). The column rename itself is deferred to the next schema bump so a pure
-  rename never forces a re-sync.
+  Naming: this field is called **tag** everywhere, matching OBO-format
+  terminology (this is not RDF). The stored columns were named `predicate`
+  through schema 2; schema 3 renamed them, riding the same bump that
+  introduced typedef tracking.
 - **`build_meta`** — schema version, generator version, source repo URL, source
   sha range (first/last `commit_seq`), obo path. Makes results deterministic and
   reproducible; supports incremental rebuilds.
@@ -467,9 +472,9 @@ single-threaded build (checksum match on a 12-commit slice).
    collapsed into one with a merged qualifier list). Now tractable given the
    fastobo-parsed body + qualifier sets; the missing piece is grouping
    events by body within a tag bucket before pairing.
-4. **Non-OBO serializations** — shipped for OWL edit files via
-   convert-to-OBO-first (see §4 above and `OWL-PLAN.md`). Remaining:
-   `[Typedef]` tracking (without which a relation ontology like RO
-   yields almost nothing) and its schema bump.
+4. **Non-OBO serializations** — shipped: OWL edit files via
+   convert-to-OBO-first (see §4 above), and `[Typedef]` tracking
+   (schema 3), so relation ontologies like RO index meaningfully.
+   See `OWL-PLAN.md` for measurements.
 5. **If size matters** — evaluate the keyframe + event-replay variant to
    shrink `term_snapshots`.

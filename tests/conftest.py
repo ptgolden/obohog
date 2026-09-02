@@ -107,6 +107,8 @@ def ofn_repo(tmp_path: Path) -> Path:
     * c0  TST:0000001 "test term"
     * c1  + TST:0000002 "second term", subclass of TST:0000001
     * c2  TST:0000001 renamed to "renamed term"
+    * c3  + object property TST:9000001 "part of thing", transitive
+          (converts to a [Typedef] stanza)
     """
     repo = tmp_path / "ofn-repo"
     repo.mkdir()
@@ -129,6 +131,16 @@ def ofn_repo(tmp_path: Path) -> Path:
     _write(repo, "onto.owl", _ofn(decl1, relabel1, decl2, label2, sub))
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "c2 rename label", date="2021-01-03T00:00:00+00:00")
+
+    decl_p = "Declaration(ObjectProperty(obo:TST_9000001))"
+    label_p = 'AnnotationAssertion(rdfs:label obo:TST_9000001 "part of thing")'
+    trans = "TransitiveObjectProperty(obo:TST_9000001)"
+    _write(
+        repo, "onto.owl",
+        _ofn(decl1, relabel1, decl2, label2, sub, decl_p, label_p, trans),
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c3 add relation", date="2021-01-04T00:00:00+00:00")
 
     return repo
 

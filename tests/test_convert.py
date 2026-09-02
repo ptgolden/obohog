@@ -222,7 +222,7 @@ def test_conversion_failure_skips_commit_and_folds_forward(obo_repo, tmp_path: P
     # convertible commit rather than being lost.
     events = pq.read_table(out / "events.parquet").to_pylist()
     synonym_adds = [
-        e for e in events if e["predicate"] == "synonym" and e["operation"] == "add"
+        e for e in events if e["tag"] == "synonym" and e["operation"] == "add"
     ]
     assert [e["commit_seq"] for e in synonym_adds] == [3]
 
@@ -281,7 +281,7 @@ def test_owl_history_end_to_end(ofn_repo, tmp_path: Path):
     names = [
         (e["commit_seq"], e["operation"], e["value"])
         for e in events
-        if e["term_id"] == "TST:0000001" and e["predicate"] == "name"
+        if e["term_id"] == "TST:0000001" and e["tag"] == "name"
     ]
     # Created at c0; label renamed (remove + add) at c2.
     assert sorted(names) == [
@@ -292,7 +292,7 @@ def test_owl_history_end_to_end(ofn_repo, tmp_path: Path):
     is_a = [
         (e["commit_seq"], e["operation"], e["body"])
         for e in events
-        if e["term_id"] == "TST:0000002" and e["predicate"] == "is_a"
+        if e["term_id"] == "TST:0000002" and e["tag"] == "is_a"
     ]
     # Created at c1. c2's rename of the *parent's* label also touches this
     # clause: ROBOT writes the target label as a `!` comment
@@ -304,6 +304,17 @@ def test_owl_history_end_to_end(ofn_repo, tmp_path: Path):
         (2, "remove", "TST:0000001"),
     ]
 
+    # c3's object property lands as a [Typedef] stanza, tracked like a term.
+    typedef = [
+        (e["commit_seq"], e["tag"], e["value"])
+        for e in events
+        if e["term_id"] == "TST:9000001" and e["operation"] == "add"
+    ]
+    assert sorted(typedef) == [
+        (3, "is_transitive", "true"),
+        (3, "name", "part of thing"),
+    ]
+
     # The parallel build (workers hit the now-warm conversion cache) must
     # match the serial one exactly.
     build_parallel(str(ofn_repo), "onto.owl", parallel_out, jobs=2, converter=converter)
@@ -311,7 +322,7 @@ def test_owl_history_end_to_end(ofn_repo, tmp_path: Path):
     # next sync reconverts its one seed blob from the clone.
     assert list((tmp_path / "cache").glob("*.obo")) == []
     ds, dp = HistoryDB(serial_out), HistoryDB(parallel_out)
-    cols = "term_id, commit_seq, operation, predicate, value"
+    cols = "term_id, commit_seq, operation, tag, value"
     q = f"SELECT {cols} FROM events"
     assert sorted(ds.con.execute(q).fetchall()) == sorted(dp.con.execute(q).fetchall())
     ds.close()

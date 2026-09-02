@@ -89,6 +89,40 @@ def test_describe_parse_failure_strips_batch_location():
     assert describe_parse_failure(RuntimeError("")) == "RuntimeError"
 
 
+TYPEDEF = "[Typedef]\nid: part_of\nname: part of\nis_transitive: true\n"
+
+
+def test_split_document_tracks_typedef_stanzas():
+    context, stanzas = split_document(_doc(TERM_A, TYPEDEF))
+    assert set(stanzas) == {"MONDO:0000001", "part_of"}
+    assert b"[Typedef]" not in context
+
+
+def test_document_state_tracks_typedefs():
+    state = DocumentState()
+    d1 = state.apply(_doc(TERM_A, TYPEDEF))
+    assert {t.term.term_id for t in d1.changed} == {"MONDO:0000001", "part_of"}
+
+    edited = TYPEDEF + "xref: BFO:0000050\n"
+    d2 = state.apply(_doc(TERM_A, edited))
+    assert [t.term.term_id for t in d2.changed] == ["part_of"]
+    (delta,) = d2.changed
+    assert [(c.tag, c.value) for c in delta.added] == [("xref", "BFO:0000050")]
+    assert delta.removed == []
+
+
+def test_typedef_qualifier_edits_are_invisible():
+    # Known fastobo limitation (0.14.x): typedef clause objects drop trailing
+    # qualifiers and `!` comments, so a qualifier-only edit to a typedef
+    # clause changes no canonical clause — no event, no snapshot. If this
+    # test starts failing, fastobo gained typedef qualifiers: remove the
+    # limitation note in obo.py and celebrate the extra fidelity.
+    state = DocumentState()
+    state.apply(_doc("[Typedef]\nid: part_of\nxref: BFO:0000050\n"))
+    d = state.apply(_doc('[Typedef]\nid: part_of\nxref: BFO:0000050 {source="a"}\n'))
+    assert d.changed == [] and d.failed == []
+
+
 def test_clause_delta_reports_addition():
     before = parse_terms(_doc(TERM_A))["MONDO:0000001"].clauses
     after = parse_terms(_doc(TERM_A_SYN))["MONDO:0000001"].clauses

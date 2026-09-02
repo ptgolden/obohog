@@ -175,7 +175,7 @@ def _wrap_parsed(body: str, qualifiers, comment: str | None) -> ParsedValue:
 # row mapping can't drift apart.
 _CHANGE_COLUMNS = """c.commit_seq, c.committed_date, c.sha, c.author_name,
        c.pr_number, c.message,
-       e.operation, e.predicate, e.value,
+       e.operation, e.tag, e.value,
        c.branch_commits, c.snapshot_url,
        e.body, e.qualifiers, e.comment"""
 
@@ -326,7 +326,7 @@ class HistoryDB:
         where = "e.term_id = ?"
         params: list[object] = [term_id]
         if tag is not None:
-            where += " AND e.predicate = ?"
+            where += " AND e.tag = ?"
             params.append(tag)
         rows = self.con.execute(
             f"""
@@ -334,7 +334,7 @@ class HistoryDB:
             FROM events e
             JOIN commits c USING (commit_seq)
             WHERE {where}
-            ORDER BY c.commit_seq, e.operation, e.predicate, e.value
+            ORDER BY c.commit_seq, e.operation, e.tag, e.value
             """,
             params,
         ).fetchall()
@@ -391,7 +391,7 @@ class HistoryDB:
         ).fetchone()
         if row is None:
             return []
-        return [(c["predicate"], c["value"]) for c in row[0]]
+        return [(c["tag"], c["value"]) for c in row[0]]
 
     def commit_events(
         self,
@@ -406,9 +406,9 @@ class HistoryDB:
         (whose shas reference nothing) are addressed by seq.
 
         Returns ``(head, events)``. ``head`` is a ``Change`` whose commit-level
-        fields describe the matched commit (its operation/predicate/value are
+        fields describe the matched commit (its operation/tag/value are
         empty placeholders — the CLI uses it purely for the ``sha/date/PR/message``
-        header). ``events`` is ordered by ``(term_id, operation, predicate, value)``
+        header). ``events`` is ordered by ``(term_id, operation, tag, value)``
         so ``groupby(events, key=term_id)`` gives per-term event lists directly
         consumable by :func:`obohog.render.pair_events`. Optionally
         restricted to term IDs with a given CURIE prefix via ``namespace``;
@@ -448,13 +448,13 @@ class HistoryDB:
             params.append(after)
         rows = self.con.execute(
             f"""
-            SELECT e.term_id, s.name, e.operation, e.predicate, e.value,
+            SELECT e.term_id, s.name, e.operation, e.tag, e.value,
                    e.body, e.qualifiers, e.comment
             FROM events e
             LEFT JOIN term_snapshots s
               ON s.term_id = e.term_id AND s.commit_seq = e.commit_seq
             WHERE {where}
-            ORDER BY e.term_id, e.operation, e.predicate, e.value
+            ORDER BY e.term_id, e.operation, e.tag, e.value
             """,
             params,
         ).fetchall()
@@ -620,7 +620,7 @@ class HistoryDB:
             where += " AND e.term_id = ?"
             params.append(f.term_id)
         if f.tag is not None:
-            where += " AND e.predicate = ?"
+            where += " AND e.tag = ?"
             params.append(f.tag)
         if f.since_seq is not None:
             where += " AND e.commit_seq >= ?"
@@ -655,7 +655,7 @@ class HistoryDB:
         last operation is an add — the clause is present at HEAD. The
         arg_max can't tie because extraction diffs snapshots and so
         never emits an add and a remove of the identical
-        ``(term, predicate, value)`` in one commit.
+        ``(term, tag, value)`` in one commit.
         """
         parts: list[str] = []
         params: list[object] = []
@@ -667,7 +667,7 @@ class HistoryDB:
             select = f"SELECT e.term_id FROM events e WHERE {where}"
             if clause.quantifier == "now":
                 select += (
-                    " GROUP BY e.term_id, e.predicate, e.value"
+                    " GROUP BY e.term_id, e.tag, e.value"
                     " HAVING arg_max(e.operation, e.commit_seq) = 'add'"
                 )
             parts.append(select)
@@ -685,7 +685,7 @@ class HistoryDB:
     ) -> Iterator[TermChange]:
         """Stream ``TermChange`` rows for a WHERE over events, in render order.
 
-        Rows are ordered ``(term_id, commit_seq, operation, predicate,
+        Rows are ordered ``(term_id, commit_seq, operation, tag,
         value)`` so grouping-by-term-then-commit feeds the render pipeline
         directly — and so ``(term_id, commit_seq)`` works as a resume
         cursor for paged consumers. DuckDB produces sorted results
@@ -727,8 +727,8 @@ class HistoryDB:
                 where = f"({where}) AND e.commit_seq {cmp} ?"
                 params = [*params, int(after)]
         order_by = {
-            "term": f"e.term_id, c.commit_seq {direction}, e.operation, e.predicate, e.value",
-            "date": f"c.commit_seq {direction}, e.term_id, e.operation, e.predicate, e.value",
+            "term": f"e.term_id, c.commit_seq {direction}, e.operation, e.tag, e.value",
+            "date": f"c.commit_seq {direction}, e.term_id, e.operation, e.tag, e.value",
         }[order]
         cur = self.con.execute(
             f"""
@@ -1067,8 +1067,8 @@ class HistoryDB:
         tags = [
             row[0]
             for row in self.con.execute(
-                "SELECT predicate FROM events"
-                " GROUP BY predicate ORDER BY predicate"
+                "SELECT tag FROM events"
+                " GROUP BY tag ORDER BY tag"
             ).fetchall()
         ]
         namespaces = [

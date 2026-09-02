@@ -276,7 +276,7 @@ def _snapshot_row(version: FileVersion, term: TermState) -> model.SnapshotRow:
         "name": name,
         "is_obsolete": is_obsolete,
         "content_hash": term.content_hash,
-        "clauses": [{"predicate": c.tag, "value": c.value} for c in term.clauses],
+        "clauses": [{"tag": c.tag, "value": c.value} for c in term.clauses],
     }
 
 
@@ -291,7 +291,7 @@ def _event_rows(
             "term_id": term_id,
             "commit_seq": version.commit.seq,
             "sha": version.commit.sha,
-            "predicate": clause.tag,
+            "tag": clause.tag,
             "value": clause.value,
             "operation": str(operation),
             "body": clause.parsed.body,
