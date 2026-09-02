@@ -32,9 +32,9 @@ file = "src/ontology/pato-edit.obo"
 # The tracked file is an OWL serialization (functional syntax, RDF/XML, …)
 # rather than OBO. Each version is converted to OBO with ROBOT before
 # indexing — install `robot` on PATH or set ROBOT_JAR=/path/to/robot.jar
-# in .env (http://robot.obolibrary.org). Conversions are cached per blob
-# under {storage}/{name}/converted during a build, then pruned to the
-# latest one, so only new commits ever pay the ~1 s conversion cost.
+# in .env (http://robot.obolibrary.org). Each version pays a ~1 s
+# conversion; results are cached per blob under
+# {storage}/{name}/converted during the build and cleaned up after.
 # Import declarations are stripped: obohog tracks the edit file's own
 # axioms, not its import closure.
 [source.cl]

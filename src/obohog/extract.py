@@ -413,9 +413,9 @@ def build_parallel(
     # After build_meta commits: pure layout work, a failed compaction
     # leaves a valid (merely uncompacted) artifact.
     compact_artifact(out)
-    # The conversion cache has done its within-build job; keep only the
-    # last built blob's conversion (the next incremental sync's seed).
-    converter.prune(keep={full[-1].blob_oid} if full else set())
+    # The conversion cache has done its within-build job; empty it. The
+    # next sync reconverts what it needs (one seed blob) from the clone.
+    converter.prune()
     return report
 
 

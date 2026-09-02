@@ -38,7 +38,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
+from typing import Callable, Protocol
 
 from .settings import ObohogSettings, get_settings
 
@@ -65,7 +65,7 @@ class Converter(Protocol):
 
     def convert(self, oid: str, read: Callable[[], bytes]) -> bytes: ...
 
-    def prune(self, keep: Iterable[str]) -> None: ...
+    def prune(self) -> None: ...
 
 
 def _java_env() -> dict[str, str]:
@@ -93,7 +93,7 @@ class IdentityConverter:
     def convert(self, oid: str, read: Callable[[], bytes]) -> bytes:
         return read()
 
-    def prune(self, keep: Iterable[str]) -> None:
+    def prune(self) -> None:
         pass
 
 
@@ -182,25 +182,21 @@ class RobotConverter:
             if out_path.exists():
                 out_path.unlink(missing_ok=True)
 
-    def prune(self, keep: Iterable[str]) -> None:
-        """Drop cached conversions except the ``keep`` blob OIDs.
+    def prune(self) -> None:
+        """Empty the cache. Called after a successful build.
 
-        Called after a successful build. The cache's job is within-build
-        memoization — chunk seeds and rebuild resumes — not permanent
-        storage: kept whole it grows a file per commit forever (~1 GB for
-        CL's history), while the next incremental sync needs exactly one
-        old conversion, the last built commit's blob. The cost is that a
-        rare same-converter ``--rebuild`` reconverts history. Also sweeps
-        temp files a crashed conversion may have left behind.
+        The cache's job is strictly within-build memoization — chunk
+        seeds shared across workers, rebuild resumes — not permanent
+        storage: kept whole it grows a file per commit forever (~1 GB
+        for CL's history), and nothing between syncs needs it.
+        Correctness never depends on the cache; any future read that
+        misses (including the next incremental's one seed blob)
+        reconverts from the clone, deterministically, in ~1 s. Also
+        sweeps temp files a crashed conversion may have left behind.
         """
-        keep_names = {f"{oid}.obo" for oid in keep}
-        # "*.obo" also matches orphaned "<oid>.<pid>.out.obo" temp files;
-        # their names are never in keep_names, so they're swept here too.
-        for path in self._cache_dir.glob("*.obo"):
-            if path.name not in keep_names:
+        for pattern in ("*.obo", "*.in.owl"):
+            for path in self._cache_dir.glob(pattern):
                 path.unlink(missing_ok=True)
-        for path in self._cache_dir.glob("*.in.owl"):
-            path.unlink(missing_ok=True)
 
 
 # A self-closing or one-line RDF/XML owl:imports element.
