@@ -192,7 +192,7 @@ def lifecycle_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
     Exercises term-set ("has ever / now") membership: a matching value
     removed and never re-added (ever but not now), one removed then
     re-added (both), xrefs with their own lifecycle for intersection
-    tests, and a non-MONDO term for namespace narrowing.
+    tests, and a non-MONDO term for prefix narrowing.
 
     * c0  T1 alpha + synonym "diabetes mellitus"; T2 beta + xref DOID:9
     * c1  T1 synonym removed; T3 gamma created with synonym
@@ -404,7 +404,7 @@ def wide_commits_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="session")
 def renamed_ns_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A repo whose namespace was renamed wholesale mid-history (TBD → MONDO).
+    """A repo whose prefix was renamed wholesale mid-history (TBD → MONDO).
 
     * c0  TBD:0000001 "alpha" (is_a TBD:0000002), TBD:0000002 "beta"
     * c1  same terms, ids and the is_a reference rewritten to MONDO:;
@@ -412,7 +412,7 @@ def renamed_ns_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
           the rename)
     * c2  MONDO:0000002 gains an xref (ordinary post-rename history)
 
-    Built with ``namespace_map={"TBD": "MONDO"}`` each term should be one
+    Built with ``prefix_map={"TBD": "MONDO"}`` each term should be one
     continuous identity across all three commits.
     """
     repo = tmp_path_factory.mktemp("renamedns") / "repo"

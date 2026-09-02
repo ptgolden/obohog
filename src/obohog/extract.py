@@ -96,7 +96,7 @@ def _extract_snapshot_url(message: str) -> str | None:
 
 def extract(
     src: GitSource, path: str, out_dir: Path, *, limit: int | None = None,
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
 ) -> BuildReport:
     """Build an artifact under ``out_dir`` from ``path``'s history in ``src``.
@@ -109,7 +109,7 @@ def extract(
         versions = versions[-limit:]
     return build(
         versions, src.read_blob, out_dir, source_path=path,
-        tags=src.read_tags(), namespace_map=namespace_map, converter=converter,
+        tags=src.read_tags(), prefix_map=prefix_map, converter=converter,
     )
 
 
@@ -120,7 +120,7 @@ def build(
     *,
     source_path: str,
     tags: Iterable[TagRef] = (),
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
     full_parse: bool = False,
 ) -> BuildReport:
@@ -131,7 +131,7 @@ def build(
     events: list[dict] = []
     skipped: list[dict] = []
 
-    state = DocumentState(namespace_map, full_parse)
+    state = DocumentState(prefix_map, full_parse)
     seqs: list[int] = []
     seq_dates: list[tuple[int, object]] = []  # (seq, naive-UTC date) for tag mapping
     for version in versions:
@@ -168,7 +168,7 @@ def build(
     _write_build_meta(
         Path(out_dir), source_path=source_path,
         first=seqs[0] if seqs else None, last=seqs[-1] if seqs else None,
-        n=len(seqs), namespace_map=namespace_map,
+        n=len(seqs), prefix_map=prefix_map,
         converter_id=converter.converter_id,
     )
 
@@ -308,17 +308,17 @@ def _version() -> str:
     return __version__
 
 
-def _nsmap_json(namespace_map: "Mapping[str, str] | None") -> str | None:
+def _prefix_map_json(prefix_map: "Mapping[str, str] | None") -> str | None:
     """The map's canonical JSON form (sorted keys), None when empty —
     the representation stored in build_meta and compared on resume."""
-    if not namespace_map:
+    if not prefix_map:
         return None
-    return json.dumps(dict(namespace_map), sort_keys=True)
+    return json.dumps(dict(prefix_map), sort_keys=True)
 
 
 def _write_build_meta(
     out: Path, *, source_path: str, first: int | None, last: int | None, n: int,
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter_id: str = "obo",
 ) -> None:
     """Record what the artifact now covers. ALWAYS the final write of a build.
@@ -336,7 +336,7 @@ def _write_build_meta(
         first_commit_seq=first,
         last_commit_seq=last,
         n_commits=n,
-        namespace_map=_nsmap_json(namespace_map),
+        prefix_map=_prefix_map_json(prefix_map),
         converter_id=converter_id,
     )
     model.write_table([asdict(meta)], model.BUILD_META, out, "build_meta")
@@ -354,7 +354,7 @@ def build_parallel(
     limit: int | None = None,
     progress: bool = False,
     update: bool = False,
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
     full_parse: bool = False,
 ) -> BuildReport:
@@ -393,7 +393,7 @@ def build_parallel(
     os.environ["GIT_NO_LAZY_FETCH"] = "1"
 
     plan = plan_build(
-        out, full, limit=limit, update=update, namespace_map=namespace_map,
+        out, full, limit=limit, update=update, prefix_map=prefix_map,
         converter_id=converter.converter_id,
     )
     if plan.resume is not None:
@@ -404,14 +404,14 @@ def build_parallel(
         report = _build_update(
             clone_path, obo_path, out, full, tags, plan.resume,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
-            namespace_map=namespace_map, converter=converter,
+            prefix_map=prefix_map, converter=converter,
             full_parse=full_parse,
         )
     else:
         report = _build_full(
             clone_path, obo_path, out, full[plan.offset:], tags,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
-            namespace_map=namespace_map, converter=converter,
+            prefix_map=prefix_map, converter=converter,
             full_parse=full_parse,
         )
     # After build_meta commits: pure layout work, a failed compaction
@@ -442,7 +442,7 @@ class BuildPlan:
 
 def plan_build(
     out: Path, full: list, *, limit: int | None, update: bool,
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter_id: str = "obo",
 ) -> BuildPlan:
     """Decide how a run over the walk ``full`` should treat the artifact at ``out``.
@@ -459,7 +459,7 @@ def plan_build(
             if (out / "commits.parquet").exists()
             else []
         )
-        resume = _validate_resume(meta, commit_rows, full, namespace_map, converter_id)
+        resume = _validate_resume(meta, commit_rows, full, prefix_map, converter_id)
         if resume is not None:
             mode = (
                 BuildMode.UP_TO_DATE
@@ -473,7 +473,7 @@ def plan_build(
 
 def _validate_resume(
     meta: "model.BuildMeta | None", commit_rows: list[dict], full: list,
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter_id: str = "obo",
 ) -> _ResumePlan | None:
     """Check that an artifact with this metadata can be extended by this walk.
@@ -487,7 +487,7 @@ def _validate_resume(
     """
     if meta is None or meta.schema_version != model.SCHEMA_VERSION:
         return None
-    if meta.namespace_map != _nsmap_json(namespace_map):
+    if meta.prefix_map != _prefix_map_json(prefix_map):
         # Term identity is baked in at extraction; a different mapping
         # means the existing rows are keyed under the wrong ids.
         return None
@@ -532,7 +532,7 @@ def _build_full(
     jobs: int | None,
     chunk_size: int | None,
     progress: bool,
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
     full_parse: bool = False,
 ) -> BuildReport:
@@ -550,7 +550,7 @@ def _build_full(
 
     results = _run_chunks(
         clone_path, windowed, out, chunks, jobs=jobs, progress=progress, total=n,
-        namespace_map=namespace_map, converter=converter, full_parse=full_parse,
+        prefix_map=prefix_map, converter=converter, full_parse=full_parse,
     )
 
     # Guarantee the core tables exist even if this (degenerate) build produced no
@@ -565,7 +565,7 @@ def _build_full(
         out, source_path=obo_path,
         first=windowed[0].commit.seq if windowed else None,
         last=windowed[-1].commit.seq if windowed else None,
-        n=n, namespace_map=namespace_map,
+        n=n, prefix_map=prefix_map,
         converter_id=converter.converter_id,
     )
 
@@ -590,7 +590,7 @@ def _build_update(
     jobs: int | None,
     chunk_size: int | None,
     progress: bool,
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
     full_parse: bool = False,
 ) -> BuildReport:
@@ -619,7 +619,7 @@ def _build_update(
     results = _run_chunks(
         clone_path, tail, out, chunks,
         jobs=jobs, progress=progress, total=n, prefix=f"inc-{last + 1:07d}-",
-        namespace_map=namespace_map, converter=converter, full_parse=full_parse,
+        prefix_map=prefix_map, converter=converter, full_parse=full_parse,
     )
 
     new_commit_rows = [_commit_row(v.commit) for v in new_versions]
@@ -641,7 +641,7 @@ def _build_update(
         out, source_path=obo_path,
         first=resume.meta.first_commit_seq,
         last=full[-1].commit.seq,
-        n=len(all_commits), namespace_map=namespace_map,
+        n=len(all_commits), prefix_map=prefix_map,
         converter_id=converter.converter_id,
     )
 
@@ -821,7 +821,7 @@ def _run_chunks(
     progress: bool,
     total: int,
     prefix: str = "",
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
     full_parse: bool = False,
 ) -> "list[ChunkResult]":
@@ -843,7 +843,7 @@ def _run_chunks(
                 pool.submit(
                     _build_chunk, clone_path, versions, str(out),
                     c.id, c.start, c.end, ticks, prefix,
-                    dict(namespace_map) if namespace_map else None,
+                    dict(prefix_map) if prefix_map else None,
                     converter, full_parse,
                 )
                 for c in chunks
@@ -895,7 +895,7 @@ def _build_chunk(
     end: int,
     ticks=None,
     prefix: str = "",
-    namespace_map: dict[str, str] | None = None,
+    prefix_map: dict[str, str] | None = None,
     converter: Converter | None = None,
     full_parse: bool = False,
 ) -> "ChunkResult":
@@ -912,7 +912,7 @@ def _build_chunk(
 
     converter = converter or IdentityConverter()
     src = GitSource(clone_path)
-    state = _seed_state(src, windowed, start, namespace_map, converter, full_parse)
+    state = _seed_state(src, windowed, start, prefix_map, converter, full_parse)
     writer = _PartWriter(Path(out_dir), chunk_id, prefix)
     skipped: list[dict] = []
 
@@ -1001,7 +1001,7 @@ class _PartWriter:
 
 def _seed_state(
     src: GitSource, windowed: list[FileVersion], start: int,
-    namespace_map: "Mapping[str, str] | None" = None,
+    prefix_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
     full_parse: bool = False,
 ) -> DocumentState:
@@ -1012,11 +1012,11 @@ def _seed_state(
     """
     converter = converter or IdentityConverter()
     if start == 0:
-        return DocumentState(namespace_map, full_parse)
+        return DocumentState(prefix_map, full_parse)
     seed = windowed[start - 1]
     try:
         blob = converter.convert(seed.blob_oid, lambda: src.read_blob(seed.blob_oid))
     except (GitError, ConversionError):
         # missing/unconvertible seed blob → first diff treats all as new
-        return DocumentState(namespace_map, full_parse)
-    return DocumentState.from_blob(blob, namespace_map, full_parse)
+        return DocumentState(prefix_map, full_parse)
+    return DocumentState.from_blob(blob, prefix_map, full_parse)

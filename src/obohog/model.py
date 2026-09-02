@@ -190,7 +190,7 @@ BUILD_META = pa.schema(
         ("n_commits", pa.int32()),
         # JSON object, sorted keys ({"TBD": "MONDO"}); None when no mapping.
         # Part of build identity: a changed map forces a full rebuild.
-        ("namespace_map", pa.string()),
+        ("prefix_map", pa.string()),
         # Identity of the OWL→OBO conversion the blobs went through ("obo"
         # for untranslated sources; see obohog.convert). Part of build
         # identity: a changed converter (e.g. a ROBOT upgrade that reorders
@@ -222,7 +222,7 @@ class BuildMeta:
     first_commit_seq: int | None
     last_commit_seq: int | None
     n_commits: int
-    namespace_map: str | None = None  # JSON, sorted keys; None = no mapping
+    prefix_map: str | None = None  # JSON, sorted keys; None = no mapping
     converter_id: str = "obo"  # see obohog.convert; "obo" = no conversion
 
 
@@ -246,8 +246,8 @@ def read_build_meta(artifact_dir: Path | str) -> BuildMeta | None:
         first_commit_seq=row["first_commit_seq"],
         last_commit_seq=row["last_commit_seq"],
         n_commits=row["n_commits"],
-        # Absent in artifacts built before namespace mapping existed.
-        namespace_map=row.get("namespace_map"),
+        # Absent in artifacts built before prefix mapping existed.
+        prefix_map=row.get("prefix_map"),
         # Absent in artifacts built before OWL conversion existed — all
         # of which were unconverted OBO.
         converter_id=row.get("converter_id") or "obo",

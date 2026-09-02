@@ -8,7 +8,7 @@
 {%- endfor %}
 {%- if view.next_cursor %}
 <div class="load-more"
-     hx-get="/{{ src }}/commits/{{ ref }}/terms?after={{ view.next_cursor | urlencode }}{% if namespace %}&namespace={{ namespace | urlencode }}{% endif %}{% if full %}&full=true{% endif %}"
+     hx-get="/{{ src }}/commits/{{ ref }}/terms?after={{ view.next_cursor | urlencode }}{% if prefix %}&prefix={{ prefix | urlencode }}{% endif %}{% if full %}&full=true{% endif %}"
      hx-trigger="revealed"
      hx-swap="outerHTML">
   <span class="dim">loading more…</span>

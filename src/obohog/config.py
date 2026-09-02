@@ -85,17 +85,17 @@ class _BaseSource(BaseModel):
     format: Literal["obo", "owl"] = "obo"
     # Term-id CURIE prefix canonicalization, e.g. {TBD = "MONDO"}: history
     # written under the old prefix indexes as the new one, so a wholesale
-    # namespace rename keeps one continuous identity per term. Applied at
+    # prefix rename keeps one continuous identity per term. Applied at
     # extraction — changing it triggers a full rebuild on the next sync.
-    namespace_map: dict[str, str] = {}
+    prefix_map: dict[str, str] = {}
 
-    @field_validator("namespace_map")
+    @field_validator("prefix_map")
     @classmethod
     def _prefixes_only(cls, value: dict[str, str]) -> dict[str, str]:
         for k, v in value.items():
             if not k or not v or ":" in k or ":" in v:
                 raise ValueError(
-                    f"namespace_map entries are CURIE prefixes ('TBD = "
+                    f"prefix_map entries are CURIE prefixes ('TBD = "
                     f"\"MONDO\"'), got {k!r} = {v!r}"
                 )
         return value

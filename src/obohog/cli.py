@@ -247,7 +247,7 @@ def source_sync(
     report = build_parallel(
         clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
         chunk_size=(chunk_size or None), limit=limit, progress=progress,
-        update=not rebuild, namespace_map=source.namespace_map or None,
+        update=not rebuild, prefix_map=source.prefix_map or None,
         converter=converter, full_parse=full_parse,
     )
     if report.mode is BuildMode.UP_TO_DATE:
@@ -382,7 +382,7 @@ def commit(
     sha: str = typer.Argument(..., help="Commit sha or unique prefix."),
     source: str = typer.Option(..., "--source", help="Configured source name."),
     config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
-    namespace: Optional[str] = typer.Option(
+    prefix: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
@@ -393,7 +393,7 @@ def commit(
 ):
     """Show what changed at one commit, structurally rendered per term."""
     db, style = _open_source(source, config)
-    head, events = db.commit_events(sha, namespace=namespace)
+    head, events = db.commit_events(sha, prefix=prefix)
     if head is None:
         console.print(f"[yellow]No indexed changes for commit[/] {sha}")
         db.close()
@@ -431,7 +431,7 @@ def diff(
     source: str = typer.Option(..., "--source", help="Configured source name."),
     config: Optional[Path] = typer.Option(None, "--config", help="Path to obohog.toml."),
     term: Optional[str] = typer.Option(None, help="Restrict to one term."),
-    namespace: Optional[str] = typer.Option(
+    prefix: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     full: bool = typer.Option(False, help="Do not truncate long values."),
@@ -442,7 +442,7 @@ def diff(
 ):
     """Show clause changes between two points, grouped by term and commit."""
     db, style = _open_source(source, config)
-    filters = RangeFilters(term_id=term, namespace=namespace)
+    filters = RangeFilters(term_id=term, prefix=prefix)
     with _query_errors():
         counts = db.range_counts(ref_a, ref_b, filters)
     if counts.events == 0:
@@ -472,7 +472,7 @@ def search(
     tag: Optional[str] = typer.Option(
         None, help="Restrict to one clause kind, e.g. xref."
     ),
-    namespace: Optional[str] = typer.Option(
+    prefix: Optional[str] = typer.Option(
         None, help="Restrict to terms whose CURIE prefix is PREFIX (e.g. MONDO)."
     ),
     since: Optional[str] = typer.Option(
@@ -539,7 +539,7 @@ def search(
             until_seq=(
                 db.resolve_bound(until, end=True) if until is not None else None
             ),
-            match=match, ignore_case=ignore_case, namespace=namespace,
+            match=match, ignore_case=ignore_case, prefix=prefix,
             has=tuple(parse_has_clause(h) for h in (has or ())),
         )
         # An invalid --regex pattern (in QUERY or a clause) surfaces here,

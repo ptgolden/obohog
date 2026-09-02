@@ -127,7 +127,7 @@ uv run obohog search   --source mondo "OMIM:609814"
 uv run obohog search   --source mondo "GARD:18551" --tag xref
 uv run obohog search   --source mondo "\bCML\b" --regex
 uv run obohog search   --source mondo "Huntington disease" --tag name --exact
-uv run obohog search   --source mondo "CML" --namespace MONDO
+uv run obohog search   --source mondo "CML" --prefix MONDO
 uv run obohog search   --source mondo "MONDO:MalaCards" --term MONDO:0012350
 
 # --since/--until take a ref (sha, tag, seq, HEAD) or a date, both ends

@@ -227,7 +227,7 @@ def test_get_source_empty_config_error_message(tmp_path: Path):
         cfg.get_source("mondo")
 
 
-def test_namespace_map_parses_and_defaults_empty(tmp_path: Path):
+def test_prefix_map_parses_and_defaults_empty(tmp_path: Path):
     cfg_path = _write(
         tmp_path / "obohog.toml",
         """
@@ -235,7 +235,7 @@ def test_namespace_map_parses_and_defaults_empty(tmp_path: Path):
         type = "git-file"
         repo = "https://github.com/monarch-initiative/mondo"
         file = "src/ontology/mondo-edit.obo"
-        namespace_map = { TBD = "MONDO" }
+        prefix_map = { TBD = "MONDO" }
 
         [source.pato]
         type = "git-file"
@@ -244,11 +244,11 @@ def test_namespace_map_parses_and_defaults_empty(tmp_path: Path):
         """,
     )
     cfg = load_config(cfg_path)
-    assert cfg.sources["mondo"].namespace_map == {"TBD": "MONDO"}
-    assert cfg.sources["pato"].namespace_map == {}
+    assert cfg.sources["mondo"].prefix_map == {"TBD": "MONDO"}
+    assert cfg.sources["pato"].prefix_map == {}
 
 
-def test_namespace_map_rejects_non_prefixes(tmp_path: Path):
+def test_prefix_map_rejects_non_prefixes(tmp_path: Path):
     cfg_path = _write(
         tmp_path / "obohog.toml",
         """
@@ -256,7 +256,7 @@ def test_namespace_map_rejects_non_prefixes(tmp_path: Path):
         type = "git-file"
         repo = "https://github.com/monarch-initiative/mondo"
         file = "mondo.obo"
-        namespace_map = { "TBD:0000001" = "MONDO" }
+        prefix_map = { "TBD:0000001" = "MONDO" }
         """,
     )
     with pytest.raises(ConfigError, match="CURIE prefixes"):

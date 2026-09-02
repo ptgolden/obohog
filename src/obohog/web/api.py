@@ -51,7 +51,7 @@ def releases(handle: Handle) -> list[service.ReleaseOut]:
 
 @router.get("/sources/{src}/facets")
 def facets(src: str, request: Request) -> service.FacetsOut:
-    """Distinct tag/namespace values in the source, for filter UIs."""
+    """Distinct tag/prefix values in the source, for filter UIs."""
     return request.app.state.registry.facets(src)
 
 
@@ -100,7 +100,7 @@ def diff(
     a: str,
     b: str,
     term: str | None = None,
-    namespace: str | None = None,
+    prefix: str | None = None,
     limit: int = Query(service.DEFAULT_PAGE, ge=1, le=service.MAX_PAGE),
     after: str | None = None,
     full: bool = False,
@@ -109,7 +109,7 @@ def diff(
     db, style = handle
     return service.diff(
         db, style, a, b,
-        term=term, namespace=namespace, limit=limit, after=after, full=full,
+        term=term, prefix=prefix, limit=limit, after=after, full=full,
     )
 
 
@@ -117,7 +117,7 @@ def diff(
 def commit(
     handle: Handle,
     sha: str,
-    namespace: str | None = None,
+    prefix: str | None = None,
     full: bool = False,
     limit: int = Query(service.DEFAULT_PAGE, ge=1, le=service.MAX_PAGE),
     after: str | None = None,
@@ -131,7 +131,7 @@ def commit(
     return _or_404(
         service.get_commit(
             db, style, sha,
-            namespace=namespace, full=full, limit=limit, after=after,
+            prefix=prefix, full=full, limit=limit, after=after,
         ),
         f"no indexed changes for commit {sha!r}",
     )

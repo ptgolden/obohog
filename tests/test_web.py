@@ -250,7 +250,7 @@ def test_unknown_pr_is_404(client):
 
 def test_facets_lists_distinct_filter_values(client):
     body = client.get("/api/v1/sources/onto/facets").json()
-    assert body == {"tags": ["name", "xref"], "namespaces": ["MONDO"]}
+    assert body == {"tags": ["name", "xref"], "prefixes": ["MONDO"]}
 
 
 def test_openapi_document_serves(client):
@@ -341,16 +341,16 @@ def test_search_page_renders_first_page_with_load_more(client):
 
 def test_search_form_blank_filters_do_not_filter(client):
     # The HTML form submits untouched fields as empty strings
-    # (?q=...&tag=&namespace=&term=) — they must mean "no filter",
+    # (?q=...&tag=&prefix=&term=) — they must mean "no filter",
     # not "match the empty string".
     r = client.get(
-        "/onto/search?q=SHARED&tag=&namespace=&term=&order=term"
+        "/onto/search?q=SHARED&tag=&prefix=&term=&order=term"
     )
     assert r.status_code == 200
     assert "MONDO:0000001" in r.text
     api = client.get(
         "/api/v1/sources/onto/search",
-        params={"q": "SHARED", "tag": "", "namespace": "", "term": ""},
+        params={"q": "SHARED", "tag": "", "prefix": "", "term": ""},
     ).json()
     assert len(api["sections"]) == 4
 
@@ -359,7 +359,7 @@ def test_search_form_offers_derived_filter_choices(client):
     r = client.get("/onto/search")
     assert '<select name="tag">' in r.text
     assert '<option value="xref">xref</option>' in r.text
-    assert '<select name="namespace">' in r.text
+    assert '<select name="prefix">' in r.text
     assert '<option value="MONDO">MONDO</option>' in r.text
 
 
@@ -400,7 +400,7 @@ def test_search_without_query_browses(client):
         "MONDO:0000001", "MONDO:0000002", "MONDO:0000003", "MONDO:0000004",
     ]
     # Blank form submit → browse; bare URL → just the form.
-    blank = client.get("/onto/search?q=&tag=&namespace=&term=")
+    blank = client.get("/onto/search?q=&tag=&prefix=&term=")
     assert "events across" in blank.text
     bare = client.get("/onto/search")
     assert "events across" not in bare.text
@@ -473,7 +473,7 @@ def test_registry_facets_cached_until_artifact_changes(
     registry = SourceRegistry(_config(tmp_path, paged_artifact))
     f1 = registry.facets("onto")
     assert f1.tags == ["name", "xref"]
-    assert f1.namespaces == ["MONDO"]
+    assert f1.prefixes == ["MONDO"]
     assert registry.facets("onto") is f1  # unchanged artifact → cached
 
     meta = paged_artifact / "build_meta.parquet"

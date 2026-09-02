@@ -598,42 +598,42 @@ def test_search_events_regex_ignore_case_combined(artifact: Path):
     assert insensitive[0].change.value == "DOID:4"
 
 
-def test_search_events_namespace_filter_keeps_matching_prefix(artifact: Path):
-    # The fixture has only MONDO: term_ids, so namespace="MONDO" is a no-op
+def test_search_events_prefix_filter_keeps_matching_prefix(artifact: Path):
+    # The fixture has only MONDO: term_ids, so prefix="MONDO" is a no-op
     # from a "which rows" perspective — but the SQL wire-up must be right.
     db = HistoryDB(artifact)
     unfiltered = db.search_events("cancer")
-    with_ns = db.search_events("cancer", SearchFilters(namespace="MONDO"))
+    with_ns = db.search_events("cancer", SearchFilters(prefix="MONDO"))
     db.close()
     assert with_ns == unfiltered
     assert len(with_ns) >= 1
 
 
-def test_search_events_namespace_filter_excludes_other_prefixes(artifact: Path):
+def test_search_events_prefix_filter_excludes_other_prefixes(artifact: Path):
     db = HistoryDB(artifact)
-    hits = db.search_events("cancer", SearchFilters(namespace="FOO"))
+    hits = db.search_events("cancer", SearchFilters(prefix="FOO"))
     db.close()
     assert hits == []
 
 
-def test_range_events_namespace_filter(artifact: Path):
+def test_range_events_prefix_filter(artifact: Path):
     db = HistoryDB(artifact)
     unfiltered = db.range_events("v1.0", "HEAD")
-    with_ns = db.range_events("v1.0", "HEAD", RangeFilters(namespace="MONDO"))
-    empty = db.range_events("v1.0", "HEAD", RangeFilters(namespace="FOO"))
+    with_ns = db.range_events("v1.0", "HEAD", RangeFilters(prefix="MONDO"))
+    empty = db.range_events("v1.0", "HEAD", RangeFilters(prefix="FOO"))
     db.close()
     assert with_ns == unfiltered
     assert empty == []
 
 
-def test_commit_events_namespace_filter(artifact: Path):
+def test_commit_events_prefix_filter(artifact: Path):
     db = HistoryDB(artifact)
     sha = duckdb.connect().execute(
         f"SELECT sha FROM read_parquet('{artifact}/commits.parquet') WHERE commit_seq = 4"
     ).fetchone()[0]
     head_a, events_a = db.commit_events(sha)
-    head_b, events_b = db.commit_events(sha, namespace="MONDO")
-    _, events_empty = db.commit_events(sha, namespace="FOO")
+    head_b, events_b = db.commit_events(sha, prefix="MONDO")
+    _, events_empty = db.commit_events(sha, prefix="FOO")
     db.close()
     assert head_a is not None and head_b is not None
     assert events_a == events_b
@@ -713,11 +713,11 @@ NSMAP = {"TBD": "MONDO"}
 def renamed_artifact(renamed_ns_repo: Path, tmp_path: Path) -> Path:
     out = tmp_path / "artifact"
     with GitSource(renamed_ns_repo) as src:
-        extract(src, "onto.obo", out, namespace_map=NSMAP)
+        extract(src, "onto.obo", out, prefix_map=NSMAP)
     return out
 
 
-def test_namespace_map_one_identity_across_rename(renamed_artifact: Path):
+def test_prefix_map_one_identity_across_rename(renamed_artifact: Path):
     db = HistoryDB(renamed_artifact)
     ids = {
         r[0] for r in
@@ -757,7 +757,7 @@ def test_namespace_map_one_identity_across_rename(renamed_artifact: Path):
     db.close()
 
 
-def test_namespace_map_state_reconstructs_written_id(renamed_artifact: Path):
+def test_prefix_map_state_reconstructs_written_id(renamed_artifact: Path):
     from obohog import service
 
     db = HistoryDB(renamed_artifact)
@@ -769,15 +769,15 @@ def test_namespace_map_state_reconstructs_written_id(renamed_artifact: Path):
     db.close()
 
 
-def test_namespace_map_parallel_build_matches_serial(
+def test_prefix_map_parallel_build_matches_serial(
     renamed_ns_repo: Path, tmp_path: Path
 ):
     single = tmp_path / "single"
     parallel = tmp_path / "parallel"
     with GitSource(renamed_ns_repo) as src:
-        extract(src, "onto.obo", single, namespace_map=NSMAP)
+        extract(src, "onto.obo", single, prefix_map=NSMAP)
     build_parallel(
-        str(renamed_ns_repo), "onto.obo", parallel, jobs=2, namespace_map=NSMAP
+        str(renamed_ns_repo), "onto.obo", parallel, jobs=2, prefix_map=NSMAP
     )
     ds, dp = HistoryDB(single), HistoryDB(parallel)
     ev_cols = "term_id, commit_seq, operation, tag, value"
@@ -786,24 +786,24 @@ def test_namespace_map_parallel_build_matches_serial(
     dp.close()
 
 
-def test_namespace_map_change_forces_full_rebuild(
+def test_prefix_map_change_forces_full_rebuild(
     renamed_ns_repo: Path, tmp_path: Path
 ):
     out = tmp_path / "artifact"
-    build_parallel(str(renamed_ns_repo), "onto.obo", out, namespace_map=NSMAP)
+    build_parallel(str(renamed_ns_repo), "onto.obo", out, prefix_map=NSMAP)
     # Same map → nothing to do; different (absent) map → the existing rows
     # are keyed under the wrong ids, so appending is off the table.
     same = build_parallel(
-        str(renamed_ns_repo), "onto.obo", out, update=True, namespace_map=NSMAP
+        str(renamed_ns_repo), "onto.obo", out, update=True, prefix_map=NSMAP
     )
     assert same.mode is BuildMode.UP_TO_DATE
     changed = build_parallel(
-        str(renamed_ns_repo), "onto.obo", out, update=True, namespace_map=None
+        str(renamed_ns_repo), "onto.obo", out, update=True, prefix_map=None
     )
     assert changed.mode is BuildMode.FULL
 
 
-def test_namespace_map_id_clause_supports_has_queries(renamed_artifact: Path):
+def test_prefix_map_id_clause_supports_has_queries(renamed_artifact: Path):
     # The as-written id is an ordinary clause, so the term-set machinery
     # gets "was ever / is currently spelled TBD" for free.
     from obohog.query import parse_has_clause

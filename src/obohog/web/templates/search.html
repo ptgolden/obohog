@@ -65,15 +65,15 @@
       {% if form and form.ignore_case %}checked{% endif %}> ignore case in text matches</label>
   </div>
   <div class="filters">
-    {% set picked_namespace = form.namespace if form else none %}
-    <label>namespace
-      <select name="namespace">
+    {% set picked_prefix = form.prefix if form else none %}
+    <label>prefix
+      <select name="prefix">
         <option value="">any</option>
-        {% for ns in facets.namespaces %}
-        <option value="{{ ns }}"{% if picked_namespace == ns %} selected{% endif %}>{{ ns }}</option>
+        {% for ns in facets.prefixes %}
+        <option value="{{ ns }}"{% if picked_prefix == ns %} selected{% endif %}>{{ ns }}</option>
         {% endfor %}
-        {% if picked_namespace and picked_namespace not in facets.namespaces %}
-        <option value="{{ picked_namespace }}" selected>{{ picked_namespace }}</option>
+        {% if picked_prefix and picked_prefix not in facets.prefixes %}
+        <option value="{{ picked_prefix }}" selected>{{ picked_prefix }}</option>
         {% endif %}
       </select>
     </label>

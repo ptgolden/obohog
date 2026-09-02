@@ -131,12 +131,12 @@ class RefNotFound(Exception):
 class RangeFilters:
     """Optional narrowings for range (diff) queries.
 
-    ``term_id`` restricts to one term; ``namespace`` to term IDs with the
+    ``term_id`` restricts to one term; ``prefix`` to term IDs with the
     given CURIE prefix (e.g. ``"MONDO"``).
     """
 
     term_id: str | None = None
-    namespace: str | None = None
+    prefix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,7 +154,7 @@ class SearchFilters:
     until_seq: int | None = None
     match: str = "substring"  # "substring" | "exact" | "regex"
     ignore_case: bool = False
-    namespace: str | None = None
+    prefix: str | None = None
     # Term-set predicates: restrict to terms satisfying every clause
     # (see :func:`parse_has_clause`). A term-axis narrowing — it picks
     # *whose* events are eligible; the other fields (and the query) pick
@@ -396,7 +396,7 @@ class HistoryDB:
     def commit_events(
         self,
         ref: str,
-        namespace: str | None = None,
+        prefix: str | None = None,
         after: str | None = None,
     ) -> tuple[Change | None, list[TermChange]]:
         """Full events for one commit, plus a Change-shaped commit header row.
@@ -411,7 +411,7 @@ class HistoryDB:
         header). ``events`` is ordered by ``(term_id, operation, tag, value)``
         so ``groupby(events, key=term_id)`` gives per-term event lists directly
         consumable by :func:`obohog.render.pair_events`. Optionally
-        restricted to term IDs with a given CURIE prefix via ``namespace``;
+        restricted to term IDs with a given CURIE prefix via ``prefix``;
         ``after`` is a term_id keyset cursor — only events for strictly
         later term IDs are returned (paged consumers resume with the last
         term they rendered).
@@ -440,9 +440,9 @@ class HistoryDB:
 
         where = "e.commit_seq = ?"
         params: list[object] = [commit_seq]
-        if namespace is not None:
+        if prefix is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
-            params.append(namespace)
+            params.append(prefix)
         if after is not None:
             where += " AND e.term_id > ?"
             params.append(after)
@@ -557,9 +557,9 @@ class HistoryDB:
         if f.term_id is not None:
             where += " AND e.term_id = ?"
             params.append(f.term_id)
-        if f.namespace is not None:
+        if f.prefix is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
-            params.append(f.namespace)
+            params.append(f.prefix)
         return where, params
 
     @staticmethod
@@ -586,7 +586,7 @@ class HistoryDB:
         one term, ``tag`` restricts to one clause kind (``xref``,
         ``is_a``, ...), ``since_seq``/``until_seq`` cut off commits
         outside ``[since_seq, until_seq]`` (resolve external refs or
-        dates via :meth:`resolve_bound` in the caller), ``namespace``
+        dates via :meth:`resolve_bound` in the caller), ``prefix``
         restricts to
         term IDs whose CURIE prefix is the given value (e.g. ``"MONDO"``).
 
@@ -628,9 +628,9 @@ class HistoryDB:
         if f.until_seq is not None:
             where += " AND e.commit_seq <= ?"
             params.append(f.until_seq)
-        if f.namespace is not None:
+        if f.prefix is not None:
             where += " AND starts_with(e.term_id, ? || ':')"
-            params.append(f.namespace)
+            params.append(f.prefix)
         if f.has:
             sub, sub_params = HistoryDB._has_subquery(f.has, f.ignore_case)
             where += f" AND e.term_id IN {sub}"
@@ -1056,12 +1056,12 @@ class HistoryDB:
         )
 
     def facets(self) -> tuple[list[str], list[str]]:
-        """Distinct ``(tags, namespaces)`` present in the events.
+        """Distinct ``(tags, prefixes)`` present in the events.
 
         Both are low-cardinality (a dozen-odd values even on millions of
         events) and ordered alphabetically, so filter UIs can offer them
         as controlled choices instead of free text. Namespace is the
-        CURIE prefix of ``term_id``, matching the ``namespace`` filters'
+        CURIE prefix of ``term_id``, matching the ``prefix`` filters'
         ``starts_with(term_id, ns || ':')`` semantics.
         """
         tags = [
@@ -1071,14 +1071,14 @@ class HistoryDB:
                 " GROUP BY tag ORDER BY tag"
             ).fetchall()
         ]
-        namespaces = [
+        prefixes = [
             row[0]
             for row in self.con.execute(
                 "SELECT split_part(term_id, ':', 1) AS ns FROM events"
                 " GROUP BY ns ORDER BY ns"
             ).fetchall()
         ]
-        return tags, namespaces
+        return tags, prefixes
 
     def releases(self) -> list[tuple[str, int, object]]:
         if not self._has_releases():

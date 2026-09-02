@@ -189,7 +189,7 @@ class TimelineOut(BaseModel):
 
 class StateOut(BaseModel):
     term_id: str
-    written_id: str  # the id as spelled in the file at this ref (namespace
+    written_id: str  # the id as spelled in the file at this ref (prefix
     # mapping can canonicalize it away from term_id — e.g. early-MONDO TBD:)
     ref: str
     commit_seq: int
@@ -237,14 +237,14 @@ class FacetsOut(BaseModel):
     """Distinct filter values present in a source, alphabetical."""
 
     tags: list[str]
-    namespaces: list[str]
+    prefixes: list[str]
 
 
 class SearchParams(BaseModel):
     """Everything a search request can say, validated once at the edge.
 
     ``q`` is optional like every other filter: absent means no text
-    constraint, so a request carrying only narrowings (tag, namespace,
+    constraint, so a request carrying only narrowings (tag, prefix,
     term, since/until) browses everything under them. ``since`` and
     ``until`` take a ref (sha, release tag, seq, HEAD) or a
     ``YYYY-MM-DD`` date, both ends inclusive.
@@ -253,7 +253,7 @@ class SearchParams(BaseModel):
     q: str | None = None
     term: str | None = None
     tag: str | None = None
-    namespace: str | None = None
+    prefix: str | None = None
     since: str | None = None
     until: str | None = None
     match: Literal["substring", "exact", "regex"] = "substring"
@@ -270,7 +270,7 @@ class SearchParams(BaseModel):
     has: list[str] = Field(default_factory=list)
 
     @field_validator(
-        "q", "term", "tag", "namespace", "since", "until", "after", mode="before"
+        "q", "term", "tag", "prefix", "since", "until", "after", mode="before"
     )
     @classmethod
     def _blank_is_absent(cls, value):
@@ -649,7 +649,7 @@ def get_state(db: HistoryDB, term_id: str, at: str) -> StateOut | None:
     clauses = db.term_at(term_id, seq)
     if not clauses:
         return None
-    # A synthetic id clause records the file's own spelling when namespace
+    # A synthetic id clause records the file's own spelling when prefix
     # mapping canonicalized it; it renders as the stanza's id line, not a
     # second clause.
     written_id = next((v for p, v in clauses if p == "id"), term_id)
@@ -700,7 +700,7 @@ def search(
         ),
         match=params.match,
         ignore_case=params.ignore_case,
-        namespace=params.namespace,
+        prefix=params.prefix,
         has=tuple(parse_has_clause(h) for h in params.has),
     )
     if params.q is not None:
@@ -826,13 +826,13 @@ def diff(
     ref_b: str,
     *,
     term: str | None = None,
-    namespace: str | None = None,
+    prefix: str | None = None,
     limit: int = DEFAULT_PAGE,
     after: str | None = None,
     full: bool = False,
 ) -> PageOut[TermSectionOut]:
     """One page of changes between two refs, term-major. Counts are exact."""
-    filters = RangeFilters(term_id=term or None, namespace=namespace or None)
+    filters = RangeFilters(term_id=term or None, prefix=prefix or None)
     counts = db.range_counts(ref_a, ref_b, filters)
     events = db.iter_range_events(ref_a, ref_b, filters, after=after or None)
     groups = render.pair_by_term_and_commit(events)
@@ -851,7 +851,7 @@ def get_commit(
     style: SourceStyle,
     ref: str,
     *,
-    namespace: str | None = None,
+    prefix: str | None = None,
     full: bool = False,
     limit: int | None = DEFAULT_PAGE,
     after: str | None = None,
@@ -861,11 +861,11 @@ def get_commit(
     ``terms`` is a window of at most ``limit`` term groups (giant commits
     touch tens of thousands); ``next_cursor`` is the last rendered
     term_id when more remain, fed back as ``after``. ``counts`` always
-    covers the whole commit (within ``namespace``), so headers can say
+    covers the whole commit (within ``prefix``), so headers can say
     "N terms changed" regardless of the window. None if the ref matches
     nothing.
     """
-    head, events = db.commit_events(ref, namespace=namespace, after=after)
+    head, events = db.commit_events(ref, prefix=prefix, after=after)
     if head is None:
         return None
     counts = db.search_counts(
@@ -873,7 +873,7 @@ def get_commit(
         SearchFilters(
             since_seq=head.commit_seq,
             until_seq=head.commit_seq,
-            namespace=namespace,
+            prefix=prefix,
         ),
     )
     terms: list[TermGroupOut] = []
@@ -923,5 +923,5 @@ def list_releases(db: HistoryDB) -> list[ReleaseOut]:
 
 
 def get_facets(db: HistoryDB) -> FacetsOut:
-    tags, namespaces = db.facets()
-    return FacetsOut(tags=tags, namespaces=namespaces)
+    tags, prefixes = db.facets()
+    return FacetsOut(tags=tags, prefixes=prefixes)

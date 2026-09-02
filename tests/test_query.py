@@ -150,9 +150,9 @@ def test_forks_query_concurrently(db):
 
 
 def test_facets_lists_distinct_values_alphabetically(db):
-    tags, namespaces = db.facets()
+    tags, prefixes = db.facets()
     assert tags == ["name", "xref"]
-    assert namespaces == ["MONDO"]
+    assert prefixes == ["MONDO"]
 
 
 def test_resolve_bound_dates(db):
@@ -269,7 +269,7 @@ def test_clauses_intersect(ldb):
 
 
 def test_membership_narrowings(ldb):
-    assert _members(ldb, "~diabetes", namespace="MONDO") == {T1, T3, T4}
+    assert _members(ldb, "~diabetes", prefix="MONDO") == {T1, T3, T4}
     assert _members(ldb, "~diabetes", term_id=T3) == {T3}
 
 

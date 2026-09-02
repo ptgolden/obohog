@@ -450,7 +450,7 @@ def render_state(term_id: str, at: str, clauses: list[tuple[str, str]]) -> None:
         console.print(f"[yellow]{term_id} has no snapshot at or before {at}[/]")
         return
     console.print(f"[bold cyan]{term_id}[/] as of {at}:")
-    # A synthetic id clause carries the file's own spelling when namespace
+    # A synthetic id clause carries the file's own spelling when prefix
     # mapping canonicalized it — it IS the id line, not a clause.
     written_id = next((v for t, v in clauses if t == "id"), term_id)
     console.print(Text(f"  id: {written_id}"))
