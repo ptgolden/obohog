@@ -96,6 +96,26 @@ Chosen stack:
 - The source URL and configured fields come from `obohog.toml` and are
   recorded in the built `build_meta`.
 
+### 4. Non-OBO serializations: convert to OBO at the loading seam
+- A source whose edit file is an OWL serialization (OFN, RDF/XML — e.g.
+  CL's `cl-edit.owl`) declares `format = "owl"`. Each version's blob is
+  converted to OBO by **ROBOT** (the only maintained implementation of
+  the official OWL↔OBO mapping) before it reaches `DocumentState`;
+  everything below the blob-read seam is unaware the source wasn't OBO.
+- Conversions run with `--check false` (historical versions are
+  routinely legal OWL but illegal OBO; fastobo parses such frames fine)
+  and with `Import(...)` declarations stripped first — the single-file
+  history model never fetches imported component files, and the edit
+  file's own axioms are what we track. Axioms with no OBO form fold
+  into an untracked `owl-axioms:` header line.
+- Results are cached per blob OID under `{storage}/{name}/converted`;
+  ROBOT's output is deterministic, so the diff-scoped stanza scan works
+  unchanged on converted text. `build_meta.converter_id` records the
+  ROBOT version; a mismatch on incremental sync forces a full rebuild
+  so a converter upgrade can't manufacture phantom diffs.
+- ROBOT is found on PATH or via `ROBOT_JAR` in `.env`; it's a sync-time
+  dependency only, and only for `format = "owl"` sources.
+
 ---
 
 ## Data model (Parquet schema)
@@ -268,6 +288,7 @@ obohog.toml.example          # example config; user copies to obohog.toml
 pyproject.toml                # deps: fastobo, duckdb, pyarrow, typer, rich, tqdm, pydantic
 src/obohog/
   config.py                   # obohog.toml loading + Source resolution (pydantic discriminated union)
+  convert.py                  # OWL→OBO conversion via ROBOT, cached per blob OID
   extract.py                  # walks the clone, parses OBO, writes Parquet
   gitsource.py                # blobless clone / rename-aware log walk / cat-file blob reader
   obo.py                      # frame normalization, canonical clause set, hashing
@@ -441,9 +462,9 @@ single-threaded build (checksum match on a 12-commit slice).
    collapsed into one with a merged qualifier list). Now tractable given the
    fastobo-parsed body + qualifier sets; the missing piece is grouping
    events by body within a tag bucket before pairing.
-4. **Non-OBO serializations** — OFN, RDF/XML, Turtle. Would require
-   abstracting the per-commit stanza scan and per-term parse behind a
-   format strategy interface; today's diff-scoped parse depends on OBO's
-   line-oriented `[Term]` stanzas.
+4. **Non-OBO serializations** — shipped for OWL edit files via
+   convert-to-OBO-first (see §4 above and `OWL-PLAN.md`). Remaining:
+   `[Typedef]` tracking (without which a relation ontology like RO
+   yields almost nothing) and its schema bump.
 5. **If size matters** — evaluate the keyframe + event-replay variant to
    shrink `term_snapshots`.

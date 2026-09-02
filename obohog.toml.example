@@ -28,6 +28,26 @@ type = "git-file"
 repo = "https://github.com/pato-ontology/pato"
 file = "src/ontology/pato-edit.obo"
 
+# ---- format = "owl" (any source type) ----
+# The tracked file is an OWL serialization (functional syntax, RDF/XML, …)
+# rather than OBO. Each version is converted to OBO with ROBOT before
+# indexing — install `robot` on PATH or set ROBOT_JAR=/path/to/robot.jar
+# in .env (http://robot.obolibrary.org). Conversions are cached per blob
+# under {storage}/{name}/converted, so only new commits pay the ~1 s
+# conversion cost. Import declarations are stripped: obohog tracks the
+# edit file's own axioms, not its import closure.
+[source.cl]
+type = "git-file"
+repo = "https://github.com/obophenotype/cell-ontology"
+file = "src/ontology/cl-edit.owl"
+format = "owl"
+
+[source.ecto]
+type = "git-file"
+repo = "https://github.com/EnvironmentOntology/environmental-exposure-ontology"
+file = "src/ontology/ecto-edit.owl"
+format = "owl"
+
 # ---- type = "github-release" ----
 # The ontology is published as GitHub Releases. obohog fetches each release,
 # materializes it into a synthetic git commit (author = release publisher,
@@ -54,7 +74,10 @@ type = "bioportal"
 acronym = "EXO"
 
 # Optional per-source overrides (any type):
-#   clone_dir = "/some/other/place"   # default: {storage}/{name}/clone
-#   db_dir    = "/some/other/place"   # default: {storage}/{name}/db
+#   clone_dir   = "/some/other/place" # default: {storage}/{name}/clone
+#   db_dir      = "/some/other/place" # default: {storage}/{name}/db
+#   convert_dir = "/some/other/place" # default: {storage}/{name}/converted
+#   format = "owl"                    # tracked file is OWL, convert first
+#                                     # (default "obo": no conversion)
 #   namespace_map = { OLD = "NEW" }   # canonicalize term-id CURIE prefixes
 #                                     # (changing it forces a full rebuild)

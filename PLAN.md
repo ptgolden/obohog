@@ -290,7 +290,7 @@ The web application should expose the same information available through the dow
 
 Longer term:
 
-* **Other OBO serializations** — OWL Functional Notation, RDF/XML, Turtle, JSON-LD. The current diff-scoped extraction depends on OBO's line-oriented `[Term]` stanzas; other formats would need format-specific stanza-equivalent parsers. See DESIGN.md's next-steps for details.
+* **Other OBO serializations** — shipped for OWL edit files (functional notation, RDF/XML): a source declares `format = "owl"` and each version is converted to OBO via ROBOT before extraction, cached per blob. Remaining: `[Typedef]` (relation) tracking, without which relation-centric ontologies like RO yield little. See DESIGN.md §4 and `OWL-PLAN.md`.
 * **Prefix migrations across renames** — for ontologies that changed CURIE prefix at some point (e.g. Mondo's `TBD:X` → `MONDO:X` in 2017), declare the mapping in the source's config so `obohog term MONDO:0000450` transparently includes the pre-rename history. Design in `2026-07-03-note.term-identity-across-renames.md`.
 * **Incremental artifact updates** — top of the queue. Right now `source sync` re-clones and rebuilds fully; the plan is to append new part-files instead.
 

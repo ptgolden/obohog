@@ -38,9 +38,18 @@ Working end-to-end on the full Mondo history (7,487 commits, ~5 min build):
   extra): an HTMX web UI and a JSON API at `/api/v1` sharing one typed
   service layer with the CLI, with keyset-cursor pagination.
 
-Only the OBO file format is supported today. Future serializations
-(OFN, RDF/XML, Turtle) would require abstracting the per-commit parse step;
-see the Non-goals section of `PLAN.md`.
+- `convert` — sources whose edit file is an OWL serialization (OFN,
+  RDF/XML) declare `format = "owl"` and are converted to OBO per
+  version via [ROBOT](http://robot.obolibrary.org) before indexing,
+  with conversions cached per blob. Needs `robot` on PATH or
+  `ROBOT_JAR` in `.env`. Import declarations are stripped (obohog
+  tracks the edit file's own axioms), and OBO structure checks are
+  relaxed (`--check false`) since historical versions are routinely
+  legal OWL but illegal OBO.
+
+`[Typedef]` frames (relations) are not yet tracked — only `[Term]`
+stanzas are indexed, which also limits what an OWL-converted,
+relation-heavy ontology like RO would yield today. See `OWL-PLAN.md`.
 
 ## Try it
 
@@ -59,6 +68,12 @@ file = "src/ontology/mondo-edit.obo"
 [source.pato]
 repo = "https://github.com/pato-ontology/pato"
 file = "src/ontology/pato-edit.obo"
+
+# An OWL-format edit file: converted to OBO via ROBOT at sync time.
+[source.cl]
+repo = "https://github.com/obophenotype/cell-ontology"
+file = "src/ontology/cl-edit.owl"
+format = "owl"
 ```
 
 Each source clones into `{storage}/{name}/clone` and builds its database at
