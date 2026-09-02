@@ -143,6 +143,15 @@ worth it (49→45 ms).
   overhead, not sort order.
 - `executemany` for passing a pair list to DuckDB (600ms for 2.5k
   rows); register an Arrow table instead.
+- Partitioning events by namespace (e.g. a MONDO file + an "other"
+  file, queries routed by the namespace filter): measured dead flat —
+  scoped match scan 37 ms on both layouts, unscoped 40 ms on both, and
+  the `starts_with` namespace predicate itself costs ~1 ms on a broad
+  scan. MONDO is already 87.8% of mondo's events (96.3% of snapshots),
+  and DuckDB evaluates the cheap dictionary-encoded term_id predicate
+  before touching the value column, so physical partitioning has
+  nothing left to skip. Defaulting the UI to the primary namespace is
+  therefore purely a product choice — no performance stakes either way.
 
 ## Deploy tuning (untested, check when the box exists)
 
