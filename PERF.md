@@ -131,6 +131,29 @@ table — 2.5k inserts cost 600 ms. `con.register()` an Arrow table
 (zero-copy, instant). Restricting the name join to page pairs is not
 worth it (49→45 ms).
 
+## Round 3: pairing is the tail cost (2026-09-02)
+
+A broad text query on vbo (`q=dog`, matches most values in a breed
+ontology) cost 2.46 s/page with the planned path — profiled to ~1.99 s
+of `pair_events`, which was ~185k `SequenceMatcher.ratio()` calls, 99%
+of them inside per-term `property_value` buckets (release commits
+rewrite dozens per term; the values are long URLs). Two facts found on
+the way: render.py already uses **cydifflib** (stdlib difflib would be
+~5× slower still — don't "simplify" that import away), and quick_ratio
+prefilters barely help at threshold 0.5 (ontology values share
+character distributions, the multiset bound passes almost everything).
+
+Fix (8cd46d9): block property_value pairing by the property's *local
+name* (survives prefix/IRI migrations like http://purl.org/dc/terms/
+source → terms:source → dcterms:source), pair pure respellings —
+value identical past the property token — by dict lookup, keep a
+leftover similarity round across blocks for renamed properties.
+Decision-identical on all 24,348 groups of two full real result sets;
+pairing 1.98→0.44 s, the dog page 2.46→0.98 s (~0.7 s once vbo is
+compacted). If pairing ever dominates again, the next candidates are a
+per-(term, commit) ops memo (groups are immutable) or extending the
+rest-of-value exact pass to other storm-prone tags.
+
 ## Measured dead ends (don't revisit without new evidence)
 
 - Dropping the `term_snapshots` LEFT JOIN: no gain (DuckDB handles it).
