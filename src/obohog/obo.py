@@ -323,16 +323,29 @@ class DocumentState:
       bytes change. A failing stanza lands in ``_raw`` but never in
       ``_terms``: it keeps its last good state and isn't re-attempted until
       its content changes again.
+
+    ``full_parse=True`` disables the byte-hash shortcut: every stanza is
+    parsed at every version. Emitted deltas are identical (unchanged
+    canonical content is still suppressed by ``content_hash``) — it exists
+    to validate the diff-scoped fast path, at full-parse cost. One visible
+    difference: a persistently failing stanza is re-reported at every
+    version instead of only when its bytes change.
     """
 
-    def __init__(self, namespace_map: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        namespace_map: Mapping[str, str] | None = None,
+        full_parse: bool = False,
+    ) -> None:
         self._terms: dict[str, TermState] = {}
         self._raw: dict[str, bytes] = {}
         self._namespace_map = namespace_map
+        self._full_parse = full_parse
 
     @classmethod
     def from_blob(
-        cls, blob: bytes, namespace_map: Mapping[str, str] | None = None
+        cls, blob: bytes, namespace_map: Mapping[str, str] | None = None,
+        full_parse: bool = False,
     ) -> "DocumentState":
         """Full state of one document version, for seeding a mid-walk start.
 
@@ -341,7 +354,7 @@ class DocumentState:
         (and re-reported) once at the start of each seeded walk rather
         than silently carried.
         """
-        state = cls(namespace_map)
+        state = cls(namespace_map, full_parse)
         context, stanzas = split_document(blob, namespace_map)
         parsed, _failed = parse_stanzas(context, stanzas, namespace_map)
         for term_id, term in parsed.items():
@@ -360,7 +373,12 @@ class DocumentState:
         """
         context, stanzas = split_document(blob, self._namespace_map)
         cur_hash = {mid: stanza_hash(s) for mid, s in stanzas.items()}
-        changed_ids = [mid for mid in stanzas if cur_hash[mid] != self._raw.get(mid)]
+        if self._full_parse:
+            changed_ids = list(stanzas)
+        else:
+            changed_ids = [
+                mid for mid in stanzas if cur_hash[mid] != self._raw.get(mid)
+            ]
         removed_ids = self._raw.keys() - stanzas.keys()
         parsed, failed = parse_stanzas(
             context, {mid: stanzas[mid] for mid in changed_ids},

@@ -122,6 +122,7 @@ def build(
     tags: Iterable[TagRef] = (),
     namespace_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
+    full_parse: bool = False,
 ) -> BuildReport:
     """Serial in-process build: the parallel path minus chunking and workers."""
     converter = converter or IdentityConverter()
@@ -130,7 +131,7 @@ def build(
     events: list[dict] = []
     skipped: list[dict] = []
 
-    state = DocumentState(namespace_map)
+    state = DocumentState(namespace_map, full_parse)
     seqs: list[int] = []
     seq_dates: list[tuple[int, object]] = []  # (seq, naive-UTC date) for tag mapping
     for version in versions:
@@ -355,6 +356,7 @@ def build_parallel(
     update: bool = False,
     namespace_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
+    full_parse: bool = False,
 ) -> BuildReport:
     """Build the artifact from a local clone using a pool of parsing workers.
 
@@ -403,12 +405,14 @@ def build_parallel(
             clone_path, obo_path, out, full, tags, plan.resume,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
             namespace_map=namespace_map, converter=converter,
+            full_parse=full_parse,
         )
     else:
         report = _build_full(
             clone_path, obo_path, out, full[plan.offset:], tags,
             jobs=jobs, chunk_size=chunk_size, progress=progress,
             namespace_map=namespace_map, converter=converter,
+            full_parse=full_parse,
         )
     # After build_meta commits: pure layout work, a failed compaction
     # leaves a valid (merely uncompacted) artifact.
@@ -530,6 +534,7 @@ def _build_full(
     progress: bool,
     namespace_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
+    full_parse: bool = False,
 ) -> BuildReport:
     """Build the artifact from scratch over ``windowed``."""
     converter = converter or IdentityConverter()
@@ -545,7 +550,7 @@ def _build_full(
 
     results = _run_chunks(
         clone_path, windowed, out, chunks, jobs=jobs, progress=progress, total=n,
-        namespace_map=namespace_map, converter=converter,
+        namespace_map=namespace_map, converter=converter, full_parse=full_parse,
     )
 
     # Guarantee the core tables exist even if this (degenerate) build produced no
@@ -587,6 +592,7 @@ def _build_update(
     progress: bool,
     namespace_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
+    full_parse: bool = False,
 ) -> BuildReport:
     """Append the walk's commits after ``resume.last`` to an existing artifact.
 
@@ -613,7 +619,7 @@ def _build_update(
     results = _run_chunks(
         clone_path, tail, out, chunks,
         jobs=jobs, progress=progress, total=n, prefix=f"inc-{last + 1:07d}-",
-        namespace_map=namespace_map, converter=converter,
+        namespace_map=namespace_map, converter=converter, full_parse=full_parse,
     )
 
     new_commit_rows = [_commit_row(v.commit) for v in new_versions]
@@ -817,6 +823,7 @@ def _run_chunks(
     prefix: str = "",
     namespace_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
+    full_parse: bool = False,
 ) -> "list[ChunkResult]":
     """Run ``_build_chunk`` over ``chunks`` in a spawn-based process pool."""
     # "spawn" (not fork): workers parse with fastobo's threaded runtime, and
@@ -837,7 +844,7 @@ def _run_chunks(
                     _build_chunk, clone_path, versions, str(out),
                     c.id, c.start, c.end, ticks, prefix,
                     dict(namespace_map) if namespace_map else None,
-                    converter,
+                    converter, full_parse,
                 )
                 for c in chunks
             ]
@@ -890,6 +897,7 @@ def _build_chunk(
     prefix: str = "",
     namespace_map: dict[str, str] | None = None,
     converter: Converter | None = None,
+    full_parse: bool = False,
 ) -> "ChunkResult":
     """Worker: apply ``windowed[start:end]`` to the document state, stream part-files.
 
@@ -904,7 +912,7 @@ def _build_chunk(
 
     converter = converter or IdentityConverter()
     src = GitSource(clone_path)
-    state = _seed_state(src, windowed, start, namespace_map, converter)
+    state = _seed_state(src, windowed, start, namespace_map, converter, full_parse)
     writer = _PartWriter(Path(out_dir), chunk_id, prefix)
     skipped: list[dict] = []
 
@@ -995,6 +1003,7 @@ def _seed_state(
     src: GitSource, windowed: list[FileVersion], start: int,
     namespace_map: "Mapping[str, str] | None" = None,
     converter: Converter | None = None,
+    full_parse: bool = False,
 ) -> DocumentState:
     """Document state as of the version before ``start``.
 
@@ -1003,11 +1012,11 @@ def _seed_state(
     """
     converter = converter or IdentityConverter()
     if start == 0:
-        return DocumentState(namespace_map)
+        return DocumentState(namespace_map, full_parse)
     seed = windowed[start - 1]
     try:
         blob = converter.convert(seed.blob_oid, lambda: src.read_blob(seed.blob_oid))
     except (GitError, ConversionError):
         # missing/unconvertible seed blob → first diff treats all as new
-        return DocumentState(namespace_map)
-    return DocumentState.from_blob(blob, namespace_map)
+        return DocumentState(namespace_map, full_parse)
+    return DocumentState.from_blob(blob, namespace_map, full_parse)

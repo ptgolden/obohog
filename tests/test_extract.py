@@ -53,6 +53,23 @@ def test_parallel_build_matches_single(obo_repo: Path, tmp_path: Path):
     dp.close()
 
 
+def test_full_parse_matches_diff_scoped(obo_repo: Path, tmp_path: Path):
+    # --full-parse re-parses every stanza at every version; emitted events
+    # and snapshots must be identical to the diff-scoped fast path.
+    fast = tmp_path / "fast"
+    full = tmp_path / "full"
+    build_parallel(str(obo_repo), OBO, fast, jobs=2)
+    build_parallel(str(obo_repo), OBO, full, jobs=2, full_parse=True)
+
+    df, dp = HistoryDB(fast), HistoryDB(full)
+    ev_cols = "term_id, commit_seq, operation, predicate, value"
+    sn_cols = "term_id, commit_seq, content_hash"
+    assert _multiset(df, "events", ev_cols) == _multiset(dp, "events", ev_cols)
+    assert _multiset(df, "term_snapshots", sn_cols) == _multiset(dp, "term_snapshots", sn_cols)
+    df.close()
+    dp.close()
+
+
 def test_chunk_size_does_not_change_output(obo_repo: Path, tmp_path: Path):
     # Many tiny chunks (seed at every boundary) must match the single-threaded build.
     single = tmp_path / "single"

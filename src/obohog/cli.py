@@ -219,6 +219,14 @@ def source_sync(
         False, "--rebuild",
         help="Rebuild the database from scratch instead of appending new commits.",
     ),
+    full_parse: bool = typer.Option(
+        False, "--full-parse",
+        help=(
+            "Parse every stanza at every version instead of only byte-changed "
+            "ones. Much slower, identical output — a validation mode for the "
+            "diff-scoped fast path."
+        ),
+    ),
 ):
     """Update a source's clone and bring its database up to date.
 
@@ -240,7 +248,7 @@ def source_sync(
         clone_path, source.tracked_path, source.db_dir, jobs=(jobs or None),
         chunk_size=(chunk_size or None), limit=limit, progress=progress,
         update=not rebuild, namespace_map=source.namespace_map or None,
-        converter=converter,
+        converter=converter, full_parse=full_parse,
     )
     if report.mode is BuildMode.UP_TO_DATE:
         console.print(
