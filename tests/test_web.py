@@ -224,6 +224,19 @@ def test_search_page_reports_query_time(client):
     assert re.search(r"· \d+ ms|· \d+\.\d s", html)
 
 
+def test_query_counts_bracket_candidates_and_found(client):
+    # A delta-filtered search shows the SQL upper bound as "candidate
+    # events" and, when the whole result fits the page, the exact
+    # rendered totals as a "found" footer — the CLI's Scanning/Found
+    # bracket. Browsing shows neither: its counts are already exact.
+    html = client.get("/onto/search?q=SHARED&order=newest").text
+    assert "candidate event" in html
+    assert re.search(r"found 4 events across\s+4 terms and\s+4 commits", html)
+    blank = client.get("/onto/search?q=&order=newest").text
+    assert "candidate event" not in blank
+    assert "found" not in blank
+
+
 def test_unknown_commit_is_404(client):
     assert (
         client.get("/api/v1/sources/onto/commits/abcdef9").status_code == 404

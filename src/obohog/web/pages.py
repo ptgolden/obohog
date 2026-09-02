@@ -103,6 +103,38 @@ def state_page(
     )
 
 
+def _found_counts(page) -> dict | None:
+    """Exact rendered totals — the CLI footer's "Found …" — or None.
+
+    Only when the whole result set landed on this one page, uncapped:
+    a cursor means more pages exist, and a capped section's hidden
+    remainder never rendered, so in both cases exact totals would need
+    draining the query. Counts events the way the CLI does (an edit is
+    its remove + its add: two).
+    """
+    if page.next_cursor is not None:
+        return None
+    events = 0
+    terms: set[str] = set()
+    commits: set[int] = set()
+    for s in page.sections:
+        if getattr(s, "more_terms", 0):
+            return None
+        if hasattr(s, "terms"):  # commit-major section
+            commits.add(s.commit.commit_seq)
+            for t in s.terms:
+                terms.add(t.term_id)
+                events += sum(2 if op.kind == "edit" else 1 for op in t.ops)
+        else:  # term-major section
+            terms.add(s.term_id)
+            for g in s.commits:
+                commits.add(g.commit.commit_seq)
+                events += sum(2 if op.kind == "edit" else 1 for op in g.ops)
+    if events == 0:
+        return None  # the empty-state line already says it
+    return {"events": events, "terms": len(terms), "commits": len(commits)}
+
+
 def _elapsed_text(seconds: float) -> str:
     """A human duration for the query-time note: ms under a second."""
     if seconds < 1:
@@ -191,6 +223,7 @@ def search_page(
         "params": None,
         "form": None,
         "page": None,
+        "found": None,
         "facets": request.app.state.registry.facets(src),
         "commit_noun": _commit_noun(style),
     }
@@ -203,9 +236,16 @@ def search_page(
         context["form"] = params
         context["params"] = sp
         t0 = time.perf_counter()
-        context["page"] = service.search(db, style, sp)
+        page = service.search(db, style, sp)
+        context["page"] = page
         context["elapsed"] = _elapsed_text(time.perf_counter() - t0)
         context["qs"] = _fragment_query_string(sp)
+        # The candidate counts are an upper bound when a query ran the
+        # delta filter; pair them with the exact "found" footer when the
+        # whole result completed here — the web twin of the CLI's
+        # "Scanning N candidate events …" / "Found M events" bracket.
+        if sp.q is not None and sp.after is None:
+            context["found"] = _found_counts(page)
     return templates.TemplateResponse(request, "search.html", context)
 
 

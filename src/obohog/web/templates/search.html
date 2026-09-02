@@ -99,15 +99,21 @@
 </form>
 
 {% if page %}
-{% if params.has and not params.q and params.order == 'term' %}
+{% if page.counts.approximate %}
+{# a delta-filtered search: these are the SQL scan's candidates — an
+   upper bound on what renders; the exact "found" footer below closes
+   the bracket when the whole result fits this page (the CLI's
+   "Scanning N candidate events …" / "Found M events" pair) #}
+<p class="dim">{{ "{:,}".format(page.counts.events) }} candidate event{{ 's' if page.counts.events != 1 }} across
+  {{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} and
+  {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}
+  · {{ elapsed }}</p>
+{% elif params.has and not params.q and params.order == 'term' %}
 <p class="dim">{{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} (full histories) —
   {{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
   {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}
   · {{ elapsed }}</p>
 {% else %}
-{# counts are the SQL scan's upper bound (paired edits whose delta doesn't
-   involve the query render nothing) — shown as a plain scale summary,
-   deliberately unqualified #}
 <p class="dim">{{ "{:,}".format(page.counts.events) }} event{{ 's' if page.counts.events != 1 }} across
   {{ "{:,}".format(page.counts.terms) }} term{{ 's' if page.counts.terms != 1 }} and
   {{ "{:,}".format(page.counts.commits) }} {{ commit_noun }}{{ 's' if page.counts.commits != 1 }}
@@ -116,5 +122,10 @@
 <div id="results">
   {% include 'partials/search_results.html' %}
 </div>
+{% if found %}
+<p class="dim">found {{ "{:,}".format(found.events) }} event{{ 's' if found.events != 1 }} across
+  {{ "{:,}".format(found.terms) }} term{{ 's' if found.terms != 1 }} and
+  {{ "{:,}".format(found.commits) }} {{ commit_noun }}{{ 's' if found.commits != 1 }}</p>
+{% endif %}
 {% endif %}
 {% endblock %}
